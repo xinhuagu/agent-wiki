@@ -82,7 +82,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "raw_read",
         description:
-          "Read a raw source document's content and metadata. Raw files are immutable — this is read-only.",
+          "Read a raw source document's content and metadata. Raw files are immutable — this is read-only. Text/SVG files return content as string; PDF files have text extracted automatically; other binary files (images, docx, etc.) return metadata only.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -380,13 +380,22 @@ async function handleTool(
     }
 
     case "raw_read": {
-      const result = wiki.rawRead(args.filename as string);
+      const result = await wiki.rawRead(args.filename as string);
       if (!result) return `Raw file not found: ${args.filename}`;
+      if (result.binary) {
+        return JSON.stringify({
+          meta: result.meta,
+          binary: true,
+          note: `Binary file (${result.meta?.mimeType ?? "unknown type"}, ${result.meta?.size != null ? result.meta.size + " bytes" : "unknown size"}). Content cannot be read as text. Use the file path directly if you need to process it.`,
+        }, null, 2);
+      }
+      const content = result.content!;
       return JSON.stringify({
         meta: result.meta,
-        content: result.content.length > 10000
-          ? result.content.slice(0, 10000) + "\n\n... (truncated, " + result.content.length + " chars total)"
-          : result.content,
+        binary: false,
+        content: content.length > 10000
+          ? content.slice(0, 10000) + "\n\n... (truncated, " + content.length + " chars total)"
+          : content,
       }, null, 2);
     }
 

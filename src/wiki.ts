@@ -374,18 +374,46 @@ _Chronological view of all knowledge in this wiki._
     return docs;
   }
 
-  /** Read a raw document's content. */
-  rawRead(filename: string): { content: string; meta: RawDocument | null } | null {
+  /** Read a raw document's content and metadata.
+   *  Text files return content as string.  SVG is treated as text (XML).
+   *  PDF files — text is extracted automatically via pdf-parse.
+   *  Other binary files (images, docx, etc.) return metadata only. */
+  async rawRead(filename: string): Promise<{ content: string | null; meta: RawDocument | null; binary: boolean } | null> {
     const fullPath = join(this.config.rawDir, filename);
     if (!existsSync(fullPath)) return null;
 
-    const content = readFileSync(fullPath, "utf-8");
     const metaPath = fullPath + ".meta.yaml";
     const meta = existsSync(metaPath)
       ? (yaml.load(readFileSync(metaPath, "utf-8")) as RawDocument)
       : null;
 
-    return { content, meta };
+    const mime = meta?.mimeType ?? guessMime(filename);
+    const isText = mime.startsWith("text/")
+      || mime === "application/json"
+      || mime === "application/xml"
+      || mime === "image/svg+xml";           // SVG is XML text
+
+    if (isText) {
+      const content = readFileSync(fullPath, "utf-8");
+      return { content, meta, binary: false };
+    }
+
+    // PDF — extract text via pdf-parse
+    if (mime === "application/pdf") {
+      try {
+        const text = await extractPdfText(fullPath);
+        return { content: text, meta, binary: false };
+      } catch (e: any) {
+        const stat = statSync(fullPath);
+        return {
+          content: null, meta, binary: true,
+          note: `PDF text extraction failed: ${e.message}. File size: ${formatBytes(stat.size)}.`,
+        } as any;
+      }
+    }
+
+    // Other binary files — metadata only
+    return { content: null, meta, binary: true };
   }
 
   /** Verify integrity of all raw files against their stored hashes. */
@@ -1320,6 +1348,15 @@ function listAllFiles(dir: string, root: string): string[] {
     }
   }
   return result.sort();
+}
+
+async function extractPdfText(filePath: string): Promise<string> {
+  const { PDFParse } = await import("pdf-parse");
+  const buf = readFileSync(filePath);
+  const pdf = new PDFParse({ data: new Uint8Array(buf) });
+  const result = await pdf.getText();
+  await pdf.destroy();
+  return result.text;
 }
 
 function guessMime(filename: string): string {

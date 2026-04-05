@@ -1,68 +1,138 @@
 # agent-wiki
 
-Structured Markdown knowledge base with MCP server. No LLM built in — your agent IS the LLM.
+[![CI](https://github.com/xinhuagu/agent-wiki-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/xinhuagu/agent-wiki-mcp/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
+[![MCP](https://img.shields.io/badge/protocol-MCP-blue)](https://modelcontextprotocol.io)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+
+A structured knowledge base that any AI agent can read, write, and maintain through the [Model Context Protocol](https://modelcontextprotocol.io). No LLM built in — your agent IS the LLM.
 
 ```
 npx agent-wiki
 ```
 
-## What is this?
+---
 
-A wiki engine implementing the "knowledge compilation" pattern — instead of retrieving fragments on every query (RAG), the agent incrementally builds and maintains a persistent wiki of compiled knowledge.
+## The Idea
 
-Three layers:
+Most AI systems treat knowledge as disposable. You ask a question, it retrieves some fragments, generates an answer, and everything is forgotten. Next time you ask, it starts from zero.
+
+agent-wiki takes a different approach: **knowledge compilation**. Instead of retrieving raw documents every time (RAG), the agent incrementally builds and maintains a persistent wiki — structured, interlinked, and continuously refined. Every interaction makes the knowledge base smarter.
+
+The key insight: **LLMs are better editors than search engines.** Let them curate, synthesize, and maintain knowledge over time, not just retrieve it on demand.
+
+### RAG vs Knowledge Compilation
+
+| | RAG | agent-wiki |
+|---|---|---|
+| **Approach** | Retrieve fragments at query time | Build and maintain compiled knowledge |
+| **Memory** | Stateless — forgets after each query | Persistent — knowledge accumulates |
+| **Quality** | Raw chunks, often noisy | Curated, structured, interlinked |
+| **Cost** | Embedding + retrieval every query | One-time compilation, free reads |
+| **Contradictions** | Invisible — buried in source docs | Detected automatically by lint |
+| **Source tracking** | Lost after retrieval | Full provenance chain (raw -> wiki) |
+
+## Architecture
+
+Three immutability layers, inspired by how compilers work:
 
 ```
-raw/     Immutable sources (downloaded files, write-once, SHA-256 verified)
-wiki/    Mutable knowledge (entity pages, synthesis pages, index, log, timeline)
-schemas/ Entity templates (person, concept, event, artifact, synthesis, ...)
+raw/      Immutable source documents (write-once, SHA-256 verified)
+            Papers, articles, web pages — the "source code" of knowledge
+
+wiki/     Mutable compiled knowledge (entity pages, synthesis, index)
+            Structured Markdown — the "compiled output"
+
+schemas/  Entity templates (person, concept, event, artifact, ...)
+            Consistent structure across all knowledge
 ```
 
+The agent reads from `raw/`, compiles understanding into `wiki/`, and the lint system ensures quality:
+
 ```
-┌─────────────────────────────────────┐
-│  Your Agent (Claude, GPT, etc.)     │
-│         │                           │
-│         │ MCP (stdio)               │
-│         ▼                           │
-│  ┌─────────────────────────┐        │
-│  │     agent-wiki           │        │
-│  │                          │        │
-│  │  RAW (immutable)         │        │
-│  │    raw_add / raw_read    │        │
-│  │    raw_list / raw_verify │        │
-│  │                          │        │
-│  │  WIKI (mutable)          │        │
-│  │    read / write / delete │        │
-│  │    search / lint         │        │
-│  │    synthesize            │        │
-│  │    rebuild_index         │        │
-│  │    rebuild_timeline      │        │
-│  └─────────────────────────┘        │
-└─────────────────────────────────────┘
+                  ┌──────────────────────────────────┐
+                  │     Your Agent                   │
+                  │     (Claude, GPT, Copilot, ...)  │
+                  └────────────┬─────────────────────┘
+                               │ MCP (stdio)
+                  ┌────────────▼─────────────────────┐
+                  │        agent-wiki                 │
+                  │                                   │
+                  │  ┌─────────┐  ┌───────────────┐  │
+                  │  │  raw/   │  │    wiki/       │  │
+                  │  │ (frozen)│──│  (compiled)    │  │
+                  │  └─────────┘  └───────┬───────┘  │
+                  │                       │          │
+                  │              ┌────────▼────────┐ │
+                  │              │     lint        │ │
+                  │              │ (self-checking) │ │
+                  │              └─────────────────┘ │
+                  └──────────────────────────────────┘
 ```
+
+## Key Features
+
+### Immutable Source Layer (`raw/`)
+
+- **Write-once** — raw files can never be modified or overwritten after creation
+- **SHA-256 integrity** — every file is hashed; corruption or tampering is detected
+- **Provenance tracking** — `.meta.yaml` sidecars record source URL, download time, description
+- **URL fetching** — `raw_fetch` downloads directly from URLs, with smart arXiv handling (`arxiv.org/abs/XXXX` auto-converts to PDF)
+- **Local file copy** — `raw_add` with `source_path` physically copies files into `raw/`
+
+### Mutable Knowledge Layer (`wiki/`)
+
+- **Structured Markdown** — YAML frontmatter (title, type, tags, sources) + Markdown body
+- **9 entity types** — person, concept, event, artifact, comparison, summary, how-to, note, synthesis
+- **Auto-classification** — heuristic classifier assigns entity type and suggests tags, zero LLM needed
+- **`[[wiki-links]]`** — interlink pages to build a knowledge graph
+- **Synthesis pages** — higher-order knowledge distilled from combining multiple pages
+- **Auto-timestamps** — `created` and `updated` managed automatically
+- **System pages** — index.md, log.md, timeline.md maintained by the engine
+
+### Self-Checking (`lint`)
+
+No human review needed. The lint system catches problems automatically:
+
+- **Contradictions** — conflicting dates, numbers, and claims across pages
+- **Orphan pages** — pages with no incoming links
+- **Broken links** — `[[page]]` references to non-existent pages
+- **Missing sources** — wiki claims not traceable to raw documents
+- **Stale content** — pages not updated beyond a configurable threshold
+- **Raw integrity** — SHA-256 re-verification of all source files
+- **Synthesis integrity** — checks that source pages of synthesis still exist
+
+### Workspace Separation
+
+Code and data live in separate directories. The tool is stateless; all state lives in the workspace:
+
+```yaml
+# .agent-wiki.yaml
+wiki:
+  workspace: /path/to/data    # all data goes here
+  path: wiki/
+  raw_path: raw/
+  schemas_path: schemas/
+```
+
+Workspace resolution priority: CLI `--workspace` > `AGENT_WIKI_WORKSPACE` env > config file > config root.
+
+### Auto-Classification
+
+Every `wiki_write` automatically classifies content if no type is specified:
+
+```
+Input:  "# YOLO Object Detection\n\nYOLO is a real-time detection model..."
+Output: { type: "concept", tags: ["yolo", "object-detection", "real-time"], confidence: 0.8 }
+```
+
+Pure heuristic — no LLM calls, no API keys, zero latency. Supports English and Chinese keywords.
 
 ## Setup
-
-Add to your agent's MCP config:
 
 ### Claude Code / AceClaw
 
 `~/.aceclaw/mcp-servers.json`:
-
-```json
-{
-  "mcpServers": {
-    "agent-wiki": {
-      "command": "npx",
-      "args": ["-y", "agent-wiki", "serve", "--wiki-path", "/path/to/config"]
-    }
-  }
-}
-```
-
-### With separate workspace (recommended)
-
-Keep code/config and data in separate directories:
 
 ```json
 {
@@ -75,77 +145,69 @@ Keep code/config and data in separate directories:
 }
 ```
 
-Or set `AGENT_WIKI_WORKSPACE` env var, or add `workspace` to `.agent-wiki.yaml`:
-
-```yaml
-wiki:
-  workspace: /path/to/data   # absolute, or relative to config root
-  path: wiki/
-  raw_path: raw/
-  schemas_path: schemas/
-```
-
-**Workspace resolution priority:** CLI `--workspace` > `AGENT_WIKI_WORKSPACE` env > config file `workspace` field > config root.
-
 ### Cursor / Windsurf / any MCP client
 
 Same pattern — `npx -y agent-wiki serve --wiki-path /path/to/config`.
 
-## MCP Tools
+### Claude Desktop
 
-### Raw Layer (Immutable)
+`claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "agent-wiki": {
+      "command": "npx",
+      "args": ["-y", "agent-wiki", "serve", "--wiki-path", "/path/to/config"]
+    }
+  }
+}
+```
+
+## MCP Tools (17 total)
+
+### Raw Layer — Immutable Sources
 
 | Tool | Description |
 |------|-------------|
-| `raw_add` | Add a source document (immutable, SHA-256 hashed, with .meta.yaml sidecar) |
+| `raw_add` | Add a source document (immutable, SHA-256 hashed, .meta.yaml sidecar) |
+| `raw_fetch` | Download from URL to raw/ (smart arXiv handling, auto-provenance) |
 | `raw_list` | List all raw documents with metadata |
 | `raw_read` | Read a raw document's content and metadata |
 | `raw_verify` | Verify integrity of all raw files (SHA-256 check) |
 
-### Wiki Layer (Mutable)
+### Wiki Layer — Compiled Knowledge
 
 | Tool | Description |
 |------|-------------|
 | `wiki_read` | Read a page (frontmatter + Markdown) |
-| `wiki_write` | Create or update a page (auto-timestamps) |
+| `wiki_write` | Create or update a page (auto-timestamps, auto-classify) |
 | `wiki_delete` | Delete a page (guards system pages) |
 | `wiki_list` | List pages, filter by type or tag |
-| `wiki_search` | Keyword search with relevance scoring |
+| `wiki_search` | Full-text keyword search with relevance scoring |
 | `wiki_lint` | Health checks: contradictions, orphans, broken links, integrity |
+| `wiki_classify` | Auto-classify content into entity type + suggest tags |
+| `wiki_synthesize` | Prepare context for knowledge distillation across pages |
 | `wiki_log` | Operation history with timestamps |
 | `wiki_init` | Initialize a new knowledge base |
 | `wiki_schemas` | List entity templates |
-| `wiki_rebuild_index` | Rebuild index.md (grouped by type with counts) |
+| `wiki_rebuild_index` | Rebuild index.md (grouped by type) |
 | `wiki_rebuild_timeline` | Rebuild timeline.md (chronological view) |
-| `wiki_synthesize` | Prepare context for knowledge distillation across pages |
-| `wiki_classify` | Auto-classify content into entity type + suggest tags (heuristic, no LLM) |
-| `wiki_config` | Show current workspace configuration (config root, workspace, data dirs) |
-
-## Self-Checking (Lint)
-
-The lint system detects problems without needing an LLM:
-
-- **Contradictions** — Detects conflicting dates, numbers, and claims across pages
-- **Orphan pages** — Pages with no incoming links
-- **Broken links** — `[[page]]` references to non-existent pages
-- **Missing sources** — Claims not traceable to raw documents
-- **Stale content** — Pages not updated beyond a configurable threshold
-- **Raw integrity** — SHA-256 verification of immutable source files
-- **Synthesis integrity** — Checks that source pages of synthesis still exist
+| `wiki_config` | Show current workspace configuration |
 
 ## Entity Types
 
-| Type | Use Case |
-|------|----------|
-| `person` | People profiles |
-| `concept` | Ideas, theories, definitions |
-| `event` | Things that happened |
-| `artifact` | Tools, papers, products |
-| `comparison` | Side-by-side analysis |
-| `summary` | Document summaries |
-| `how-to` | Procedures and guides |
-| `note` | Anything freeform |
-| `synthesis` | Distilled knowledge from multiple pages |
+| Type | Use Case | Example |
+|------|----------|---------|
+| `person` | People profiles | Researchers, engineers, historical figures |
+| `concept` | Ideas and definitions | YOLO, attention mechanism, mutex |
+| `event` | Things that happened | Conference talks, releases, incidents |
+| `artifact` | Created things | Papers, tools, models, datasets |
+| `comparison` | Side-by-side analysis | YOLOv8 vs YOLOv9, PyTorch vs TensorFlow |
+| `summary` | Document summaries | Paper summaries, article digests |
+| `how-to` | Procedures and guides | Setup guides, deployment steps |
+| `note` | Freeform knowledge | Anything that doesn't fit other types |
+| `synthesis` | Distilled knowledge | Insights from combining multiple pages |
 
 ## Page Format
 
@@ -166,7 +228,7 @@ You Only Look Once — real-time object detection.
 Related: [[comparison-detectors]], [[person-redmon]]
 ```
 
-Synthesis pages add `derived_from`:
+Synthesis pages track their derivation:
 
 ```markdown
 ---
@@ -176,15 +238,30 @@ derived_from: [concept-yolo.md, concept-ssd.md, concept-rcnn.md]
 ---
 ```
 
+## CLI
+
+```bash
+npx agent-wiki serve                    # start MCP server (stdio)
+npx agent-wiki serve --workspace ./data # separate data directory
+npx agent-wiki init ./my-kb             # initialize new knowledge base
+npx agent-wiki search "yolo"            # search wiki
+npx agent-wiki list                     # list all pages
+npx agent-wiki list --type concept      # filter by type
+npx agent-wiki raw-list                 # list raw sources
+npx agent-wiki raw-verify               # verify raw file integrity
+npx agent-wiki lint                     # run health checks
+```
+
 ## Design Principles
 
-1. **Raw is immutable** — Source documents never change. SHA-256 verified.
-2. **Wiki is mutable** — Compiled knowledge improves over time.
-3. **No LLM dependency** — Zero API keys, zero cost per operation.
-4. **Self-checking** — Lint catches contradictions, broken links, integrity issues.
-5. **Knowledge compounds** — Every write enriches the whole wiki.
-6. **Code and data separate** — Configurable workspace directory keeps data independent from the tool.
-7. **Git is version control** — Every change is diffable, blameable, revertable.
+1. **Raw is immutable** — Source documents are write-once, SHA-256 verified. The ground truth never changes.
+2. **Wiki is mutable** — Compiled knowledge improves with every interaction. Pages are refined, not replaced.
+3. **No LLM dependency** — Zero API keys, zero cost per operation. The agent calling the tools IS the intelligence.
+4. **Self-checking** — Lint catches contradictions, broken links, and integrity issues without human review.
+5. **Knowledge compounds** — Every write enriches the whole wiki. Synthesis creates higher-order understanding.
+6. **Provenance matters** — Every wiki claim traces back to raw sources. No hallucination without accountability.
+7. **Code and data separate** — Configurable workspace keeps your knowledge portable and independent.
+8. **Git-native** — Plain Markdown files. Every change is diffable, blameable, and revertable.
 
 ## License
 

@@ -44,15 +44,18 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "adm-zip": "^0.5.16",
     "commander": "^13.1.0",
     "gray-matter": "^4.0.3",
     "js-yaml": "^4.1.0",
-    "pdf-parse": "^2.4.5"
+    "mammoth": "^1.8.0",
+    "pdf-parse": "^1.1.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.7",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.15.3",
-    "@types/pdf-parse": "^1.1.5",
     "typescript": "^5.8.3"
   }
 }

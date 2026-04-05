@@ -149,7 +149,7 @@ Pure heuristic — no LLM calls, no API keys, zero latency. Supports English and
 | `raw_add` | Add a source document (content string or local file copy, SHA-256 hashed, .meta.yaml sidecar) |
 | `raw_fetch` | Download from URL to raw/ (smart arXiv handling, auto-provenance) |
 | `raw_list` | List all raw documents with metadata (path, source URL, hash, size) |
-| `raw_read` | Read a raw document — text/SVG return content, PDF text is extracted automatically, other binary files return metadata only |
+| `raw_read` | Read a raw document — text/SVG return content; PDF/DOCX/XLSX/PPTX extracted via Python preprocessor; other binary files return metadata only |
 | `raw_verify` | Verify integrity of all raw files via SHA-256 re-check |
 
 ### Wiki Layer — Compiled Knowledge

@@ -375,10 +375,10 @@ _Chronological view of all knowledge in this wiki._
   }
 
   /** Read a raw document's content and metadata.
-   *  Text files return content as string.  SVG is treated as text (XML).
-   *  PDF files — text is extracted automatically via pdf-parse.
-   *  Other binary files (images, docx, etc.) return metadata only. */
-  async rawRead(filename: string): Promise<{ content: string | null; meta: RawDocument | null; binary: boolean } | null> {
+   *  Text/SVG/JSON/XML files return content as UTF-8 string.
+   *  Document files (PDF, DOCX, XLSX, PPTX) are extracted via Node.js libraries.
+   *  Other binary files (images, etc.) return metadata only. */
+  async rawRead(filename: string): Promise<{ content: string | null; meta: RawDocument | null; binary: boolean; note?: string } | null> {
     const fullPath = join(this.config.rawDir, filename);
     if (!existsSync(fullPath)) return null;
 
@@ -398,17 +398,19 @@ _Chronological view of all knowledge in this wiki._
       return { content, meta, binary: false };
     }
 
-    // PDF — extract text via pdf-parse
-    if (mime === "application/pdf") {
+    // Document formats — extract text via Node.js libraries
+    const ext = extname(filename).toLowerCase();
+    const extractable = new Set([".pdf", ".docx", ".xlsx", ".pptx", ".html", ".htm"]);
+    if (extractable.has(ext)) {
       try {
-        const text = await extractPdfText(fullPath);
+        const text = await extractTextNode(fullPath);
         return { content: text, meta, binary: false };
       } catch (e: any) {
         const stat = statSync(fullPath);
         return {
           content: null, meta, binary: true,
-          note: `PDF text extraction failed: ${e.message}. File size: ${formatBytes(stat.size)}.`,
-        } as any;
+          note: `Text extraction failed: ${e.message}. File size: ${formatBytes(stat.size)}.`,
+        };
       }
     }
 
@@ -1350,13 +1352,70 @@ function listAllFiles(dir: string, root: string): string[] {
   return result.sort();
 }
 
-async function extractPdfText(filePath: string): Promise<string> {
-  const { PDFParse } = await import("pdf-parse");
-  const buf = readFileSync(filePath);
-  const pdf = new PDFParse({ data: new Uint8Array(buf) });
-  const result = await pdf.getText();
-  await pdf.destroy();
-  return result.text;
+/** Extract text from document files using pure Node.js libraries (no Python). */
+async function extractTextNode(filePath: string): Promise<string> {
+  const ext = extname(filePath).toLowerCase();
+
+  if (ext === ".pdf") {
+    const pdfParse = (await import("pdf-parse")).default;
+    const buf = readFileSync(filePath);
+    const data = await pdfParse(buf);
+    return data.text;
+  }
+
+  if (ext === ".docx") {
+    const mammoth = await import("mammoth");
+    const result = await mammoth.extractRawText({ path: filePath });
+    return result.value;
+  }
+
+  if (ext === ".xlsx") {
+    const XLSX = await import("xlsx");
+    const wb = XLSX.readFile(filePath);
+    const sheets: string[] = [];
+    for (const name of wb.SheetNames) {
+      const ws = wb.Sheets[name];
+      if (!ws) continue;
+      const csv = XLSX.utils.sheet_to_csv(ws);
+      if (csv.trim()) {
+        sheets.push(`--- Sheet: ${name} ---\n${csv.trim()}`);
+      }
+    }
+    return sheets.join("\n\n");
+  }
+
+  if (ext === ".pptx") {
+    const AdmZip = (await import("adm-zip")).default;
+    const zip = new AdmZip(filePath);
+    const slides: string[] = [];
+    const entries = zip.getEntries()
+      .filter(e => /^ppt\/slides\/slide\d+\.xml$/.test(e.entryName))
+      .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
+    for (const entry of entries) {
+      const xml = entry.getData().toString("utf-8");
+      // Strip XML tags, keep text content
+      const text = xml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      if (text) {
+        const num = entry.entryName.match(/slide(\d+)/)?.[1] ?? "?";
+        slides.push(`--- Slide ${num} ---\n${text}`);
+      }
+    }
+    return slides.join("\n\n");
+  }
+
+  if (ext === ".html" || ext === ".htm") {
+    const html = readFileSync(filePath, "utf-8");
+    // Strip script/style blocks, then tags
+    const cleaned = html
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    return cleaned;
+  }
+
+  throw new Error(`Unsupported document format: ${ext}`);
 }
 
 function guessMime(filename: string): string {

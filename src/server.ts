@@ -82,7 +82,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "raw_read",
         description:
-          "Read a raw source document's content and metadata. Raw files are immutable — this is read-only. Text/SVG files return content as string; PDF files have text extracted automatically; other binary files (images, docx, etc.) return metadata only.",
+          "Read a raw source document's content and metadata. Raw files are immutable — this is read-only. Text/SVG files return content as string; document files (PDF, DOCX, XLSX, PPTX) have text extracted automatically; other binary files (images, etc.) return metadata only.",
         inputSchema: {
           type: "object" as const,
           properties: {

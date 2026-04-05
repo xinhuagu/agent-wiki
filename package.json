@@ -16,6 +16,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "start": "node dist/cli.js",
     "prepare": "npm run build",
     "release:patch": "gh workflow run release.yml -f bump=patch",
@@ -56,6 +58,8 @@
     "@types/adm-zip": "^0.5.7",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.15.3",
-    "typescript": "^5.8.3"
+    "@vitest/coverage-v8": "^4.1.2",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.2"
   }
 }

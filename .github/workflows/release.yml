@@ -32,6 +32,7 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+      - run: npm test
 
       # Configure git for tagging
       - name: Configure git

@@ -18,11 +18,12 @@ import {
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Wiki } from "./wiki.js";
+import { VERSION } from "./version.js";
 
 export function createServer(wikiPath?: string, workspace?: string): Server {
   const wiki = new Wiki(wikiPath, workspace);
   const server = new Server(
-    { name: "agent-wiki", version: "0.3.0" },
+    { name: "agent-wiki", version: VERSION },
     { capabilities: { tools: {} } }
   );
 

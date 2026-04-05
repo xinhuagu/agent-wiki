@@ -12,6 +12,7 @@
 import { Command } from "commander";
 import { Wiki } from "./wiki.js";
 import { runServer } from "./server.js";
+import { VERSION } from "./version.js";
 
 const program = new Command();
 
@@ -21,7 +22,7 @@ program
     "Agent-driven knowledge base — structured Markdown wiki with MCP server.\n" +
     "raw/ = immutable sources | wiki/ = mutable knowledge | schemas/ = templates"
   )
-  .version("0.3.0");
+  .version(VERSION);
 
 // Default command: start MCP server
 program

@@ -27,6 +27,7 @@ import { join, relative, resolve, basename, extname, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import matter from "gray-matter";
 import yaml from "js-yaml";
+import { VERSION } from "./version.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -467,7 +468,7 @@ _Chronological view of all knowledge in this wiki._
     // ── Download ──
     const response = await fetch(resolvedUrl, {
       headers: {
-        "User-Agent": "agent-wiki/0.3.0",
+        "User-Agent": `agent-wiki/${VERSION}`,
       },
       redirect: "follow",
     });

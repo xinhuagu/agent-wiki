@@ -108,6 +108,31 @@ export interface WikiConfig {
 // System pages that lint should treat specially
 const SYSTEM_PAGES = new Set(["index.md", "log.md", "timeline.md"]);
 
+/**
+ * Validate that a user-supplied relative path stays within the base directory.
+ * Prevents directory traversal attacks (e.g. "../../etc/passwd").
+ * Returns the resolved absolute path if safe, throws otherwise.
+ */
+export function safePath(base: string, userPath: string): string {
+  if (!userPath || typeof userPath !== "string") {
+    throw new Error("Path must be a non-empty string");
+  }
+  // Reject absolute paths outright
+  if (userPath.startsWith("/") || userPath.startsWith("\\")) {
+    throw new Error(`Absolute paths are not allowed: "${userPath}"`);
+  }
+  // Reject null bytes (poison byte attack)
+  if (userPath.includes("\0")) {
+    throw new Error("Path contains null bytes");
+  }
+  const resolved = resolve(base, userPath);
+  const normalizedBase = resolve(base);
+  if (!resolved.startsWith(normalizedBase + "/")) {
+    throw new Error(`Path traversal detected: "${userPath}" escapes the allowed directory`);
+  }
+  return resolved;
+}
+
 // ── Wiki Class ────────────────────────────────────────────────────
 
 export class Wiki {
@@ -304,7 +329,7 @@ _Chronological view of all knowledge in this wiki._
       mimeType?: string;
     }
   ): RawDocument {
-    const rawPath = join(this.config.rawDir, filename);
+    const rawPath = safePath(this.config.rawDir, filename);
     const metaPath = rawPath + ".meta.yaml";
 
     // Immutability guard — never overwrite existing raw files
@@ -379,7 +404,7 @@ _Chronological view of all knowledge in this wiki._
    *  Document files (PDF, DOCX, XLSX, PPTX) are extracted via Node.js libraries.
    *  Other binary files (images, etc.) return metadata only. */
   async rawRead(filename: string): Promise<{ content: string | null; meta: RawDocument | null; binary: boolean; note?: string } | null> {
-    const fullPath = join(this.config.rawDir, filename);
+    const fullPath = safePath(this.config.rawDir, filename);
     if (!existsSync(fullPath)) return null;
 
     const metaPath = fullPath + ".meta.yaml";
@@ -488,7 +513,7 @@ _Chronological view of all knowledge in this wiki._
     }
 
     // ── Immutability guard ──
-    const rawPath = join(this.config.rawDir, inferredFilename);
+    const rawPath = safePath(this.config.rawDir, inferredFilename);
     if (existsSync(rawPath)) {
       throw new Error(`Raw file already exists: ${inferredFilename}. Raw files are immutable.`);
     }
@@ -530,7 +555,7 @@ _Chronological view of all knowledge in this wiki._
     }
 
     // Re-check with potentially updated filename
-    const finalPath = join(this.config.rawDir, inferredFilename);
+    const finalPath = safePath(this.config.rawDir, inferredFilename);
     if (finalPath !== rawPath && existsSync(finalPath)) {
       throw new Error(`Raw file already exists: ${inferredFilename}. Raw files are immutable.`);
     }
@@ -577,9 +602,10 @@ _Chronological view of all knowledge in this wiki._
 
   /** Read a wiki page. Returns null if not found. */
   read(pagePath: string): WikiPage | null {
-    const fullPath = join(this.config.wikiDir, pagePath);
+    const fullPath = safePath(this.config.wikiDir, pagePath);
     if (!existsSync(fullPath)) {
       const withMd = fullPath.endsWith(".md") ? fullPath : fullPath + ".md";
+      // withMd is derived from already-validated fullPath, so no re-check needed
       if (!existsSync(withMd)) return null;
       return this.parsePage(relative(this.config.wikiDir, withMd), readFileSync(withMd, "utf-8"));
     }
@@ -589,7 +615,7 @@ _Chronological view of all knowledge in this wiki._
   /** Write (create or update) a wiki page. Content must include frontmatter.
    *  Automatically injects/updates created and updated timestamps. */
   write(pagePath: string, content: string, source?: string): void {
-    const fullPath = join(this.config.wikiDir, pagePath);
+    const fullPath = safePath(this.config.wikiDir, pagePath);
     const dir = dirname(fullPath);
     mkdirSync(dir, { recursive: true });
 
@@ -621,7 +647,7 @@ _Chronological view of all knowledge in this wiki._
     if (SYSTEM_PAGES.has(pagePath)) {
       throw new Error(`Cannot delete system page: ${pagePath}`);
     }
-    const fullPath = join(this.config.wikiDir, pagePath);
+    const fullPath = safePath(this.config.wikiDir, pagePath);
     if (!existsSync(fullPath)) return false;
     unlinkSync(fullPath);
     this.log("delete", pagePath, `Deleted ${pagePath}`);

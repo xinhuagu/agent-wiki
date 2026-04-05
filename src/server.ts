@@ -426,8 +426,11 @@ async function handleTool(
     case "wiki_read": {
       const page = wiki.read(args.page as string);
       if (!page) return `Page not found: ${args.page}`;
+      // wiki.read() already validates the path via safePath, so we
+      // reconstruct the full path from wiki.config + validated pagePath
+      const fullPath = join(wiki.config.wikiDir, page.path);
       try {
-        return readFileSync(join(wiki.config.wikiDir, args.page as string), "utf-8");
+        return readFileSync(fullPath, "utf-8");
       } catch {
         return `Page not found: ${args.page}`;
       }

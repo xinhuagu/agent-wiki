@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { Wiki } from "./wiki.js";
+import { Wiki, safePath } from "./wiki.js";
 import type { WikiPage, LintReport } from "./wiki.js";
 
 // ── Test helpers ─────────────────────────────────────────────────
@@ -802,5 +802,83 @@ describe("edge cases", () => {
     expect(doc.path).toBe("papers/test.txt");
     const result = wiki.rawList();
     expect(result.find(d => d.path === "papers/test.txt")).toBeDefined();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+//  PATH SAFETY — Directory Traversal Prevention
+// ═══════════════════════════════════════════════════════════════════
+
+describe("safePath", () => {
+  it("allows simple filenames", () => {
+    const result = safePath("/base/dir", "file.txt");
+    expect(result).toBe("/base/dir/file.txt");
+  });
+
+  it("allows subdirectories", () => {
+    const result = safePath("/base/dir", "sub/file.txt");
+    expect(result).toBe("/base/dir/sub/file.txt");
+  });
+
+  it("rejects parent traversal (../)", () => {
+    expect(() => safePath("/base/dir", "../etc/passwd")).toThrow(/traversal/i);
+  });
+
+  it("rejects deep traversal (../../)", () => {
+    expect(() => safePath("/base/dir", "../../etc/shadow")).toThrow(/traversal/i);
+  });
+
+  it("rejects traversal disguised in subpath", () => {
+    expect(() => safePath("/base/dir", "sub/../../etc/passwd")).toThrow(/traversal/i);
+  });
+
+  it("rejects absolute paths", () => {
+    expect(() => safePath("/base/dir", "/etc/passwd")).toThrow(/absolute/i);
+  });
+
+  it("rejects null bytes", () => {
+    expect(() => safePath("/base/dir", "file\0.txt")).toThrow(/null/i);
+  });
+
+  it("rejects empty path", () => {
+    expect(() => safePath("/base/dir", "")).toThrow();
+  });
+});
+
+describe("path traversal via wiki methods", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("rawAdd rejects traversal", () => {
+    const wiki = freshWiki();
+    expect(() => wiki.rawAdd("../escape.txt", { content: "evil" })).toThrow(/traversal/i);
+  });
+
+  it("rawRead rejects traversal", async () => {
+    const wiki = freshWiki();
+    await expect(wiki.rawRead("../../etc/passwd")).rejects.toThrow(/traversal/i);
+  });
+
+  it("wiki.read rejects traversal", () => {
+    const wiki = freshWiki();
+    expect(() => wiki.read("../../../etc/passwd")).toThrow(/traversal/i);
+  });
+
+  it("wiki.write rejects traversal", () => {
+    const wiki = freshWiki();
+    expect(() => wiki.write("../../.bashrc", "---\ntitle: Evil\n---\nHacked")).toThrow(/traversal/i);
+  });
+
+  it("wiki.delete rejects traversal", () => {
+    const wiki = freshWiki();
+    expect(() => wiki.delete("../important.conf")).toThrow(/traversal/i);
+  });
+
+  it("allows legitimate subdirectory paths", () => {
+    const wiki = freshWiki();
+    // These should NOT throw
+    wiki.rawAdd("papers/deep/file.txt", { content: "nested ok" });
+    wiki.write("topics/concept-a.md", "---\ntitle: Nested\n---\nOk");
+    expect(wiki.read("topics/concept-a.md")).not.toBeNull();
   });
 });

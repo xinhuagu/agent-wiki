@@ -36,7 +36,7 @@ export function createServer(wikiPath?: string): Server {
       {
         name: "raw_add",
         description:
-          "Add a raw source document to the knowledge base. Raw files are IMMUTABLE — once added, they cannot be modified or overwritten. Each file gets a .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Use this for downloaded articles, papers, web pages, data files.",
+          "Add a raw source document to the knowledge base. Raw files are IMMUTABLE — once added, they cannot be modified or overwritten. Each file gets a .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Use this for downloaded articles, papers, web pages, data files. Supports both content string and local file path (physical copy).",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -46,7 +46,11 @@ export function createServer(wikiPath?: string): Server {
             },
             content: {
               type: "string",
-              description: "File content as string (for text files)",
+              description: "File content as string (for text files). Either content or source_path is required.",
+            },
+            source_path: {
+              type: "string",
+              description: "Absolute path to a local file to physically copy into raw/. The original file is NOT modified — a full copy is made. Either content or source_path is required.",
             },
             source_url: {
               type: "string",
@@ -62,7 +66,7 @@ export function createServer(wikiPath?: string): Server {
               description: "Tags for categorization",
             },
           },
-          required: ["filename", "content"],
+          required: ["filename"],
         },
       },
       {
@@ -256,6 +260,21 @@ export function createServer(wikiPath?: string): Server {
         },
       },
       {
+        name: "wiki_classify",
+        description:
+          "Auto-classify content into entity type (person, concept, event, artifact, comparison, summary, how-to, synthesis, note) and suggest tags. Pure heuristic — zero LLM dependency. Useful for previewing classification before writing, or for enriching existing pages. Returns type, tags, and confidence score.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            content: {
+              type: "string",
+              description: "The full page content (with or without frontmatter) to classify",
+            },
+          },
+          required: ["content"],
+        },
+      },
+      {
         name: "wiki_synthesize",
         description:
           "Prepare context for knowledge synthesis — reads multiple wiki pages and returns their content so the agent can distill them into a new synthesis page. Synthesis pages represent higher-order knowledge derived from combining multiple sources.",
@@ -304,7 +323,8 @@ function handleTool(
 
     case "raw_add": {
       const doc = wiki.rawAdd(args.filename as string, {
-        content: args.content as string,
+        content: args.content as string | undefined,
+        sourcePath: args.source_path as string | undefined,
         sourceUrl: args.source_url as string | undefined,
         description: args.description as string | undefined,
         tags: args.tags as string[] | undefined,
@@ -354,12 +374,19 @@ function handleTool(
     }
 
     case "wiki_write": {
+      // Auto-classify if type/tags are missing
+      const enrichedContent = wiki.autoClassifyContent(args.content as string);
       wiki.write(
         args.page as string,
-        args.content as string,
+        enrichedContent,
         args.source as string | undefined
       );
-      return JSON.stringify({ ok: true, page: args.page });
+      const classification = wiki.classify(enrichedContent);
+      return JSON.stringify({
+        ok: true,
+        page: args.page,
+        autoClassified: { type: classification.type, tags: classification.tags, confidence: classification.confidence },
+      });
     }
 
     case "wiki_delete": {
@@ -416,6 +443,11 @@ function handleTool(
     case "wiki_rebuild_timeline": {
       wiki.rebuildTimeline();
       return JSON.stringify({ ok: true, message: "Timeline rebuilt" });
+    }
+
+    case "wiki_classify": {
+      const classification = wiki.classify(args.content as string);
+      return JSON.stringify(classification, null, 2);
     }
 
     case "wiki_synthesize": {

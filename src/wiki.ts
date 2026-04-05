@@ -768,6 +768,151 @@ _Chronological view of all knowledge in this wiki._
     return { pages, suggestions };
   }
 
+  // ── Auto-Classification ───────────────────────────────────────
+
+  /** Auto-classify content into entity type and suggested tags.
+   *  Pure heuristic — zero LLM dependency. Analyzes title, body,
+   *  and structure to determine the best type and relevant tags.
+   *  If frontmatter already has a type, respects it. */
+  classify(content: string): { type: string; tags: string[]; confidence: number } {
+    const parsed = matter(content);
+    const body = parsed.content.toLowerCase();
+    const title = ((parsed.data.title as string) ?? "").toLowerCase();
+    const combined = title + " " + body;
+
+    // If frontmatter already specifies type, respect it but still suggest tags
+    if (parsed.data.type && typeof parsed.data.type === "string" && parsed.data.type !== "note") {
+      const existingTags = Array.isArray(parsed.data.tags) ? parsed.data.tags.map(String) : [];
+      const suggestedTags = existingTags.length > 0 ? existingTags : this.extractTags(combined);
+      return { type: parsed.data.type, tags: suggestedTags, confidence: 1.0 };
+    }
+
+    // Score each entity type based on keyword signals
+    const scores: Record<string, number> = {
+      person: 0, concept: 0, event: 0, artifact: 0,
+      comparison: 0, summary: 0, "how-to": 0, synthesis: 0, note: 0,
+    };
+
+    // Person signals
+    for (const w of ["born", "career", "biography", "researcher", "professor", "author",
+      "founder", "role:", "affiliat", "人物", "创始人", "研究员"]) {
+      if (combined.includes(w)) scores.person += 2;
+    }
+
+    // Concept signals
+    for (const w of ["definition", "theory", "concept", "principle", "paradigm",
+      "what is", "核心思想", "定义", "概念", "理论", "原理"]) {
+      if (combined.includes(w)) scores.concept += 2;
+    }
+
+    // Event signals
+    for (const w of ["happened", "occurred", "conference", "launched", "announced",
+      "event", "发布会", "事件", "会议"]) {
+      if (combined.includes(w)) scores.event += 2;
+    }
+
+    // Artifact signals (papers, tools, models)
+    for (const w of ["paper", "论文", "tool", "library", "framework", "model",
+      "version", "release", "arxiv", "github", "引用", "doi"]) {
+      if (combined.includes(w)) scores.artifact += 2;
+    }
+
+    // Comparison signals
+    for (const w of ["vs", "versus", "compared", "comparison", "benchmark",
+      "对比", "比较", "横评"]) {
+      if (combined.includes(w)) scores.comparison += 2;
+    }
+    // Many table rows strongly suggest comparison
+    if ((body.match(/\|/g) ?? []).length > 15) scores.comparison += 3;
+
+    // Summary signals
+    for (const w of ["summary", "overview", "timeline", "history", "evolution",
+      "演进", "总结", "概述", "版本", "时间线", "回顾"]) {
+      if (combined.includes(w)) scores.summary += 2;
+    }
+
+    // How-to signals
+    for (const w of ["step", "guide", "tutorial", "how to", "procedure",
+      "install", "setup", "步骤", "指南", "教程", "安装"]) {
+      if (combined.includes(w)) scores["how-to"] += 2;
+    }
+
+    // Synthesis signals
+    for (const w of ["synthesis", "derived from", "combining", "integrat",
+      "综合", "提炼", "整合"]) {
+      if (combined.includes(w)) scores.synthesis += 2;
+    }
+
+    // Pick the highest-scoring type
+    let bestType = "note";
+    let bestScore = 0;
+    for (const [type, score] of Object.entries(scores)) {
+      if (score > bestScore) { bestScore = score; bestType = type; }
+    }
+
+    const confidence = bestScore > 0 ? Math.min(bestScore / 10, 1.0) : 0.3;
+    const tags = this.extractTags(combined);
+
+    return { type: bestType, tags, confidence };
+  }
+
+  /** Auto-classify and inject type/tags into content if missing.
+   *  Returns the enriched content string. */
+  autoClassifyContent(content: string): string {
+    const parsed = matter(content);
+
+    // Only auto-classify if type is missing or is generic "note"
+    if (parsed.data.type && parsed.data.type !== "note") return content;
+
+    const classification = this.classify(content);
+
+    if (!parsed.data.type || parsed.data.type === "note") {
+      parsed.data.type = classification.type;
+    }
+
+    // Merge tags: keep existing + add new suggestions (deduplicated)
+    const existingTags = Array.isArray(parsed.data.tags) ? parsed.data.tags.map(String) : [];
+    const merged = [...new Set([...existingTags, ...classification.tags])];
+    if (merged.length > 0) parsed.data.tags = merged;
+
+    return matter.stringify(parsed.content, parsed.data);
+  }
+
+  /** Extract relevant tags from text using keyword matching. */
+  private extractTags(text: string): string[] {
+    const knownTags: Record<string, string> = {
+      "yolo": "yolo", "object detection": "object-detection", "目标检测": "object-detection",
+      "computer vision": "computer-vision", "计算机视觉": "computer-vision",
+      "deep learning": "deep-learning", "深度学习": "deep-learning",
+      "machine learning": "machine-learning", "机器学习": "machine-learning",
+      "transformer": "transformer", "attention": "attention-mechanism",
+      "cnn": "cnn", "卷积": "cnn", "real-time": "real-time", "实时": "real-time",
+      "python": "python", "pytorch": "pytorch", "tensorflow": "tensorflow",
+      "arxiv": "academic", "论文": "academic", "paper": "academic",
+      "benchmark": "benchmark", "基准": "benchmark",
+      "neural network": "neural-network", "神经网络": "neural-network",
+      "nlp": "nlp", "自然语言": "nlp", "language model": "llm", "大模型": "llm",
+      "gan": "gan", "diffusion": "diffusion", "stable diffusion": "stable-diffusion",
+      "reinforcement learning": "reinforcement-learning", "强化学习": "reinforcement-learning",
+      "autonomous driving": "autonomous-driving", "自动驾驶": "autonomous-driving",
+      "segmentation": "segmentation", "分割": "segmentation",
+      "detection": "detection", "检测": "detection",
+      "classification": "classification", "分类": "classification",
+      "training": "training", "inference": "inference", "推理": "inference",
+      "edge deploy": "edge-deployment", "边缘部署": "edge-deployment",
+      "anchor": "anchor", "backbone": "backbone", "fpn": "feature-pyramid",
+      "docker": "docker", "kubernetes": "kubernetes",
+      "api": "api", "rest": "rest-api", "mcp": "mcp",
+    };
+
+    const tags = new Set<string>();
+    const lower = text.toLowerCase();
+    for (const [keyword, tag] of Object.entries(knownTags)) {
+      if (lower.includes(keyword)) tags.add(tag);
+    }
+    return [...tags];
+  }
+
   // ── Schemas ───────────────────────────────────────────────────
 
   /** List available entity type schemas. */

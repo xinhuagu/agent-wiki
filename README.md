@@ -8,7 +8,7 @@
 A structured knowledge base that any AI agent can read, write, and maintain through the [Model Context Protocol](https://modelcontextprotocol.io). No LLM built in — your agent IS the LLM.
 
 ```
-npx agent-wiki
+npx @agent-wiki/mcp-server
 ```
 
 ---
@@ -130,7 +130,7 @@ Pure heuristic — no LLM calls, no API keys, zero latency. Supports English and
 
 ### Cursor / Windsurf / any MCP client
 
-Same pattern — `npx -y agent-wiki serve --wiki-path /path/to/config`.
+Same pattern — `npx -y @agent-wiki/mcp-server serve --wiki-path /path/to/config`.
 
 ### Claude Desktop
 

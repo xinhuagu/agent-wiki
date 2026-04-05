@@ -4,9 +4,9 @@
  * CLI entry point for agent-wiki.
  *
  * Usage:
- *   npx agent-wiki                  # start MCP server (stdio)
- *   npx agent-wiki --wiki-path /kb  # custom wiki root
- *   npx agent-wiki init ./my-kb     # initialize a new knowledge base
+ *   npx @agent-wiki/mcp-server                  # start MCP server (stdio)
+ *   npx @agent-wiki/mcp-server --wiki-path /kb  # custom wiki root
+ *   npx @agent-wiki/mcp-server init ./my-kb     # initialize a new knowledge base
  */
 
 import { Command } from "commander";

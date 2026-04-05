@@ -30,7 +30,7 @@ The key insight: **LLMs are better editors than search engines.** Let them curat
 | **Memory** | Stateless — forgets after each query | Persistent — knowledge accumulates |
 | **Quality** | Raw chunks, often noisy | Curated, structured, interlinked |
 | **Cost** | Embedding + retrieval every query | One-time compilation, free reads |
-| **Contradictions** | Invisible — buried in source docs | Detected automatically by lint |
+| **Contradictions** | Invisible — buried in source docs | Surface-level conflicts flagged by lint (dates, numbers) |
 | **Source tracking** | Lost after retrieval | Full provenance chain (raw → wiki) |
 
 ## Architecture
@@ -119,9 +119,9 @@ Resolution priority: CLI `--workspace` > `AGENT_WIKI_WORKSPACE` env > config fil
 
 ### Self-Checking Lint Engine
 
-No human review needed. The lint system catches problems automatically:
+The lint system catches common problems automatically:
 
-- **Contradictions** — conflicting dates, numbers, and claims across pages
+- **Contradictions** — detects conflicting dates and numeric claims across pages (regex + local-context heuristic — useful for catching obvious conflicts, not a substitute for human review)
 - **Orphan pages** — pages with no incoming links
 - **Broken links** — `[[page]]` references to non-existent pages
 - **Missing sources** — wiki claims not traceable to raw documents
@@ -233,7 +233,7 @@ npx @agent-wiki/mcp-server lint                       # run health checks
 1. **Raw is immutable** — Source documents are write-once, SHA-256 verified. The ground truth never changes.
 2. **Wiki is mutable** — Compiled knowledge improves with every interaction. Pages are refined, not replaced.
 3. **No LLM dependency** — Zero API keys, zero cost per operation. The agent calling the tools IS the intelligence.
-4. **Self-checking** — Lint catches contradictions, broken links, and integrity issues without human review.
+4. **Self-checking** — Lint catches structural issues (broken links, orphans, stale pages) and flags potential contradictions via heuristic pattern matching. Semantic review still benefits from human or LLM judgment.
 5. **Knowledge compounds** — Every write enriches the whole wiki. Synthesis creates higher-order understanding.
 6. **Provenance matters** — Every wiki claim traces back to raw sources. No hallucination without accountability.
 7. **Code and data separate** — Configurable workspace keeps your knowledge portable and independent.

@@ -20,7 +20,9 @@
  *   - Knowledge compounds: every write improves the whole
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, statSync, copyFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, statSync, copyFileSync, createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
+import { Readable } from "node:stream";
 import { join, relative, resolve, basename, extname, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import matter from "gray-matter";
@@ -410,6 +412,130 @@ _Chronological view of all knowledge in this wiki._
       });
     }
     return results;
+  }
+
+  /**
+   * Fetch a file from a URL and save it to raw/.
+   * Supports arXiv smart resolution: arxiv.org/abs/XXXX → arxiv.org/pdf/XXXX.pdf
+   * Returns the RawDocument metadata.
+   */
+  async rawFetch(
+    url: string,
+    opts: {
+      filename?: string;
+      description?: string;
+      tags?: string[];
+    } = {}
+  ): Promise<RawDocument> {
+    // ── arXiv smart URL resolution ──
+    let resolvedUrl = url;
+    let inferredFilename = opts.filename;
+
+    const arxivAbsMatch = url.match(/arxiv\.org\/abs\/(\d+\.\d+)(v\d+)?/);
+    const arxivPdfMatch = url.match(/arxiv\.org\/pdf\/(\d+\.\d+)(v\d+)?/);
+
+    if (arxivAbsMatch) {
+      const id = arxivAbsMatch[1]! + (arxivAbsMatch[2] ?? "");
+      resolvedUrl = `https://arxiv.org/pdf/${id}.pdf`;
+      if (!inferredFilename) inferredFilename = `arxiv-${id.replace(/\./g, "-")}.pdf`;
+    } else if (arxivPdfMatch && !inferredFilename) {
+      const id = arxivPdfMatch[1]! + (arxivPdfMatch[2] ?? "");
+      inferredFilename = `arxiv-${id.replace(/\./g, "-")}.pdf`;
+    }
+
+    // ── Infer filename from URL if not provided ──
+    if (!inferredFilename) {
+      const urlObj = new URL(resolvedUrl);
+      const pathParts = urlObj.pathname.split("/").filter(Boolean);
+      const lastPart = pathParts[pathParts.length - 1] ?? "download";
+      // Clean up query params and fragments
+      inferredFilename = lastPart.split("?")[0]!.split("#")[0]!;
+      // If no extension, try to add one based on content-type later
+      if (!inferredFilename.includes(".")) {
+        inferredFilename += ".bin";
+      }
+    }
+
+    // ── Immutability guard ──
+    const rawPath = join(this.config.rawDir, inferredFilename);
+    if (existsSync(rawPath)) {
+      throw new Error(`Raw file already exists: ${inferredFilename}. Raw files are immutable.`);
+    }
+
+    mkdirSync(dirname(rawPath), { recursive: true });
+
+    // ── Download ──
+    const response = await fetch(resolvedUrl, {
+      headers: {
+        "User-Agent": "agent-wiki-mcp/0.3.0",
+      },
+      redirect: "follow",
+    });
+
+    if (!response.ok) {
+      throw new Error(`Download failed: HTTP ${response.status} ${response.statusText} — ${resolvedUrl}`);
+    }
+
+    // Update filename extension based on content-type if it was generic
+    const contentType = response.headers.get("content-type") ?? "";
+    if (inferredFilename.endsWith(".bin")) {
+      const extMap: Record<string, string> = {
+        "application/pdf": ".pdf",
+        "text/html": ".html",
+        "text/plain": ".txt",
+        "application/json": ".json",
+        "text/markdown": ".md",
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "application/xml": ".xml",
+        "text/xml": ".xml",
+      };
+      for (const [mime, ext] of Object.entries(extMap)) {
+        if (contentType.includes(mime)) {
+          inferredFilename = inferredFilename.replace(/\.bin$/, ext);
+          break;
+        }
+      }
+    }
+
+    // Re-check with potentially updated filename
+    const finalPath = join(this.config.rawDir, inferredFilename);
+    if (finalPath !== rawPath && existsSync(finalPath)) {
+      throw new Error(`Raw file already exists: ${inferredFilename}. Raw files are immutable.`);
+    }
+
+    // Stream to file
+    const body = response.body;
+    if (!body) throw new Error("Empty response body");
+
+    const nodeStream = Readable.fromWeb(body as any);
+    const fileStream = createWriteStream(finalPath);
+    await pipeline(nodeStream, fileStream);
+
+    // ── Compute hash and create metadata ──
+    const buf = readFileSync(finalPath);
+    const sha256 = createHash("sha256").update(buf).digest("hex");
+    const now = new Date().toISOString();
+
+    const mime = contentType.split(";")[0]?.trim() || guessMime(inferredFilename);
+
+    const doc: RawDocument = {
+      path: inferredFilename,
+      sourceUrl: url, // original URL, not resolved
+      downloadedAt: now,
+      sha256,
+      size: buf.length,
+      mimeType: mime,
+      description: opts.description,
+      tags: opts.tags,
+    };
+
+    // Write metadata sidecar
+    writeFileSync(finalPath + ".meta.yaml", yaml.dump(doc, { lineWidth: 100 }));
+    this.log("raw-fetch", inferredFilename,
+      `Downloaded from ${url} (${formatBytes(buf.length)}, ${mime})`);
+
+    return doc;
   }
 
   // ═══════════════════════════════════════════════════════════════

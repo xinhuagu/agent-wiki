@@ -102,6 +102,34 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           properties: {},
         },
       },
+      {
+        name: "raw_fetch",
+        description:
+          "Download a file from a URL and save it to raw/ as an immutable source document. Automatically generates .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Smart URL handling: arXiv abstract URLs (arxiv.org/abs/XXXX) are auto-converted to PDF download links. Supports any downloadable file: PDFs, HTML pages, images, data files, etc.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            url: {
+              type: "string",
+              description: "URL to download from. arXiv abs URLs are auto-converted to PDF links (e.g. https://arxiv.org/abs/2304.00501 → PDF download)",
+            },
+            filename: {
+              type: "string",
+              description: "Optional filename in raw/. If omitted, auto-inferred from URL (arXiv papers get clean names like 'arxiv-2304-00501.pdf')",
+            },
+            description: {
+              type: "string",
+              description: "Brief description of what this source document contains",
+            },
+            tags: {
+              type: "array",
+              items: { type: "string" },
+              description: "Tags for categorization",
+            },
+          },
+          required: ["url"],
+        },
+      },
       // ═══════════════════════════════════════════════════════
       //  WIKI LAYER — Mutable compiled knowledge
       // ═══════════════════════════════════════════════════════
@@ -312,7 +340,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
     const { name, arguments: args = {} } = request.params;
 
     try {
-      const result = handleTool(wiki, name, args as Record<string, unknown>);
+      const result = await handleTool(wiki, name, args as Record<string, unknown>);
       return { content: [{ type: "text" as const, text: result }] };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -326,11 +354,11 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
   return server;
 }
 
-function handleTool(
+async function handleTool(
   wiki: Wiki,
   name: string,
   args: Record<string, unknown>
-): string {
+): Promise<string> {
   switch (name) {
     // ═══ RAW LAYER ═══
 
@@ -372,6 +400,15 @@ function handleTool(
         missingMeta: missingMeta.length,
         details: results,
       }, null, 2);
+    }
+
+    case "raw_fetch": {
+      const doc = await wiki.rawFetch(args.url as string, {
+        filename: args.filename as string | undefined,
+        description: args.description as string | undefined,
+        tags: args.tags as string[] | undefined,
+      });
+      return JSON.stringify({ ok: true, document: doc }, null, 2);
     }
 
     // ═══ WIKI LAYER ═══

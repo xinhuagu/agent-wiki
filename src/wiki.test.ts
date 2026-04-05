@@ -802,6 +802,25 @@ describe("wiki.classify", () => {
     expect(result.confidence).toBe(1.0);
   });
 
+  it("classifies a COBOL code page", () => {
+    const wiki = freshWiki();
+    const result = wiki.classify("---\ntitle: CALC-INTEREST\n---\nIDENTIFICATION DIVISION.\nPROGRAM-ID. CALC-INTEREST.\nDATA DIVISION.\nWORKING-STORAGE SECTION.\nPROCEDURE DIVISION.\nEVALUATE WS-CREDIT-GRADE.");
+    expect(result.type).toBe("code");
+    expect(result.confidence).toBeGreaterThan(0);
+  });
+
+  it("classifies code page with code blocks", () => {
+    const wiki = freshWiki();
+    const result = wiki.classify("---\ntitle: Batch Process\n---\n## 源代码\n\n```cobol\nPROCEDURE DIVISION.\nPERFORM VALIDATE-INPUT.\n```\n\n## 调用关系\n\nCalls VALIDATE-INPUT.");
+    expect(result.type).toBe("code");
+  });
+
+  it("classifies Python code page", () => {
+    const wiki = freshWiki();
+    const result = wiki.classify("---\ntitle: Data Pipeline\n---\n## 源代码\n\n```python\ndef process_data():\n    import pandas\n    class DataPipeline:\n        pass\n```");
+    expect(result.type).toBe("code");
+  });
+
   it("defaults to note for ambiguous content", () => {
     const wiki = freshWiki();
     const result = wiki.classify("---\ntitle: Random Notes\n---\nJust some random text without clear signals.");
@@ -878,13 +897,13 @@ describe("wiki.schemas", () => {
   beforeEach(cleanUp);
   afterEach(cleanUp);
 
-  it("lists all 9 default schemas", () => {
+  it("lists all 10 default schemas", () => {
     const wiki = freshWiki();
     const schemas = wiki.schemas();
-    expect(schemas.length).toBe(9);
+    expect(schemas.length).toBe(10);
     const names = schemas.map(s => s.name).sort();
     expect(names).toEqual([
-      "artifact", "comparison", "concept", "event",
+      "artifact", "code", "comparison", "concept", "event",
       "how-to", "note", "person", "summary", "synthesis",
     ]);
   });

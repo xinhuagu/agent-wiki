@@ -168,7 +168,7 @@ describe("server tool: wiki_schemas", () => {
   it("returns all schemas", () => {
     const wiki = freshWiki();
     const schemas = wiki.schemas();
-    expect(schemas.length).toBe(9);
+    expect(schemas.length).toBe(10);
   });
 });
 

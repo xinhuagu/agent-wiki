@@ -281,7 +281,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             type: {
               type: "string",
               description:
-                "Filter by entity type (person, concept, event, artifact, comparison, summary, how-to, note, synthesis)",
+                "Filter by entity type (person, concept, event, artifact, code, comparison, summary, how-to, note, synthesis)",
             },
             tag: {
               type: "string",

@@ -1349,7 +1349,7 @@ _Chronological view of all knowledge in this wiki._
 
     // Score each entity type based on keyword signals
     const scores: Record<string, number> = {
-      person: 0, concept: 0, event: 0, artifact: 0,
+      person: 0, concept: 0, event: 0, artifact: 0, code: 0,
       comparison: 0, summary: 0, "how-to": 0, synthesis: 0, note: 0,
     };
 
@@ -1376,6 +1376,19 @@ _Chronological view of all knowledge in this wiki._
       "version", "release", "arxiv", "github", "引用", "doi"]) {
       if (combined.includes(w)) scores.artifact += 2;
     }
+
+    // Code signals (source code with business logic)
+    for (const w of ["procedure division", "identification division", "data division",
+      "working-storage", "copybook", "program-id", "perform", "evaluate",
+      "cobol", "jcl", "cics", "db2", "vsam", "pic x", "pic 9",
+      "function ", "def ", "class ", "import ", "module", "subroutine",
+      "源代码", "程序", "代码", "子程序", "调用关系"]) {
+      if (combined.includes(w)) scores.code += 2;
+    }
+    // Code blocks strongly suggest code type
+    const codeBlockCount = (body.match(/```/g) ?? []).length / 2;
+    if (codeBlockCount >= 1) scores.code += 2;
+    if (codeBlockCount >= 3) scores.code += 3;
 
     // Comparison signals
     for (const w of ["vs", "versus", "compared", "comparison", "benchmark",
@@ -2039,6 +2052,46 @@ description: Freeform knowledge — anything that does not fit other templates
 # {{title}}
 
 {{content}}
+
+## Sources
+
+- [TODO]
+`,
+    "code.md": `---
+template: code
+description: Source code with business logic explanation
+---
+
+# {{title}}
+
+**Language:** [TODO]
+**Source:** [TODO: path in raw/]
+
+## Business Logic
+
+[TODO: What does this code do in business terms?]
+
+## Input / Output
+
+| Variable | Direction | Description |
+|----------|-----------|-------------|
+| [TODO]   | in        | [TODO]      |
+| [TODO]   | out       | [TODO]      |
+
+## Dependencies
+
+- [TODO: COPYBOOK, imports, called programs]
+
+## Call Graph
+
+- **Calls:** [TODO: [[other-programs]]]
+- **Called by:** [TODO: [[parent-programs]]]
+
+## Source Code
+
+\`\`\`
+[TODO: key code sections or link to raw/]
+\`\`\`
 
 ## Sources
 

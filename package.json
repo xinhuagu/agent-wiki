@@ -18,9 +18,9 @@
     "dev": "tsc --watch",
     "start": "node dist/cli.js",
     "prepare": "npm run build",
-    "release:patch": "npm version patch && git push --follow-tags",
-    "release:minor": "npm version minor && git push --follow-tags",
-    "release:major": "npm version major && git push --follow-tags"
+    "release:patch": "gh workflow run release.yml -f bump=patch",
+    "release:minor": "gh workflow run release.yml -f bump=minor",
+    "release:major": "gh workflow run release.yml -f bump=major"
   },
   "keywords": [
     "mcp",

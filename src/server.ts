@@ -1,8 +1,12 @@
 /**
  * MCP Server — Exposes Agent Wiki as tools to any MCP-compatible agent.
  *
- * No LLM. No API keys. Pure data operations.
- * The calling agent IS the LLM.
+ * Architecture (Karpathy LLM Wiki, upgraded):
+ *
+ *   raw/  → Immutable source layer (raw_add, raw_list, raw_read, raw_verify)
+ *   wiki/ → Mutable knowledge layer (read, write, delete, search, lint, synthesize)
+ *
+ * The agent IS the LLM. This server is pure data operations.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -18,7 +22,7 @@ import { Wiki } from "./wiki.js";
 export function createServer(wikiPath?: string): Server {
   const wiki = new Wiki(wikiPath);
   const server = new Server(
-    { name: "agent-wiki", version: "0.1.0" },
+    { name: "agent-wiki", version: "0.2.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -26,6 +30,77 @@ export function createServer(wikiPath?: string): Server {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
+      // ═══════════════════════════════════════════════════════
+      //  RAW LAYER — Immutable source documents
+      // ═══════════════════════════════════════════════════════
+      {
+        name: "raw_add",
+        description:
+          "Add a raw source document to the knowledge base. Raw files are IMMUTABLE — once added, they cannot be modified or overwritten. Each file gets a .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Use this for downloaded articles, papers, web pages, data files.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            filename: {
+              type: "string",
+              description: "Filename in raw/ (e.g. 'paper-attention.pdf', 'article-yolo.md')",
+            },
+            content: {
+              type: "string",
+              description: "File content as string (for text files)",
+            },
+            source_url: {
+              type: "string",
+              description: "Original URL where the document was downloaded from",
+            },
+            description: {
+              type: "string",
+              description: "Brief description of what this source contains",
+            },
+            tags: {
+              type: "array",
+              items: { type: "string" },
+              description: "Tags for categorization",
+            },
+          },
+          required: ["filename", "content"],
+        },
+      },
+      {
+        name: "raw_list",
+        description:
+          "List all raw source documents with metadata (path, source URL, download time, hash, size).",
+        inputSchema: {
+          type: "object" as const,
+          properties: {},
+        },
+      },
+      {
+        name: "raw_read",
+        description:
+          "Read a raw source document's content and metadata. Raw files are immutable — this is read-only.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            filename: {
+              type: "string",
+              description: "Filename relative to raw/ (e.g. 'article-yolo.md')",
+            },
+          },
+          required: ["filename"],
+        },
+      },
+      {
+        name: "raw_verify",
+        description:
+          "Verify integrity of all raw files by checking SHA-256 hashes against stored metadata. Detects corruption or tampering.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {},
+        },
+      },
+      // ═══════════════════════════════════════════════════════
+      //  WIKI LAYER — Mutable compiled knowledge
+      // ═══════════════════════════════════════════════════════
       {
         name: "wiki_read",
         description:
@@ -44,7 +119,7 @@ export function createServer(wikiPath?: string): Server {
       {
         name: "wiki_write",
         description:
-          "Create or update a wiki page. Content should include YAML frontmatter (title, type, tags, sources) and Markdown body.",
+          "Create or update a wiki page. Content should include YAML frontmatter (title, type, tags, sources) and Markdown body. Timestamps (created/updated) are auto-managed. Wiki pages are MUTABLE — they represent compiled knowledge that improves over time.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -67,7 +142,7 @@ export function createServer(wikiPath?: string): Server {
       },
       {
         name: "wiki_delete",
-        description: "Delete a wiki page.",
+        description: "Delete a wiki page. Cannot delete system pages (index.md, log.md, timeline.md).",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -89,7 +164,7 @@ export function createServer(wikiPath?: string): Server {
             type: {
               type: "string",
               description:
-                "Filter by entity type (person, concept, event, artifact, comparison, summary, how-to, note)",
+                "Filter by entity type (person, concept, event, artifact, comparison, summary, how-to, note, synthesis)",
             },
             tag: {
               type: "string",
@@ -120,7 +195,7 @@ export function createServer(wikiPath?: string): Server {
       {
         name: "wiki_lint",
         description:
-          "Run health checks on the wiki. Finds orphan pages, broken links, missing sources, stale content. No LLM needed.",
+          "Run comprehensive health checks. Detects: contradictions between pages, orphan pages, broken [[links]], missing sources, stale content, raw file integrity (SHA-256 verification), synthesis page integrity. Returns categorized issues with fix suggestions.",
         inputSchema: {
           type: "object" as const,
           properties: {},
@@ -128,7 +203,7 @@ export function createServer(wikiPath?: string): Server {
       },
       {
         name: "wiki_log",
-        description: "View the operation history log.",
+        description: "View the operation history log with timestamps, operations, affected pages, and summaries.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -156,7 +231,7 @@ export function createServer(wikiPath?: string): Server {
       {
         name: "wiki_schemas",
         description:
-          "List available entity type templates (person, concept, event, etc.). Use these to structure wiki pages consistently.",
+          "List available entity type templates (person, concept, event, artifact, comparison, summary, how-to, note, synthesis). Use these to structure wiki pages consistently.",
         inputSchema: {
           type: "object" as const,
           properties: {},
@@ -165,10 +240,35 @@ export function createServer(wikiPath?: string): Server {
       {
         name: "wiki_rebuild_index",
         description:
-          "Rebuild the index.md from all wiki pages. Organizes pages by type.",
+          "Rebuild the index.md from all wiki pages. Organizes pages by type with counts and dates.",
         inputSchema: {
           type: "object" as const,
           properties: {},
+        },
+      },
+      {
+        name: "wiki_rebuild_timeline",
+        description:
+          "Rebuild timeline.md — a chronological view of all knowledge entries, grouped by date.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {},
+        },
+      },
+      {
+        name: "wiki_synthesize",
+        description:
+          "Prepare context for knowledge synthesis — reads multiple wiki pages and returns their content so the agent can distill them into a new synthesis page. Synthesis pages represent higher-order knowledge derived from combining multiple sources.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            pages: {
+              type: "array",
+              items: { type: "string" },
+              description: "List of page paths to synthesize from (e.g. ['concept-yolo.md', 'comparison-detectors.md'])",
+            },
+          },
+          required: ["pages"],
         },
       },
     ],
@@ -200,6 +300,49 @@ function handleTool(
   args: Record<string, unknown>
 ): string {
   switch (name) {
+    // ═══ RAW LAYER ═══
+
+    case "raw_add": {
+      const doc = wiki.rawAdd(args.filename as string, {
+        content: args.content as string,
+        sourceUrl: args.source_url as string | undefined,
+        description: args.description as string | undefined,
+        tags: args.tags as string[] | undefined,
+      });
+      return JSON.stringify({ ok: true, document: doc }, null, 2);
+    }
+
+    case "raw_list": {
+      const docs = wiki.rawList();
+      return JSON.stringify({ documents: docs, count: docs.length }, null, 2);
+    }
+
+    case "raw_read": {
+      const result = wiki.rawRead(args.filename as string);
+      if (!result) return `Raw file not found: ${args.filename}`;
+      return JSON.stringify({
+        meta: result.meta,
+        content: result.content.length > 10000
+          ? result.content.slice(0, 10000) + "\n\n... (truncated, " + result.content.length + " chars total)"
+          : result.content,
+      }, null, 2);
+    }
+
+    case "raw_verify": {
+      const results = wiki.rawVerify();
+      const corrupted = results.filter((r) => r.status === "corrupted");
+      const missingMeta = results.filter((r) => r.status === "missing-meta");
+      return JSON.stringify({
+        total: results.length,
+        ok: results.filter((r) => r.status === "ok").length,
+        corrupted: corrupted.length,
+        missingMeta: missingMeta.length,
+        details: results,
+      }, null, 2);
+    }
+
+    // ═══ WIKI LAYER ═══
+
     case "wiki_read": {
       const page = wiki.read(args.page as string);
       if (!page) return `Page not found: ${args.page}`;
@@ -257,7 +400,7 @@ function handleTool(
     case "wiki_init": {
       const path = (args.path as string) ?? ".";
       Wiki.init(path);
-      return JSON.stringify({ ok: true, path, message: "Knowledge base initialized" });
+      return JSON.stringify({ ok: true, path, message: "Knowledge base initialized with wiki/, raw/, schemas/" });
     }
 
     case "wiki_schemas": {
@@ -268,6 +411,20 @@ function handleTool(
     case "wiki_rebuild_index": {
       wiki.rebuildIndex();
       return JSON.stringify({ ok: true, message: "Index rebuilt" });
+    }
+
+    case "wiki_rebuild_timeline": {
+      wiki.rebuildTimeline();
+      return JSON.stringify({ ok: true, message: "Timeline rebuilt" });
+    }
+
+    case "wiki_synthesize": {
+      const pagePaths = args.pages as string[];
+      if (!pagePaths || pagePaths.length === 0) {
+        return JSON.stringify({ error: "Provide at least one page path to synthesize from" });
+      }
+      const ctx = wiki.synthesizeContext(pagePaths);
+      return JSON.stringify(ctx, null, 2);
     }
 
     default:

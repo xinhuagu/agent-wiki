@@ -1,12 +1,28 @@
 /**
  * Core Wiki engine — pure data layer, zero LLM dependency.
  *
- * All intelligence lives in the calling agent. This is just
- * structured Markdown CRUD + keyword search + lint.
+ * Architecture (Karpathy LLM Wiki pattern):
+ *
+ *   raw/     — Immutable source documents. Write-once, never modified.
+ *              Each file has a .meta.yaml sidecar with provenance.
+ *
+ *   wiki/    — Mutable Markdown layer. Three kinds of files:
+ *              1. System: index.md, log.md, timeline.md (auto-maintained)
+ *              2. Entity pages: concept-*, person-*, artifact-*, etc.
+ *              3. Synthesis pages: synthesis-* (distilled from multiple pages)
+ *
+ *   schemas/ — Entity templates (person, concept, event, etc.)
+ *
+ * Key principles:
+ *   - Raw files are IMMUTABLE — the source of truth
+ *   - Wiki pages are MUTABLE — compiled knowledge, continuously refined
+ *   - Self-checking: lint detects contradictions, broken links, stale claims
+ *   - Knowledge compounds: every write improves the whole
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, statSync } from "node:fs";
-import { join, relative, resolve, basename, extname } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, statSync, copyFileSync } from "node:fs";
+import { join, relative, resolve, basename, extname, dirname } from "node:path";
+import { createHash } from "node:crypto";
 import matter from "gray-matter";
 import yaml from "js-yaml";
 
@@ -15,12 +31,26 @@ import yaml from "js-yaml";
 export interface WikiPage {
   path: string;          // relative to wiki/, e.g. "concept-gil.md"
   title: string;
-  type?: string;         // person | concept | event | artifact | ...
+  type?: string;         // person | concept | event | artifact | synthesis | ...
   tags: string[];
-  sources: string[];
+  sources: string[];     // traceability back to raw/ or URLs
   content: string;       // body without frontmatter
   frontmatter: Record<string, unknown>;
   links: string[];       // [[page]] references extracted from body
+  created?: string;      // ISO timestamp
+  updated?: string;      // ISO timestamp
+  derivedFrom?: string[]; // for synthesis pages — which pages were combined
+}
+
+export interface RawDocument {
+  path: string;          // relative to raw/, e.g. "paper.pdf"
+  sourceUrl?: string;    // where it was downloaded from
+  downloadedAt: string;  // ISO timestamp
+  sha256: string;        // content hash — integrity check
+  size: number;          // bytes
+  mimeType?: string;     // best-guess MIME
+  description?: string;  // human-readable note
+  tags?: string[];       // categorization
 }
 
 export interface LintIssue {
@@ -29,11 +59,30 @@ export interface LintIssue {
   message: string;
   suggestion?: string;
   autoFixable: boolean;
+  category?: "contradiction" | "orphan" | "broken-link" | "missing-source" | "stale" | "structure" | "integrity";
 }
 
 export interface LintReport {
   pagesChecked: number;
+  rawChecked: number;
   issues: LintIssue[];
+  contradictions: Contradiction[];
+}
+
+export interface Contradiction {
+  claim: string;         // what's being contradicted
+  pageA: string;         // first page
+  excerptA: string;      // text from page A
+  pageB: string;         // conflicting page
+  excerptB: string;      // text from page B
+  severity: "error" | "warning";
+}
+
+export interface TimelineEntry {
+  time: string;
+  operation: string;
+  page?: string;
+  summary: string;
 }
 
 export interface WikiConfig {
@@ -45,8 +94,13 @@ export interface WikiConfig {
     checkOrphans: boolean;
     checkStaleDays: number;
     checkMissingSources: boolean;
+    checkContradictions: boolean;
+    checkIntegrity: boolean;
   };
 }
+
+// System pages that lint should treat specially
+const SYSTEM_PAGES = new Set(["index.md", "log.md", "timeline.md"]);
 
 // ── Wiki Class ────────────────────────────────────────────────────
 
@@ -70,10 +124,15 @@ export class Wiki {
       mkdirSync(dir, { recursive: true });
     }
 
+    const now = new Date().toISOString();
+    const nowShort = now.replace("T", " ").slice(0, 16) + " UTC";
+
     // index.md
-    const indexContent = `---
+    writeFileSync(join(wikiDir, "index.md"), `---
 title: Knowledge Base Index
 type: index
+created: "${now}"
+updated: "${now}"
 ---
 
 # Knowledge Base Index
@@ -85,32 +144,49 @@ _No pages yet. Use your agent to add knowledge._
 ## Recent Updates
 
 _No updates yet._
-`;
-    writeFileSync(join(wikiDir, "index.md"), indexContent);
+`);
 
     // log.md
-    const now = new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC";
-    const logContent = `---
+    writeFileSync(join(wikiDir, "log.md"), `---
 title: Operation Log
 type: log
+created: "${now}"
 ---
 
 # Operation Log
 
-| Time | Operation | Summary |
-|------|-----------|---------|
-| ${now} | init | Knowledge base initialized |
-`;
-    writeFileSync(join(wikiDir, "log.md"), logContent);
+| Time | Operation | Page | Summary |
+|------|-----------|------|---------|
+| ${nowShort} | init | — | Knowledge base initialized |
+`);
+
+    // timeline.md
+    writeFileSync(join(wikiDir, "timeline.md"), `---
+title: Knowledge Timeline
+type: timeline
+created: "${now}"
+updated: "${now}"
+---
+
+# Knowledge Timeline
+
+_Chronological view of all knowledge in this wiki._
+
+## ${now.slice(0, 10)}
+
+- **init** — Knowledge base created
+`);
 
     // default config
     const configData = {
-      version: "1",
+      version: "2",
       wiki: { path: "wiki/", raw_path: "raw/", schemas_path: "schemas/" },
       lint: {
         check_orphans: true,
         check_stale_days: 30,
         check_missing_sources: true,
+        check_contradictions: true,
+        check_integrity: true,
       },
     };
     writeFileSync(join(root, ".agent-wiki.yaml"), yaml.dump(configData, { lineWidth: 100 }));
@@ -149,9 +225,145 @@ type: log
         checkOrphans: (lintData.check_orphans as boolean) ?? true,
         checkStaleDays: (lintData.check_stale_days as number) ?? 30,
         checkMissingSources: (lintData.check_missing_sources as boolean) ?? true,
+        checkContradictions: (lintData.check_contradictions as boolean) ?? true,
+        checkIntegrity: (lintData.check_integrity as boolean) ?? true,
       },
     };
   }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  RAW LAYER — Immutable source documents
+  // ═══════════════════════════════════════════════════════════════
+
+  /** Register a raw document. Copies file to raw/ with metadata sidecar.
+   *  If content is provided as string, writes it directly.
+   *  If sourcePath is an existing file, copies it.
+   *  Raw files are IMMUTABLE — re-adding the same path is an error. */
+  rawAdd(
+    filename: string,
+    opts: {
+      content?: string;
+      sourcePath?: string;
+      sourceUrl?: string;
+      description?: string;
+      tags?: string[];
+      mimeType?: string;
+    }
+  ): RawDocument {
+    const rawPath = join(this.config.rawDir, filename);
+    const metaPath = rawPath + ".meta.yaml";
+
+    // Immutability guard — never overwrite existing raw files
+    if (existsSync(rawPath)) {
+      throw new Error(`Raw file already exists: ${filename}. Raw files are immutable.`);
+    }
+
+    mkdirSync(dirname(rawPath), { recursive: true });
+
+    // Write content
+    if (opts.content !== undefined) {
+      writeFileSync(rawPath, opts.content);
+    } else if (opts.sourcePath && existsSync(opts.sourcePath)) {
+      copyFileSync(opts.sourcePath, rawPath);
+    } else {
+      throw new Error("Either content or a valid sourcePath is required");
+    }
+
+    // Compute hash and size
+    const buf = readFileSync(rawPath);
+    const sha256 = createHash("sha256").update(buf).digest("hex");
+    const size = buf.length;
+
+    const now = new Date().toISOString();
+    const doc: RawDocument = {
+      path: filename,
+      sourceUrl: opts.sourceUrl,
+      downloadedAt: now,
+      sha256,
+      size,
+      mimeType: opts.mimeType ?? guessMime(filename),
+      description: opts.description,
+      tags: opts.tags,
+    };
+
+    // Write metadata sidecar
+    writeFileSync(metaPath, yaml.dump(doc, { lineWidth: 100 }));
+
+    this.log("raw-add", filename, `Added raw: ${filename} (${formatBytes(size)}, sha256:${sha256.slice(0, 12)}...)`);
+    return doc;
+  }
+
+  /** List all raw documents with metadata. */
+  rawList(): RawDocument[] {
+    if (!existsSync(this.config.rawDir)) return [];
+
+    const docs: RawDocument[] = [];
+    for (const file of listAllFiles(this.config.rawDir, this.config.rawDir)) {
+      if (file.endsWith(".meta.yaml")) continue; // skip sidecars
+      const metaPath = join(this.config.rawDir, file) + ".meta.yaml";
+      if (existsSync(metaPath)) {
+        const meta = yaml.load(readFileSync(metaPath, "utf-8")) as RawDocument;
+        docs.push(meta);
+      } else {
+        // raw file without metadata — create minimal entry
+        const fullPath = join(this.config.rawDir, file);
+        const buf = readFileSync(fullPath);
+        docs.push({
+          path: file,
+          downloadedAt: statSync(fullPath).mtime.toISOString(),
+          sha256: createHash("sha256").update(buf).digest("hex"),
+          size: buf.length,
+          mimeType: guessMime(file),
+        });
+      }
+    }
+    return docs;
+  }
+
+  /** Read a raw document's content. */
+  rawRead(filename: string): { content: string; meta: RawDocument | null } | null {
+    const fullPath = join(this.config.rawDir, filename);
+    if (!existsSync(fullPath)) return null;
+
+    const content = readFileSync(fullPath, "utf-8");
+    const metaPath = fullPath + ".meta.yaml";
+    const meta = existsSync(metaPath)
+      ? (yaml.load(readFileSync(metaPath, "utf-8")) as RawDocument)
+      : null;
+
+    return { content, meta };
+  }
+
+  /** Verify integrity of all raw files against their stored hashes. */
+  rawVerify(): Array<{ path: string; status: "ok" | "corrupted" | "missing-meta" }> {
+    const results: Array<{ path: string; status: "ok" | "corrupted" | "missing-meta" }> = [];
+    if (!existsSync(this.config.rawDir)) return results;
+
+    for (const file of listAllFiles(this.config.rawDir, this.config.rawDir)) {
+      if (file.endsWith(".meta.yaml")) continue;
+      const fullPath = join(this.config.rawDir, file);
+      const metaPath = fullPath + ".meta.yaml";
+
+      if (!existsSync(metaPath)) {
+        results.push({ path: file, status: "missing-meta" });
+        continue;
+      }
+
+      const meta = yaml.load(readFileSync(metaPath, "utf-8")) as RawDocument;
+      const buf = readFileSync(fullPath);
+      const actualHash = createHash("sha256").update(buf).digest("hex");
+
+      results.push({
+        path: file,
+        status: actualHash === meta.sha256 ? "ok" : "corrupted",
+      });
+    }
+    return results;
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  WIKI LAYER — Mutable compiled knowledge
+  // ═══════════════════════════════════════════════════════════════
 
   // ── CRUD ──────────────────────────────────────────────────────
 
@@ -159,7 +371,6 @@ type: log
   read(pagePath: string): WikiPage | null {
     const fullPath = join(this.config.wikiDir, pagePath);
     if (!existsSync(fullPath)) {
-      // try with .md
       const withMd = fullPath.endsWith(".md") ? fullPath : fullPath + ".md";
       if (!existsSync(withMd)) return null;
       return this.parsePage(relative(this.config.wikiDir, withMd), readFileSync(withMd, "utf-8"));
@@ -167,22 +378,45 @@ type: log
     return this.parsePage(pagePath, readFileSync(fullPath, "utf-8"));
   }
 
-  /** Write (create or update) a wiki page. Content must include frontmatter. */
+  /** Write (create or update) a wiki page. Content must include frontmatter.
+   *  Automatically injects/updates created and updated timestamps. */
   write(pagePath: string, content: string, source?: string): void {
     const fullPath = join(this.config.wikiDir, pagePath);
-    const dir = join(fullPath, "..");
+    const dir = dirname(fullPath);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(fullPath, content.trimEnd() + "\n");
 
-    this.log("write", `Wrote ${pagePath}${source ? ` (${source})` : ""}`);
+    const now = new Date().toISOString();
+
+    // Parse incoming content to inject timestamps
+    const parsed = matter(content);
+    if (!parsed.data.created) {
+      // Check if page already exists — preserve original created time
+      if (existsSync(fullPath)) {
+        const existing = matter(readFileSync(fullPath, "utf-8"));
+        parsed.data.created = existing.data.created ?? now;
+      } else {
+        parsed.data.created = now;
+      }
+    }
+    parsed.data.updated = now;
+
+    // Reconstruct content with updated frontmatter
+    const finalContent = matter.stringify(parsed.content, parsed.data);
+    writeFileSync(fullPath, finalContent.trimEnd() + "\n");
+
+    this.log("write", pagePath, `Wrote ${pagePath}${source ? ` (${source})` : ""}`);
   }
 
   /** Delete a wiki page. Returns true if it existed. */
   delete(pagePath: string): boolean {
+    // Guard: never delete system pages
+    if (SYSTEM_PAGES.has(pagePath)) {
+      throw new Error(`Cannot delete system page: ${pagePath}`);
+    }
     const fullPath = join(this.config.wikiDir, pagePath);
     if (!existsSync(fullPath)) return false;
     unlinkSync(fullPath);
-    this.log("delete", `Deleted ${pagePath}`);
+    this.log("delete", pagePath, `Deleted ${pagePath}`);
     return true;
   }
 
@@ -217,23 +451,21 @@ type: log
       const text = (page.title + " " + page.tags.join(" ") + " " + page.content).toLowerCase();
       let score = 0;
       for (const term of terms) {
-        // count occurrences
         let idx = 0;
         while ((idx = text.indexOf(term, idx)) !== -1) {
           score++;
           idx += term.length;
         }
-        // title match bonus
         if (page.title.toLowerCase().includes(term)) score += 5;
-        // tag match bonus
         if (page.tags.some((t) => String(t).toLowerCase().includes(term))) score += 3;
+        // Boost synthesis pages slightly — they represent distilled knowledge
+        if (page.type === "synthesis") score += 1;
       }
 
       if (score > 0) {
-        // extract snippet around first match
         const firstIdx = text.indexOf(terms[0]!);
-        const start = Math.max(0, firstIdx - 40);
-        const end = Math.min(text.length, firstIdx + 80);
+        const start = Math.max(0, firstIdx - 50);
+        const end = Math.min(text.length, firstIdx + 100);
         const snippet = (start > 0 ? "..." : "") + text.slice(start, end).trim() + (end < text.length ? "..." : "");
         results.push({ path: pagePath, score, snippet });
       }
@@ -243,18 +475,29 @@ type: log
     return results.slice(0, limit);
   }
 
-  // ── Lint ──────────────────────────────────────────────────────
+  // ── Lint — Self-checking & error detection ────────────────────
 
-  /** Run health checks. Pure rules, no LLM. */
+  /** Run comprehensive health checks. Pure rules, no LLM.
+   *  Detects: contradictions, orphans, broken links, missing sources,
+   *  stale content, structural issues, integrity problems. */
   lint(): LintReport {
     const pages = this.listAllPages();
-    const report: LintReport = { pagesChecked: pages.length, issues: [] };
+    const report: LintReport = {
+      pagesChecked: pages.length,
+      rawChecked: 0,
+      issues: [],
+      contradictions: [],
+    };
 
+    // Build a map of all pages for cross-referencing
+    const pageMap = new Map<string, WikiPage>();
     for (const pagePath of pages) {
       const page = this.read(pagePath);
-      if (!page) continue;
+      if (page) pageMap.set(pagePath, page);
+    }
 
-      // Missing frontmatter
+    for (const [pagePath, page] of pageMap) {
+      // ── Missing frontmatter ──
       if (Object.keys(page.frontmatter).length === 0) {
         report.issues.push({
           severity: "warning",
@@ -262,16 +505,28 @@ type: log
           message: "Missing YAML frontmatter",
           suggestion: "Add frontmatter with title, type, tags, and sources",
           autoFixable: true,
+          category: "structure",
         });
       }
 
-      // Orphan pages
-      if (this.config.lint.checkOrphans && !["index.md", "log.md"].includes(pagePath)) {
+      // ── Missing title ──
+      if (!page.title || page.title === basename(pagePath, extname(pagePath))) {
+        report.issues.push({
+          severity: "warning",
+          page: pagePath,
+          message: "Missing or auto-generated title",
+          suggestion: "Add a meaningful title in frontmatter",
+          autoFixable: false,
+          category: "structure",
+        });
+      }
+
+      // ── Orphan pages ──
+      if (this.config.lint.checkOrphans && !SYSTEM_PAGES.has(pagePath)) {
         const slug = basename(pagePath, extname(pagePath));
-        const hasIncoming = pages.some((other) => {
+        const hasIncoming = [...pageMap].some(([other, otherPage]) => {
           if (other === pagePath) return false;
-          const otherPage = this.read(other);
-          return otherPage?.links.includes(slug) ?? false;
+          return otherPage.links.includes(slug);
         });
         if (!hasIncoming) {
           report.issues.push({
@@ -280,11 +535,12 @@ type: log
             message: "Orphan page — no other pages link here",
             suggestion: `Add [[${slug}]] to related pages or index.md`,
             autoFixable: true,
+            category: "orphan",
           });
         }
       }
 
-      // Broken links
+      // ── Broken links ──
       for (const link of page.links) {
         const linkPath = link.endsWith(".md") ? link : link + ".md";
         if (!pages.includes(linkPath) && !pages.includes(link)) {
@@ -294,24 +550,43 @@ type: log
             message: `Broken link: [[${link}]]`,
             suggestion: `Create ${link}.md or fix the link`,
             autoFixable: false,
+            category: "broken-link",
           });
         }
       }
 
-      // Missing sources
-      if (this.config.lint.checkMissingSources && page.type && page.type !== "index" && page.type !== "log") {
-        if (page.sources.length === 0) {
+      // ── Missing sources (non-system pages) ──
+      if (this.config.lint.checkMissingSources && !SYSTEM_PAGES.has(pagePath)) {
+        if (page.sources.length === 0 && page.type && page.type !== "index" && page.type !== "log" && page.type !== "timeline") {
           report.issues.push({
             severity: "info",
             page: pagePath,
-            message: "No sources listed — claims are not traceable",
-            suggestion: "Add sources to frontmatter",
+            message: "No sources listed — claims are not traceable to raw documents",
+            suggestion: "Add sources to frontmatter linking to raw/ files or URLs",
             autoFixable: false,
+            category: "missing-source",
           });
         }
       }
 
-      // Stale content
+      // ── Synthesis page integrity ──
+      if (page.type === "synthesis" && page.derivedFrom) {
+        for (const src of page.derivedFrom) {
+          const srcPath = src.endsWith(".md") ? src : src + ".md";
+          if (!pages.includes(srcPath) && !pages.includes(src)) {
+            report.issues.push({
+              severity: "error",
+              page: pagePath,
+              message: `Synthesis source missing: ${src}`,
+              suggestion: `The page this synthesis derives from no longer exists. Review and update.`,
+              autoFixable: false,
+              category: "integrity",
+            });
+          }
+        }
+      }
+
+      // ── Stale content ──
       if (this.config.lint.checkStaleDays > 0) {
         try {
           const fullPath = join(this.config.wikiDir, pagePath);
@@ -324,6 +599,7 @@ type: log
               message: `Stale content — last modified ${ageDays} days ago`,
               suggestion: "Review and update if needed",
               autoFixable: false,
+              category: "stale",
             });
           }
         } catch {
@@ -332,8 +608,164 @@ type: log
       }
     }
 
-    this.log("lint", `Checked ${report.pagesChecked} pages, found ${report.issues.length} issues`);
+    // ── Cross-page contradiction detection ──
+    if (this.config.lint.checkContradictions) {
+      const contradictions = this.detectContradictions(pageMap);
+      report.contradictions = contradictions;
+      for (const c of contradictions) {
+        report.issues.push({
+          severity: c.severity,
+          page: c.pageA,
+          message: `Contradiction with [[${basename(c.pageB, ".md")}]]: ${c.claim}`,
+          suggestion: `"${c.excerptA}" vs "${c.excerptB}" — review and resolve`,
+          autoFixable: false,
+          category: "contradiction",
+        });
+      }
+    }
+
+    // ── Raw file integrity ──
+    if (this.config.lint.checkIntegrity) {
+      const rawResults = this.rawVerify();
+      report.rawChecked = rawResults.length;
+      for (const r of rawResults) {
+        if (r.status === "corrupted") {
+          report.issues.push({
+            severity: "error",
+            page: `raw/${r.path}`,
+            message: "Raw file corrupted — SHA-256 mismatch",
+            suggestion: "Re-download the original source",
+            autoFixable: false,
+            category: "integrity",
+          });
+        } else if (r.status === "missing-meta") {
+          report.issues.push({
+            severity: "warning",
+            page: `raw/${r.path}`,
+            message: "Raw file has no metadata sidecar (.meta.yaml)",
+            suggestion: "Use raw_add to properly register this file",
+            autoFixable: true,
+            category: "integrity",
+          });
+        }
+      }
+    }
+
+    this.log("lint", "—", `Checked ${report.pagesChecked} pages + ${report.rawChecked} raw files, found ${report.issues.length} issues (${report.contradictions.length} contradictions)`);
     return report;
+  }
+
+  // ── Contradiction detection ───────────────────────────────────
+
+  /** Detect contradictions between pages.
+   *  Looks for numeric claims, date claims, and factual statements
+   *  that conflict across pages about the same entity/topic. */
+  private detectContradictions(pageMap: Map<string, WikiPage>): Contradiction[] {
+    const contradictions: Contradiction[] = [];
+
+    // Extract claims from pages — look for patterns like "X is Y", dates, numbers
+    const claims = new Map<string, Array<{ page: string; excerpt: string; value: string }>>();
+
+    for (const [pagePath, page] of pageMap) {
+      if (SYSTEM_PAGES.has(pagePath)) continue;
+
+      // Extract date claims: "published in YYYY", "released YYYY", "founded YYYY"
+      const datePatterns = page.content.matchAll(
+        /(?:published|released|founded|created|introduced|launched|announced|born|died)\s+(?:in\s+)?(\d{4})/gi
+      );
+      for (const m of datePatterns) {
+        const key = m[0]!.replace(/\d{4}/, "YEAR").toLowerCase().trim();
+        const entry = { page: pagePath, excerpt: m[0]!, value: m[1]! };
+        if (!claims.has(key)) claims.set(key, []);
+        claims.get(key)!.push(entry);
+      }
+
+      // Extract numeric claims: "achieved XX% mAP", "XX FPS", "XX parameters"
+      const numericPatterns = page.content.matchAll(
+        /(\d+\.?\d*)\s*(%|fps|ms|map|ap|parameters|params|layers|million|billion|m\b|b\b|k\b)/gi
+      );
+      for (const m of numericPatterns) {
+        // Context: 30 chars before and after
+        const idx = page.content.indexOf(m[0]!);
+        const ctxStart = Math.max(0, idx - 30);
+        const ctxEnd = Math.min(page.content.length, idx + m[0]!.length + 30);
+        const context = page.content.slice(ctxStart, ctxEnd).replace(/\n/g, " ").trim();
+
+        // Key = normalized context without the number
+        const key = context.replace(/\d+\.?\d*/g, "N").toLowerCase().slice(0, 60);
+        const entry = { page: pagePath, excerpt: context, value: m[1]! };
+        if (!claims.has(key)) claims.set(key, []);
+        claims.get(key)!.push(entry);
+      }
+    }
+
+    // Compare claims from different pages
+    for (const [claimKey, entries] of claims) {
+      if (entries.length < 2) continue;
+
+      // Group by page
+      const byPage = new Map<string, typeof entries[0]>();
+      for (const e of entries) {
+        if (!byPage.has(e.page)) byPage.set(e.page, e);
+      }
+      const uniquePages = [...byPage.values()];
+      if (uniquePages.length < 2) continue;
+
+      // Check if values differ
+      for (let i = 0; i < uniquePages.length; i++) {
+        for (let j = i + 1; j < uniquePages.length; j++) {
+          const a = uniquePages[i]!;
+          const b = uniquePages[j]!;
+          if (a.value !== b.value) {
+            contradictions.push({
+              claim: claimKey.replace(/\bn\b/gi, "?"),
+              pageA: a.page,
+              excerptA: a.excerpt,
+              pageB: b.page,
+              excerptB: b.excerpt,
+              severity: Math.abs(parseFloat(a.value) - parseFloat(b.value)) > 10 ? "error" : "warning",
+            });
+          }
+        }
+      }
+    }
+
+    return contradictions;
+  }
+
+  // ── Synthesis — Knowledge distillation ────────────────────────
+
+  /** Get context for synthesis: reads multiple pages and returns
+   *  their content for the agent to distill into a new page. */
+  synthesizeContext(pagePaths: string[]): {
+    pages: Array<{ path: string; title: string; content: string }>;
+    suggestions: string[];
+  } {
+    const pages: Array<{ path: string; title: string; content: string }> = [];
+    const allTags = new Set<string>();
+    const allLinks = new Set<string>();
+
+    for (const p of pagePaths) {
+      const page = this.read(p) ?? this.read(p + ".md");
+      if (page) {
+        pages.push({ path: page.path, title: page.title, content: page.content });
+        page.tags.forEach((t) => allTags.add(t));
+        page.links.forEach((l) => allLinks.add(l));
+      }
+    }
+
+    // Generate suggestions for the synthesis
+    const suggestions: string[] = [];
+    if (pages.length >= 2) {
+      suggestions.push(`Combine insights from ${pages.map((p) => p.title).join(", ")}`);
+      suggestions.push("Look for common themes, contradictions, and gaps");
+      suggestions.push("Create cross-references using [[page-name]] syntax");
+    }
+    if (allTags.size > 0) {
+      suggestions.push(`Suggested tags: ${[...allTags].join(", ")}`);
+    }
+
+    return { pages, suggestions };
   }
 
   // ── Schemas ───────────────────────────────────────────────────
@@ -359,18 +791,20 @@ type: log
   // ── Log ───────────────────────────────────────────────────────
 
   /** Get operation log entries. */
-  getLog(limit = 20): Array<{ time: string; operation: string; summary: string }> {
+  getLog(limit = 20): Array<{ time: string; operation: string; page: string; summary: string }> {
     const logPath = join(this.config.wikiDir, "log.md");
     if (!existsSync(logPath)) return [];
 
     const content = readFileSync(logPath, "utf-8");
     const lines = content.split("\n").filter((l) => l.startsWith("|") && !l.startsWith("| Time") && !l.startsWith("|---"));
-    const entries: Array<{ time: string; operation: string; summary: string }> = [];
+    const entries: Array<{ time: string; operation: string; page: string; summary: string }> = [];
 
     for (const line of lines) {
       const cols = line.split("|").map((c) => c.trim()).filter(Boolean);
-      if (cols.length >= 3) {
-        entries.push({ time: cols[0]!, operation: cols[1]!, summary: cols[2]! });
+      if (cols.length >= 4) {
+        entries.push({ time: cols[0]!, operation: cols[1]!, page: cols[2]!, summary: cols[3]! });
+      } else if (cols.length >= 3) {
+        entries.push({ time: cols[0]!, operation: cols[1]!, page: "—", summary: cols[2]! });
       }
     }
 
@@ -379,10 +813,14 @@ type: log
 
   // ── Index rebuild ─────────────────────────────────────────────
 
-  /** Rebuild index.md from all pages. */
+  /** Rebuild index.md from all pages. Groups by type with page counts. */
   rebuildIndex(): void {
-    const pages = this.listAllPages().filter((p) => p !== "index.md" && p !== "log.md");
+    const pages = this.listAllPages().filter((p) => !SYSTEM_PAGES.has(p));
     const categories: Record<string, string[]> = {};
+    let rawCount = 0;
+    try {
+      rawCount = this.rawList().length;
+    } catch { /* no raw dir */ }
 
     for (const pagePath of pages) {
       const page = this.read(pagePath);
@@ -390,24 +828,30 @@ type: log
       const type = page.type ?? "uncategorized";
       if (!categories[type]) categories[type] = [];
       const slug = basename(pagePath, extname(pagePath));
-      categories[type].push(`- [[${slug}]] — ${page.title}`);
+      const updated = page.updated ? ` _(${page.updated.slice(0, 10)})_` : "";
+      categories[type].push(`- [[${slug}]] — ${page.title}${updated}`);
     }
 
-    const now = new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC";
+    const now = new Date().toISOString();
     let lines = [
       "---",
       "title: Knowledge Base Index",
       "type: index",
+      `created: "${this.read("index.md")?.created ?? now}"`,
+      `updated: "${now}"`,
       "---",
       "",
       "# Knowledge Base Index",
+      "",
+      `**${pages.length} pages** across **${Object.keys(categories).length} categories** | **${rawCount} raw sources**`,
       "",
     ];
 
     const sortedTypes = Object.keys(categories).sort();
     if (sortedTypes.length > 0) {
       for (const type of sortedTypes) {
-        lines.push(`## ${type.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}`);
+        const label = type.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+        lines.push(`## ${label} (${categories[type]!.length})`);
         lines.push("");
         lines.push(...categories[type]!);
         lines.push("");
@@ -417,10 +861,60 @@ type: log
       lines.push("");
     }
 
-    lines.push("## Recent Updates", "", `_Last rebuilt: ${now}_`, "");
+    lines.push("---", "", `_Last rebuilt: ${now.replace("T", " ").slice(0, 16)} UTC_`, "");
 
     writeFileSync(join(this.config.wikiDir, "index.md"), lines.join("\n"));
-    this.log("rebuild-index", `Rebuilt index with ${pages.length} pages`);
+    this.log("rebuild-index", "index.md", `Rebuilt index with ${pages.length} pages`);
+  }
+
+  // ── Timeline ──────────────────────────────────────────────────
+
+  /** Rebuild timeline.md — chronological view of all knowledge. */
+  rebuildTimeline(): void {
+    const pages = this.listAllPages().filter((p) => !SYSTEM_PAGES.has(p));
+    const entries: Array<{ date: string; page: string; title: string; type: string }> = [];
+
+    for (const pagePath of pages) {
+      const page = this.read(pagePath);
+      if (!page) continue;
+      const date = page.created ?? page.updated ?? "unknown";
+      entries.push({
+        date: date.slice(0, 10),
+        page: basename(pagePath, extname(pagePath)),
+        title: page.title,
+        type: page.type ?? "note",
+      });
+    }
+
+    entries.sort((a, b) => b.date.localeCompare(a.date));
+
+    const now = new Date().toISOString();
+    let lines = [
+      "---",
+      "title: Knowledge Timeline",
+      "type: timeline",
+      `updated: "${now}"`,
+      "---",
+      "",
+      "# Knowledge Timeline",
+      "",
+      `_${entries.length} entries — last rebuilt: ${now.replace("T", " ").slice(0, 16)} UTC_`,
+      "",
+    ];
+
+    // Group by date
+    let currentDate = "";
+    for (const e of entries) {
+      if (e.date !== currentDate) {
+        currentDate = e.date;
+        lines.push(`## ${currentDate}`, "");
+      }
+      lines.push(`- **[${e.type}]** [[${e.page}]] — ${e.title}`);
+    }
+    lines.push("");
+
+    writeFileSync(join(this.config.wikiDir, "timeline.md"), lines.join("\n"));
+    this.log("rebuild-timeline", "timeline.md", `Rebuilt timeline with ${entries.length} entries`);
   }
 
   // ── Internal helpers ──────────────────────────────────────────
@@ -436,7 +930,6 @@ type: log
     const fm = parsed.data as Record<string, unknown>;
     const body = parsed.content.trim();
 
-    // Extract [[links]]
     const linkMatches = body.matchAll(/\[\[([^\]]+)\]\]/g);
     const links = [...linkMatches].map((m) => m[1]!);
 
@@ -449,13 +942,16 @@ type: log
       content: body,
       frontmatter: fm,
       links,
+      created: fm.created as string | undefined,
+      updated: fm.updated as string | undefined,
+      derivedFrom: Array.isArray(fm.derived_from) ? fm.derived_from.map(String) : undefined,
     };
   }
 
-  private log(operation: string, summary: string): void {
+  private log(operation: string, page: string, summary: string): void {
     const logPath = join(this.config.wikiDir, "log.md");
     const now = new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC";
-    const entry = `| ${now} | ${operation} | ${summary} |\n`;
+    const entry = `| ${now} | ${operation} | ${page} | ${summary} |\n`;
 
     if (existsSync(logPath)) {
       const content = readFileSync(logPath, "utf-8");
@@ -464,8 +960,8 @@ type: log
       const header =
         "---\ntitle: Operation Log\ntype: log\n---\n\n" +
         "# Operation Log\n\n" +
-        "| Time | Operation | Summary |\n" +
-        "|------|-----------|--------|\n" +
+        "| Time | Operation | Page | Summary |\n" +
+        "|------|-----------|------|--------|\n" +
         entry;
       writeFileSync(logPath, header);
     }
@@ -486,6 +982,50 @@ function listMdFiles(dir: string, root: string): string[] {
     }
   }
   return result.sort();
+}
+
+function listAllFiles(dir: string, root: string): string[] {
+  const result: string[] = [];
+  if (!existsSync(dir)) return result;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      result.push(...listAllFiles(full, root));
+    } else {
+      result.push(relative(root, full));
+    }
+  }
+  return result.sort();
+}
+
+function guessMime(filename: string): string {
+  const ext = extname(filename).toLowerCase();
+  const map: Record<string, string> = {
+    ".md": "text/markdown",
+    ".txt": "text/plain",
+    ".pdf": "application/pdf",
+    ".html": "text/html",
+    ".json": "application/json",
+    ".yaml": "text/yaml",
+    ".yml": "text/yaml",
+    ".csv": "text/csv",
+    ".xml": "text/xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  };
+  return map[ext] ?? "application/octet-stream";
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function writeDefaultSchemas(dir: string): void {
@@ -670,6 +1210,36 @@ description: Freeform knowledge — anything that does not fit other templates
 # {{title}}
 
 {{content}}
+
+## Sources
+
+- [TODO]
+`,
+    "synthesis.md": `---
+template: synthesis
+description: Distilled knowledge combining insights from multiple pages
+---
+
+# {{title}}
+
+**Derived from:** [TODO: list source pages with [[links]]]
+**Date:** [TODO]
+
+## Key Insights
+
+[TODO: What emerges from combining these sources?]
+
+## Connections
+
+[TODO: How do these sources relate to each other?]
+
+## Contradictions & Open Questions
+
+[TODO: Where do sources disagree? What remains unclear?]
+
+## Synthesis
+
+[TODO: The integrated understanding]
 
 ## Sources
 

@@ -18,7 +18,7 @@ npx @agent-wiki/mcp-server serve --wiki-path ./my-knowledge
 
 Most AI systems treat knowledge as disposable. You ask a question, it retrieves some fragments, generates an answer, and everything is forgotten. Next time, it starts from zero.
 
-agent-wiki takes a different approach: **knowledge compilation**. Instead of retrieving raw documents every time (RAG), the agent incrementally builds and maintains a persistent wiki — structured, interlinked, and continuously refined. Every interaction makes the knowledge base better.
+agent-wiki takes a different approach: **knowledge compilation**, a concept introduced by [Andrej Karpathy](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Instead of retrieving raw documents every time (RAG), the agent incrementally builds and maintains a persistent wiki — structured, interlinked, and continuously refined. Every interaction makes the knowledge base better.
 
 The key insight: **LLMs are better editors than search engines.** Let them curate, synthesize, and maintain knowledge over time — not just retrieve it on demand.
 
@@ -238,6 +238,10 @@ npx @agent-wiki/mcp-server lint                       # run health checks
 6. **Provenance matters** — Every wiki claim traces back to raw sources. No hallucination without accountability.
 7. **Code and data separate** — Configurable workspace keeps your knowledge portable and independent.
 8. **Git-native** — Plain Markdown files. Every change is diffable, blameable, and revertable.
+
+## Acknowledgments
+
+The knowledge compilation architecture is inspired by Andrej Karpathy's [LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) concept — the idea that LLMs should compile and maintain structured knowledge rather than retrieve raw fragments on every query.
 
 ## License
 

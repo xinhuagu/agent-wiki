@@ -1,0 +1,49 @@
+{
+  "name": "agent-wiki",
+  "version": "0.1.0",
+  "description": "Agent-driven knowledge base — structured Markdown wiki with MCP server. No LLM needed, your agent IS the LLM.",
+  "type": "module",
+  "bin": {
+    "agent-wiki": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "schemas"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "wiki",
+    "knowledge-base",
+    "agent",
+    "markdown",
+    "model-context-protocol"
+  ],
+  "author": "Xinhua Chen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xinhuagu/agent-wiki.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "gray-matter": "^4.0.3",
+    "js-yaml": "^4.1.0",
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  }
+}

@@ -132,6 +132,75 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
         },
       },
       // ═══════════════════════════════════════════════════════
+      //  ATLASSIAN — Confluence & Jira
+      // ═══════════════════════════════════════════════════════
+      {
+        name: "raw_import_confluence",
+        description:
+          "Import a Confluence page (and optionally all child pages recursively) into raw/. " +
+          "Saves each page as HTML with metadata sidecar. Generates _tree.yaml preserving page hierarchy. " +
+          "Requires CONFLUENCE_API_TOKEN env var set to 'email:api-token'.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            url: {
+              type: "string",
+              description: "Confluence page URL (e.g. https://company.atlassian.net/wiki/spaces/ENG/pages/123456/Page-Title)",
+            },
+            recursive: {
+              type: "boolean",
+              description: "Import child pages recursively (default: false)",
+            },
+            depth: {
+              type: "number",
+              description: "Max recursion depth (-1 = unlimited, default: 50 when recursive=true, 0 when false)",
+            },
+            auth_env: {
+              type: "string",
+              description: "Environment variable name containing auth credentials (default: CONFLUENCE_API_TOKEN)",
+            },
+          },
+          required: ["url"],
+        },
+      },
+      {
+        name: "raw_import_jira",
+        description:
+          "Import a Jira issue into raw/ with full details: fields, description, comments, attachments, and linked issues. " +
+          "Saves structured JSON + readable Markdown. Attachments are downloaded to subdirectory. " +
+          "Requires JIRA_API_TOKEN env var set to 'email:api-token'.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            url: {
+              type: "string",
+              description: "Jira issue URL (e.g. https://company.atlassian.net/browse/PROJ-123)",
+            },
+            include_comments: {
+              type: "boolean",
+              description: "Include issue comments (default: true)",
+            },
+            include_attachments: {
+              type: "boolean",
+              description: "Download attachments (default: true)",
+            },
+            include_links: {
+              type: "boolean",
+              description: "Import linked issues (default: true)",
+            },
+            link_depth: {
+              type: "number",
+              description: "How many levels of linked issues to follow (default: 1)",
+            },
+            auth_env: {
+              type: "string",
+              description: "Environment variable name containing auth credentials (default: JIRA_API_TOKEN)",
+            },
+          },
+          required: ["url"],
+        },
+      },
+      // ═══════════════════════════════════════════════════════
       //  WIKI LAYER — Mutable compiled knowledge
       // ═══════════════════════════════════════════════════════
       {
@@ -419,6 +488,40 @@ async function handleTool(
         tags: args.tags as string[] | undefined,
       });
       return JSON.stringify({ ok: true, document: doc }, null, 2);
+    }
+
+    // ═══ ATLASSIAN ═══
+
+    case "raw_import_confluence": {
+      const result = await wiki.confluenceImport(args.url as string, {
+        recursive: args.recursive as boolean | undefined,
+        depth: args.depth as number | undefined,
+        authEnv: args.auth_env as string | undefined,
+      });
+      return JSON.stringify({
+        ok: true,
+        pages: result.pages,
+        files: result.files,
+        tree: result.tree,
+      }, null, 2);
+    }
+
+    case "raw_import_jira": {
+      const result = await wiki.jiraImport(args.url as string, {
+        includeComments: args.include_comments as boolean | undefined,
+        includeAttachments: args.include_attachments as boolean | undefined,
+        includeLinks: args.include_links as boolean | undefined,
+        linkDepth: args.link_depth as number | undefined,
+        authEnv: args.auth_env as string | undefined,
+      });
+      return JSON.stringify({
+        ok: true,
+        issueKey: result.issueKey,
+        summary: result.summary,
+        files: result.files,
+        linkedIssues: result.linkedIssues,
+        importedCount: result.importedCount,
+      }, null, 2);
     }
 
     // ═══ WIKI LAYER ═══

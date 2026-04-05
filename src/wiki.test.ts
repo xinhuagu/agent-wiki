@@ -882,3 +882,170 @@ describe("path traversal via wiki methods", () => {
     expect(wiki.read("topics/concept-a.md")).not.toBeNull();
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════
+//  sourcePath restriction (security boundary for file copy)
+// ═══════════════════════════════════════════════════════════════════
+
+describe("sourcePath allowed directory restriction", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("allows sourcePath inside workspace (default)", () => {
+    const wiki = freshWiki();
+    const srcFile = join(TEST_ROOT, "local.txt");
+    writeFileSync(srcFile, "ok");
+    const doc = wiki.rawAdd("imported.txt", { sourcePath: srcFile });
+    expect(doc.size).toBeGreaterThan(0);
+  });
+
+  it("rejects sourcePath outside workspace", () => {
+    const wiki = freshWiki();
+    // /tmp is outside the test workspace
+    const outsideFile = join("/tmp", `agent-wiki-test-${Date.now()}.txt`);
+    writeFileSync(outsideFile, "secret");
+    try {
+      expect(() => wiki.rawAdd("stolen.txt", { sourcePath: outsideFile }))
+        .toThrow(/outside allowed directories/i);
+    } finally {
+      rmSync(outsideFile, { force: true });
+    }
+  });
+
+  it("rejects sourcePath with traversal to escape workspace", () => {
+    const wiki = freshWiki();
+    // Even if file exists, ../../../etc/passwd must be blocked
+    expect(() => wiki.rawAdd("etc.txt", { sourcePath: join(TEST_ROOT, "../../../etc/passwd") }))
+      .toThrow(/outside allowed directories/i);
+  });
+
+  it("respects custom allowedSourceDirs from config", () => {
+    const wiki = freshWiki();
+    const externalDir = join(TEST_ROOT, "..", "__allowed_external__");
+    mkdirSync(externalDir, { recursive: true });
+    const extFile = join(externalDir, "ext.txt");
+    writeFileSync(extFile, "external ok");
+
+    // Manually widen the config
+    wiki.config.allowedSourceDirs.push(externalDir);
+
+    try {
+      const doc = wiki.rawAdd("from-ext.txt", { sourcePath: extFile });
+      expect(doc.size).toBeGreaterThan(0);
+    } finally {
+      rmSync(externalDir, { recursive: true, force: true });
+    }
+  });
+
+  it("config defaults to workspace only", () => {
+    const wiki = freshWiki();
+    expect(wiki.config.allowedSourceDirs).toEqual([wiki.config.workspace]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+//  ATLASSIAN — Confluence & Jira (unit tests, no live API)
+// ═══════════════════════════════════════════════════════════════════
+
+import {
+  parseConfluenceUrl,
+  parseJiraUrl,
+  slugify,
+  resolveAuth,
+  validateHost,
+} from "./atlassian.js";
+
+describe("Confluence URL parsing", () => {
+  it("parses standard Confluence page URL", () => {
+    const result = parseConfluenceUrl(
+      "https://acme.atlassian.net/wiki/spaces/ENG/pages/12345/Architecture-Overview"
+    );
+    expect(result.host).toBe("acme.atlassian.net");
+    expect(result.pageId).toBe("12345");
+  });
+
+  it("rejects invalid URL", () => {
+    expect(() => parseConfluenceUrl("https://example.com/not-confluence")).toThrow(/Cannot parse/);
+  });
+});
+
+describe("Jira URL parsing", () => {
+  it("parses standard Jira issue URL", () => {
+    const result = parseJiraUrl("https://acme.atlassian.net/browse/PROJ-123");
+    expect(result.host).toBe("acme.atlassian.net");
+    expect(result.issueKey).toBe("PROJ-123");
+  });
+
+  it("rejects invalid URL", () => {
+    expect(() => parseJiraUrl("https://example.com/not-jira")).toThrow(/Cannot parse/);
+  });
+});
+
+describe("slugify", () => {
+  it("converts title to safe filename", () => {
+    expect(slugify("Architecture Overview")).toBe("architecture-overview");
+  });
+
+  it("handles special characters", () => {
+    expect(slugify("API Design (v2) — Draft")).toBe("api-design-v2-draft");
+  });
+
+  it("truncates long titles", () => {
+    const long = "a".repeat(200);
+    expect(slugify(long).length).toBeLessThanOrEqual(80);
+  });
+});
+
+describe("resolveAuth", () => {
+  it("throws when env var is not set", () => {
+    expect(() => resolveAuth("NONEXISTENT_VAR_12345")).toThrow(/not set/);
+  });
+
+  it("auto-encodes email:token as Basic auth", () => {
+    process.env.__TEST_AUTH__ = "user@example.com:token123";
+    try {
+      const auth = resolveAuth("__TEST_AUTH__");
+      expect(auth).toMatch(/^Basic /);
+      const decoded = Buffer.from(auth.replace("Basic ", ""), "base64").toString();
+      expect(decoded).toBe("user@example.com:token123");
+    } finally {
+      delete process.env.__TEST_AUTH__;
+    }
+  });
+
+  it("passes through Bearer token as-is", () => {
+    process.env.__TEST_AUTH__ = "Bearer abc123";
+    try {
+      expect(resolveAuth("__TEST_AUTH__")).toBe("Bearer abc123");
+    } finally {
+      delete process.env.__TEST_AUTH__;
+    }
+  });
+});
+
+describe("validateHost", () => {
+  it("allows any host when allowlist is empty", () => {
+    expect(() => validateHost("evil.com", [])).not.toThrow();
+  });
+
+  it("allows host in allowlist", () => {
+    expect(() => validateHost("acme.atlassian.net", ["acme.atlassian.net"])).not.toThrow();
+  });
+
+  it("rejects host not in allowlist", () => {
+    expect(() => validateHost("evil.com", ["acme.atlassian.net"])).toThrow(/not in the allowed/);
+  });
+});
+
+describe("atlassian config in WikiConfig", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("has default atlassian config", () => {
+    const wiki = freshWiki();
+    expect(wiki.config.atlassian).toBeDefined();
+    expect(wiki.config.atlassian.maxPages).toBe(100);
+    expect(wiki.config.atlassian.maxAttachmentSize).toBe(10 * 1024 * 1024);
+    expect(wiki.config.atlassian.allowedHosts).toEqual([]);
+  });
+});

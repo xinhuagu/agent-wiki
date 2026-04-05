@@ -39,3 +39,18 @@ export type {
   WikiConfig,
 } from "./wiki.js";
 export { createServer, runServer } from "./server.js";
+export type {
+  AtlassianConfig,
+  ConfluenceImportResult,
+  JiraImportResult,
+  ConfluencePageNode,
+} from "./atlassian.js";
+export {
+  parseConfluenceUrl,
+  parseJiraUrl,
+  confluenceImport,
+  jiraImport,
+  slugify,
+  resolveAuth,
+  validateHost,
+} from "./atlassian.js";

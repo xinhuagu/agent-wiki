@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import matter from "gray-matter";
 import yaml from "js-yaml";
 import { VERSION } from "./version.js";
+import type { AtlassianConfig, ConfluenceImportResult, JiraImportResult } from "./atlassian.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -102,6 +103,19 @@ export interface WikiConfig {
     checkMissingSources: boolean;
     checkContradictions: boolean;
     checkIntegrity: boolean;
+  };
+  /**
+   * Directories from which `sourcePath` in rawAdd is allowed to copy files.
+   * Defaults to `[workspace]` — only files already inside the workspace.
+   * Set to explicit paths in .agent-wiki.yaml to widen access.
+   * An empty array blocks all sourcePath copies.
+   */
+  allowedSourceDirs: string[];
+  /** Atlassian (Confluence / Jira) integration settings. */
+  atlassian: {
+    allowedHosts: string[];
+    maxPages: number;
+    maxAttachmentSize: number;
   };
 }
 
@@ -277,6 +291,8 @@ _Chronological view of all knowledge in this wiki._
 
     const wikiData = (raw.wiki ?? {}) as Record<string, string>;
     const lintData = (raw.lint ?? {}) as Record<string, unknown>;
+    const securityData = (raw.security ?? {}) as Record<string, unknown>;
+    const atlassianData = (raw.atlassian ?? {}) as Record<string, unknown>;
 
     // Resolve workspace directory (priority: override > env > config > root)
     let workspace: string;
@@ -294,6 +310,13 @@ _Chronological view of all knowledge in this wiki._
     // Ensure workspace exists
     mkdirSync(workspace, { recursive: true });
 
+    // Resolve allowed source directories for rawAdd sourcePath.
+    // Default: only the workspace itself. Config can widen to explicit dirs.
+    const configuredDirs = securityData.allowed_source_dirs as string[] | undefined;
+    const allowedSourceDirs: string[] = Array.isArray(configuredDirs)
+      ? configuredDirs.map(d => resolve(root, d))   // relative to config root
+      : [workspace];                                  // secure default
+
     return {
       configRoot: root,
       workspace,
@@ -306,6 +329,12 @@ _Chronological view of all knowledge in this wiki._
         checkMissingSources: (lintData.check_missing_sources as boolean) ?? true,
         checkContradictions: (lintData.check_contradictions as boolean) ?? true,
         checkIntegrity: (lintData.check_integrity as boolean) ?? true,
+      },
+      allowedSourceDirs,
+      atlassian: {
+        allowedHosts: Array.isArray(atlassianData.allowed_hosts) ? atlassianData.allowed_hosts as string[] : [],
+        maxPages: (atlassianData.max_pages as number) ?? 100,
+        maxAttachmentSize: (atlassianData.max_attachment_size as number) ?? 10 * 1024 * 1024,
       },
     };
   }
@@ -342,8 +371,23 @@ _Chronological view of all knowledge in this wiki._
     // Write content
     if (opts.content !== undefined) {
       writeFileSync(rawPath, opts.content);
-    } else if (opts.sourcePath && existsSync(opts.sourcePath)) {
-      copyFileSync(opts.sourcePath, rawPath);
+    } else if (opts.sourcePath) {
+      // Security: restrict sourcePath to allowed directories BEFORE any filesystem access
+      const resolvedSource = resolve(opts.sourcePath);
+      const allowed = this.config.allowedSourceDirs.some(
+        dir => resolvedSource.startsWith(resolve(dir) + "/") || resolvedSource === resolve(dir)
+      );
+      if (!allowed) {
+        throw new Error(
+          `sourcePath "${opts.sourcePath}" is outside allowed directories. ` +
+          `Allowed: [${this.config.allowedSourceDirs.join(", ")}]. ` +
+          `Configure security.allowed_source_dirs in .agent-wiki.yaml to widen access.`
+        );
+      }
+      if (!existsSync(resolvedSource)) {
+        throw new Error("Either content or a valid sourcePath is required");
+      }
+      copyFileSync(resolvedSource, rawPath);
     } else {
       throw new Error("Either content or a valid sourcePath is required");
     }
@@ -416,6 +460,9 @@ _Chronological view of all knowledge in this wiki._
     const isText = mime.startsWith("text/")
       || mime === "application/json"
       || mime === "application/xml"
+      || mime === "application/sql"
+      || mime === "application/rtf"
+      || mime === "application/x-yaml"
       || mime === "image/svg+xml";           // SVG is XML text
 
     if (isText) {
@@ -536,15 +583,57 @@ _Chronological view of all knowledge in this wiki._
     const contentType = response.headers.get("content-type") ?? "";
     if (inferredFilename.endsWith(".bin")) {
       const extMap: Record<string, string> = {
-        "application/pdf": ".pdf",
+        // Text
         "text/html": ".html",
         "text/plain": ".txt",
-        "application/json": ".json",
         "text/markdown": ".md",
+        "text/csv": ".csv",
+        "text/xml": ".xml",
+        "text/css": ".css",
+        "text/javascript": ".js",
+        // Application — documents
+        "application/pdf": ".pdf",
+        "application/json": ".json",
+        "application/xml": ".xml",
+        "application/rtf": ".rtf",
+        "application/epub+zip": ".epub",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+        "application/msword": ".doc",
+        "application/vnd.ms-excel": ".xls",
+        "application/vnd.ms-powerpoint": ".ppt",
+        // Application — archives
+        "application/zip": ".zip",
+        "application/gzip": ".gz",
+        "application/x-tar": ".tar",
+        "application/x-7z-compressed": ".7z",
+        "application/x-rar-compressed": ".rar",
+        // Images
         "image/png": ".png",
         "image/jpeg": ".jpg",
-        "application/xml": ".xml",
-        "text/xml": ".xml",
+        "image/gif": ".gif",
+        "image/svg+xml": ".svg",
+        "image/webp": ".webp",
+        "image/avif": ".avif",
+        "image/bmp": ".bmp",
+        "image/tiff": ".tiff",
+        // Audio
+        "audio/mpeg": ".mp3",
+        "audio/wav": ".wav",
+        "audio/ogg": ".ogg",
+        "audio/flac": ".flac",
+        "audio/aac": ".aac",
+        // Video
+        "video/mp4": ".mp4",
+        "video/webm": ".webm",
+        "video/x-matroska": ".mkv",
+        "video/quicktime": ".mov",
+        // Data / other
+        "application/wasm": ".wasm",
+        "application/x-sqlite3": ".sqlite",
+        "application/sql": ".sql",
+        "application/x-yaml": ".yaml",
       };
       for (const [mime, ext] of Object.entries(extMap)) {
         if (contentType.includes(mime)) {
@@ -592,6 +681,46 @@ _Chronological view of all knowledge in this wiki._
       `Downloaded from ${url} (${formatBytes(buf.length)}, ${mime})`);
 
     return doc;
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  ATLASSIAN — Confluence & Jira import
+  // ═══════════════════════════════════════════════════════════════
+
+  /** Import a Confluence page (and optionally all child pages) into raw/. */
+  async confluenceImport(
+    url: string,
+    opts: { recursive?: boolean; depth?: number; authEnv?: string } = {}
+  ): Promise<ConfluenceImportResult> {
+    const { confluenceImport: doImport } = await import("./atlassian.js");
+    const result = await doImport(url, this.config.rawDir, this.config.atlassian, opts);
+    this.log(
+      "confluence-import",
+      `confluence/${result.tree.file}`,
+      `Imported ${result.pages} page(s) from Confluence`
+    );
+    return result;
+  }
+
+  /** Import a Jira issue (with comments, attachments, linked issues) into raw/. */
+  async jiraImport(
+    url: string,
+    opts: {
+      includeComments?: boolean;
+      includeAttachments?: boolean;
+      includeLinks?: boolean;
+      linkDepth?: number;
+      authEnv?: string;
+    } = {}
+  ): Promise<JiraImportResult> {
+    const { jiraImport: doImport } = await import("./atlassian.js");
+    const result = await doImport(url, this.config.rawDir, this.config.atlassian, opts);
+    this.log(
+      "jira-import",
+      result.issueKey,
+      `Imported ${result.importedCount} issue(s), ${result.files.length} file(s)`
+    );
+    return result;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -1447,22 +1576,80 @@ async function extractTextNode(filePath: string): Promise<string> {
 function guessMime(filename: string): string {
   const ext = extname(filename).toLowerCase();
   const map: Record<string, string> = {
+    // Text
     ".md": "text/markdown",
     ".txt": "text/plain",
-    ".pdf": "application/pdf",
     ".html": "text/html",
+    ".htm": "text/html",
+    ".css": "text/css",
+    ".js": "text/javascript",
+    ".ts": "text/javascript",
+    ".csv": "text/csv",
+    ".xml": "text/xml",
     ".json": "application/json",
     ".yaml": "text/yaml",
     ".yml": "text/yaml",
-    ".csv": "text/csv",
-    ".xml": "text/xml",
+    ".toml": "text/plain",
+    ".ini": "text/plain",
+    ".log": "text/plain",
+    ".sh": "text/x-shellscript",
+    ".py": "text/x-python",
+    ".java": "text/x-java",
+    ".c": "text/x-c",
+    ".cpp": "text/x-c++",
+    ".rs": "text/x-rust",
+    ".go": "text/x-go",
+    ".rb": "text/x-ruby",
+    ".sql": "application/sql",
+    ".r": "text/plain",
+    // Documents
+    ".pdf": "application/pdf",
+    ".rtf": "application/rtf",
+    ".epub": "application/epub+zip",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt": "application/vnd.ms-powerpoint",
+    // Images
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".gif": "image/gif",
     ".svg": "image/svg+xml",
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".webp": "image/webp",
+    ".avif": "image/avif",
+    ".bmp": "image/bmp",
+    ".ico": "image/x-icon",
+    ".tiff": "image/tiff",
+    ".tif": "image/tiff",
+    // Audio
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+    ".aac": "audio/aac",
+    ".m4a": "audio/mp4",
+    // Video
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+    ".mov": "video/quicktime",
+    ".avi": "video/x-msvideo",
+    // Archives
+    ".zip": "application/zip",
+    ".gz": "application/gzip",
+    ".tar": "application/x-tar",
+    ".7z": "application/x-7z-compressed",
+    ".rar": "application/x-rar-compressed",
+    ".bz2": "application/x-bzip2",
+    // Data / other
+    ".wasm": "application/wasm",
+    ".sqlite": "application/x-sqlite3",
+    ".db": "application/x-sqlite3",
+    ".parquet": "application/octet-stream",
+    ".arrow": "application/octet-stream",
   };
   return map[ext] ?? "application/octet-stream";
 }

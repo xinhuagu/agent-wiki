@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/@agent-wiki/mcp-server)](https://www.npmjs.com/package/@agent-wiki/mcp-server)
 [![CI](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml)
-[![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/protocol-MCP-blue)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
@@ -105,7 +105,16 @@ Resolution priority: CLI `--workspace` > `AGENT_WIKI_WORKSPACE` env > config fil
 - **SHA-256 integrity** — every file is hashed; corruption or tampering is detected on `raw_verify`
 - **Provenance tracking** — `.meta.yaml` sidecars record source URL, download time, description
 - **URL fetching** — `raw_fetch` downloads from URLs with smart arXiv handling (`arxiv.org/abs/XXXX` auto-converts to PDF)
-- **Local file copy** — `raw_add` with `source_path` physically copies files into `raw/`
+- **80+ MIME types** — documents, images, audio, video, code, data files — any downloadable resource
+- **Local file copy** — `raw_add` with `source_path` physically copies files into `raw/` (workspace-scoped by default)
+
+### Atlassian Integration
+
+- **Confluence import** — `raw_import_confluence` fetches a page and optionally all child pages recursively, preserving hierarchy in `_tree.yaml`
+- **Jira import** — `raw_import_jira` fetches an issue with full details: fields, description, comments, attachments, and linked issues (rendered as JSON + Markdown)
+- **Auth via env vars** — `CONFLUENCE_API_TOKEN` and `JIRA_API_TOKEN` (format: `email:api-token`), never passed as tool arguments
+- **Host allowlist** — configurable `atlassian.allowed_hosts` prevents SSRF to arbitrary instances
+- **Recursion limits** — `max_pages` (default 100), `link_depth` (default 1), `max_attachment_size` (default 10 MB)
 
 ### Compiled Knowledge Layer (wiki/)
 
@@ -140,7 +149,14 @@ Output: { type: "concept", tags: ["yolo", "object-detection", "real-time"], conf
 
 Pure heuristic — no LLM calls, no API keys, zero latency. Supports English and Chinese.
 
-## MCP Tools (19)
+## Security
+
+- **Directory traversal protection** — all user-supplied page/filename paths go through `safePath()`, which rejects `../`, absolute paths, and null bytes
+- **Source path restriction** — `raw_add` with `source_path` is restricted to workspace directory by default; configurable via `security.allowed_source_dirs`
+- **Atlassian host allowlist** — `atlassian.allowed_hosts` prevents SSRF; requests to non-listed hosts are rejected
+- **No secrets in code** — auth tokens are read from environment variables only
+
+## MCP Tools (21)
 
 ### Raw Layer — Immutable Sources
 
@@ -151,6 +167,13 @@ Pure heuristic — no LLM calls, no API keys, zero latency. Supports English and
 | `raw_list` | List all raw documents with metadata (path, source URL, hash, size) |
 | `raw_read` | Read a raw document — text/SVG return content; PDF/DOCX/XLSX/PPTX extracted via Python preprocessor; other binary files return metadata only |
 | `raw_verify` | Verify integrity of all raw files via SHA-256 re-check |
+
+### Atlassian — Confluence & Jira
+
+| Tool | Description |
+|------|-------------|
+| `raw_import_confluence` | Import a Confluence page (+ child pages recursively) into raw/. Preserves hierarchy in `_tree.yaml`. Requires `CONFLUENCE_API_TOKEN` env var. |
+| `raw_import_jira` | Import a Jira issue with fields, description, comments, attachments, and linked issues. Saves JSON + Markdown. Requires `JIRA_API_TOKEN` env var. |
 
 ### Wiki Layer — Compiled Knowledge
 
@@ -212,6 +235,35 @@ title: Object Detection Overview
 type: synthesis
 derived_from: [concept-yolo.md, concept-ssd.md, concept-rcnn.md]
 ---
+```
+
+## Configuration
+
+`.agent-wiki.yaml`:
+
+```yaml
+# Workspace separation (optional)
+workspace: ./data
+
+# Atlassian integration (optional)
+atlassian:
+  allowed_hosts:
+    - your-company.atlassian.net
+  max_pages: 100                  # Confluence recursion limit
+  max_attachment_size: 10485760   # 10 MB max per Jira attachment
+
+# Security (optional)
+security:
+  allowed_source_dirs:            # restrict raw_add source_path
+    - /home/user/documents        # absolute path
+    - ../shared-data              # relative to config root
+```
+
+Environment variables for Atlassian:
+
+```bash
+export CONFLUENCE_API_TOKEN="email@company.com:your-api-token"
+export JIRA_API_TOKEN="email@company.com:your-api-token"
 ```
 
 ## CLI

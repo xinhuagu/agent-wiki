@@ -356,14 +356,22 @@ _Chronological view of all knowledge in this wiki._
       description?: string;
       tags?: string[];
       mimeType?: string;
+      autoVersion?: boolean;
     }
   ): RawDocument {
-    const rawPath = safePath(this.config.rawDir, filename);
+    let actualFilename = filename;
+
+    // Auto-version: if file exists and autoVersion is true, find next version
+    if (opts.autoVersion && existsSync(safePath(this.config.rawDir, filename))) {
+      actualFilename = this.nextVersionFilename(filename);
+    }
+
+    const rawPath = safePath(this.config.rawDir, actualFilename);
     const metaPath = rawPath + ".meta.yaml";
 
     // Immutability guard — never overwrite existing raw files
     if (existsSync(rawPath)) {
-      throw new Error(`Raw file already exists: ${filename}. Raw files are immutable.`);
+      throw new Error(`Raw file already exists: ${actualFilename}. Raw files are immutable.`);
     }
 
     mkdirSync(dirname(rawPath), { recursive: true });
@@ -399,7 +407,7 @@ _Chronological view of all knowledge in this wiki._
 
     const now = new Date().toISOString();
     const doc: RawDocument = {
-      path: filename,
+      path: actualFilename,
       sourceUrl: opts.sourceUrl,
       downloadedAt: now,
       sha256,
@@ -412,8 +420,96 @@ _Chronological view of all knowledge in this wiki._
     // Write metadata sidecar
     writeFileSync(metaPath, yaml.dump(doc, { lineWidth: 100 }));
 
-    this.log("raw-add", filename, `Added raw: ${filename} (${formatBytes(size)}, sha256:${sha256.slice(0, 12)}...)`);
+    this.log("raw-add", actualFilename, `Added raw: ${actualFilename} (${formatBytes(size)}, sha256:${sha256.slice(0, 12)}...)`);
     return doc;
+  }
+
+  /**
+   * Compute the next versioned filename for auto-versioning.
+   * report.xlsx → report_v2.xlsx, report_v2.xlsx → report_v3.xlsx, etc.
+   */
+  nextVersionFilename(filename: string): string {
+    const ext = extname(filename);
+    const base = filename.slice(0, filename.length - ext.length);
+
+    // Strip existing _vN suffix to find the root name
+    const vMatch = base.match(/^(.+?)(_v(\d+))?$/);
+    const root = vMatch?.[1] ?? base;
+
+    // Scan existing files to find highest version
+    let maxVersion = 1; // original file counts as v1
+    if (!existsSync(this.config.rawDir)) return `${root}_v2${ext}`;
+
+    for (const file of listAllFiles(this.config.rawDir, this.config.rawDir)) {
+      if (file.endsWith(".meta.yaml")) continue;
+      const fExt = extname(file);
+      const fBase = file.slice(0, file.length - fExt.length);
+      if (fExt !== ext) continue;
+
+      // Check if this file matches root or root_vN pattern
+      if (fBase === root) {
+        maxVersion = Math.max(maxVersion, 1);
+      } else {
+        const m = fBase.match(new RegExp(`^${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}_v(\\d+)$`));
+        if (m) {
+          maxVersion = Math.max(maxVersion, parseInt(m[1]!, 10));
+        }
+      }
+    }
+
+    return `${root}_v${maxVersion + 1}${ext}`;
+  }
+
+  /**
+   * List all versions of a raw file, sorted by version number, with the latest marked.
+   * rawVersions("report.xlsx") → { versions: [...], latest: "report_v3.xlsx" }
+   */
+  rawVersions(filename: string): { versions: Array<{ path: string; version: number; downloadedAt: string; size: number; sha256: string }>; latest: string | null } {
+    const ext = extname(filename);
+    const base = filename.slice(0, filename.length - ext.length);
+    const vMatch = base.match(/^(.+?)(_v(\d+))?$/);
+    const root = vMatch?.[1] ?? base;
+
+    const versions: Array<{ path: string; version: number; downloadedAt: string; size: number; sha256: string }> = [];
+
+    if (!existsSync(this.config.rawDir)) return { versions, latest: null };
+
+    for (const file of listAllFiles(this.config.rawDir, this.config.rawDir)) {
+      if (file.endsWith(".meta.yaml")) continue;
+      const fExt = extname(file);
+      const fBase = file.slice(0, file.length - fExt.length);
+      if (fExt !== ext) continue;
+
+      let version = -1;
+      if (fBase === root) {
+        version = 1;
+      } else {
+        const m = fBase.match(new RegExp(`^${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}_v(\\d+)$`));
+        if (m) version = parseInt(m[1]!, 10);
+      }
+
+      if (version < 0) continue;
+
+      const metaPath = join(this.config.rawDir, file) + ".meta.yaml";
+      if (existsSync(metaPath)) {
+        const meta = yaml.load(readFileSync(metaPath, "utf-8")) as RawDocument;
+        versions.push({ path: meta.path, version, downloadedAt: meta.downloadedAt, size: meta.size, sha256: meta.sha256 });
+      } else {
+        const fullPath = join(this.config.rawDir, file);
+        const buf = readFileSync(fullPath);
+        versions.push({
+          path: file,
+          version,
+          downloadedAt: statSync(fullPath).mtime.toISOString(),
+          size: buf.length,
+          sha256: createHash("sha256").update(buf).digest("hex"),
+        });
+      }
+    }
+
+    versions.sort((a, b) => a.version - b.version);
+    const latest = versions.length > 0 ? versions[versions.length - 1]!.path : null;
+    return { versions, latest };
   }
 
   /** List all raw documents with metadata. */

@@ -185,6 +185,89 @@ describe("rawAdd", () => {
   });
 });
 
+describe("rawAdd with autoVersion", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("auto-versions when file already exists", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("report.xlsx", { content: "v1 data" });
+    const doc2 = wiki.rawAdd("report.xlsx", { content: "v2 data", autoVersion: true });
+    expect(doc2.path).toBe("report_v2.xlsx");
+  });
+
+  it("increments to v3 when v2 exists", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("report.xlsx", { content: "v1" });
+    wiki.rawAdd("report.xlsx", { content: "v2", autoVersion: true });
+    const doc3 = wiki.rawAdd("report.xlsx", { content: "v3", autoVersion: true });
+    expect(doc3.path).toBe("report_v3.xlsx");
+  });
+
+  it("creates v1 normally when file does not exist", () => {
+    const wiki = freshWiki();
+    const doc = wiki.rawAdd("new-file.xlsx", { content: "first", autoVersion: true });
+    expect(doc.path).toBe("new-file.xlsx");
+  });
+
+  it("still rejects duplicates without autoVersion", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("once.txt", { content: "first" });
+    expect(() => wiki.rawAdd("once.txt", { content: "second" })).toThrow(/immutable/i);
+  });
+});
+
+describe("rawVersions", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("returns empty for non-existent file", () => {
+    const wiki = freshWiki();
+    const result = wiki.rawVersions("nope.xlsx");
+    expect(result.versions).toEqual([]);
+    expect(result.latest).toBeNull();
+  });
+
+  it("lists single version with latest", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("report.xlsx", { content: "v1" });
+    const result = wiki.rawVersions("report.xlsx");
+    expect(result.versions).toHaveLength(1);
+    expect(result.versions[0]!.version).toBe(1);
+    expect(result.versions[0]!.path).toBe("report.xlsx");
+    expect(result.latest).toBe("report.xlsx");
+  });
+
+  it("lists multiple versions sorted with latest pointing to highest", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("report.xlsx", { content: "v1" });
+    wiki.rawAdd("report.xlsx", { content: "v2", autoVersion: true });
+    wiki.rawAdd("report.xlsx", { content: "v3", autoVersion: true });
+    const result = wiki.rawVersions("report.xlsx");
+    expect(result.versions).toHaveLength(3);
+    expect(result.versions[0]!.version).toBe(1);
+    expect(result.versions[1]!.version).toBe(2);
+    expect(result.versions[2]!.version).toBe(3);
+    expect(result.versions[0]!.path).toBe("report.xlsx");
+    expect(result.versions[1]!.path).toBe("report_v2.xlsx");
+    expect(result.versions[2]!.path).toBe("report_v3.xlsx");
+    expect(result.latest).toBe("report_v3.xlsx");
+  });
+
+  it("each version has metadata", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("data.csv", { content: "aaa" });
+    wiki.rawAdd("data.csv", { content: "bbb", autoVersion: true });
+    const result = wiki.rawVersions("data.csv");
+    for (const v of result.versions) {
+      expect(v.sha256).toHaveLength(64);
+      expect(v.size).toBeGreaterThan(0);
+      expect(v.downloadedAt).toBeTruthy();
+    }
+    expect(result.latest).toBe("data_v2.csv");
+  });
+});
+
 describe("rawList", () => {
   beforeEach(cleanUp);
   afterEach(cleanUp);

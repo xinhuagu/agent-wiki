@@ -66,6 +66,25 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
               items: { type: "string" },
               description: "Tags for categorization",
             },
+            auto_version: {
+              type: "boolean",
+              description: "If true and file already exists, automatically create a versioned copy (e.g. report_v2.xlsx) instead of failing. Default: false.",
+            },
+          },
+          required: ["filename"],
+        },
+      },
+      {
+        name: "raw_versions",
+        description:
+          "List all versions of a raw file, sorted by version number, with the latest version marked. Given a base filename (e.g. 'report.xlsx'), returns all matching versions (report.xlsx as v1, report_v2.xlsx, report_v3.xlsx, etc.) with metadata and a 'latest' field pointing to the newest file.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            filename: {
+              type: "string",
+              description: "Base filename to list versions of (e.g. 'report.xlsx')",
+            },
           },
           required: ["filename"],
         },
@@ -373,6 +392,7 @@ async function handleTool(
         sourceUrl: args.source_url as string | undefined,
         description: args.description as string | undefined,
         tags: args.tags as string[] | undefined,
+        autoVersion: args.auto_version as boolean | undefined,
       });
       return JSON.stringify({ ok: true, document: doc }, null, 2);
     }
@@ -380,6 +400,11 @@ async function handleTool(
     case "raw_list": {
       const docs = wiki.rawList();
       return JSON.stringify({ documents: docs, count: docs.length }, null, 2);
+    }
+
+    case "raw_versions": {
+      const result = wiki.rawVersions(args.filename as string);
+      return JSON.stringify({ versions: result.versions, latest: result.latest, count: result.versions.length }, null, 2);
     }
 
     case "raw_read": {

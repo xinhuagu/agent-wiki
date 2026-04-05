@@ -21,25 +21,32 @@ program
     "Agent-driven knowledge base — structured Markdown wiki with MCP server.\n" +
     "raw/ = immutable sources | wiki/ = mutable knowledge | schemas/ = templates"
   )
-  .version("0.2.0");
+  .version("0.3.0");
 
 // Default command: start MCP server
 program
   .command("serve", { isDefault: true })
   .description("Start MCP server (stdio transport)")
-  .option("-w, --wiki-path <path>", "Path to wiki root", ".")
-  .action(async (opts: { wikiPath: string }) => {
-    await runServer(opts.wikiPath);
+  .option("-w, --wiki-path <path>", "Path to config root (where .agent-wiki.yaml lives)", ".")
+  .option("--workspace <path>", "Workspace directory for all data (wiki/, raw/, schemas/). Overrides config and env.")
+  .action(async (opts: { wikiPath: string; workspace?: string }) => {
+    await runServer(opts.wikiPath, opts.workspace);
   });
 
 // Init
 program
   .command("init [path]")
   .description("Initialize a new knowledge base")
-  .action((path?: string) => {
+  .option("--workspace <path>", "Separate workspace directory for data (wiki/, raw/, schemas/)")
+  .action((path: string | undefined, opts: { workspace?: string }) => {
     const target = path ?? ".";
-    Wiki.init(target);
-    console.error(`Knowledge base initialized at ${target}`);
+    const ws = opts.workspace;
+    Wiki.init(target, ws);
+    console.error(`Knowledge base initialized:`);
+    console.error(`  Config:    ${target}/.agent-wiki.yaml`);
+    if (ws) {
+      console.error(`  Workspace: ${ws}/`);
+    }
     console.error("  wiki/     — Mutable Markdown pages (agent-managed)");
     console.error("  raw/      — Immutable source documents (write-once)");
     console.error("  schemas/  — Entity templates (person, concept, event, ...)");
@@ -49,10 +56,11 @@ program
 program
   .command("search <query>")
   .description("Search wiki pages by keyword")
-  .option("-w, --wiki-path <path>", "Path to wiki root", ".")
+  .option("-w, --wiki-path <path>", "Path to config root", ".")
+  .option("--workspace <path>", "Workspace directory override")
   .option("-n, --limit <n>", "Max results", "10")
-  .action((query: string, opts: { wikiPath: string; limit: string }) => {
-    const wiki = new Wiki(opts.wikiPath);
+  .action((query: string, opts: { wikiPath: string; workspace?: string; limit: string }) => {
+    const wiki = new Wiki(opts.wikiPath, opts.workspace);
     const results = wiki.search(query, parseInt(opts.limit));
     if (results.length === 0) {
       console.log("No matches.");
@@ -68,11 +76,12 @@ program
 program
   .command("list")
   .description("List all wiki pages")
-  .option("-w, --wiki-path <path>", "Path to wiki root", ".")
+  .option("-w, --wiki-path <path>", "Path to config root", ".")
+  .option("--workspace <path>", "Workspace directory override")
   .option("-t, --type <type>", "Filter by entity type")
   .option("--tag <tag>", "Filter by tag")
-  .action((opts: { wikiPath: string; type?: string; tag?: string }) => {
-    const wiki = new Wiki(opts.wikiPath);
+  .action((opts: { wikiPath: string; workspace?: string; type?: string; tag?: string }) => {
+    const wiki = new Wiki(opts.wikiPath, opts.workspace);
     const pages = wiki.list(opts.type, opts.tag);
     if (pages.length === 0) {
       console.log("No pages.");
@@ -88,9 +97,10 @@ program
 program
   .command("raw-list")
   .description("List all raw source documents")
-  .option("-w, --wiki-path <path>", "Path to wiki root", ".")
-  .action((opts: { wikiPath: string }) => {
-    const wiki = new Wiki(opts.wikiPath);
+  .option("-w, --wiki-path <path>", "Path to config root", ".")
+  .option("--workspace <path>", "Workspace directory override")
+  .action((opts: { wikiPath: string; workspace?: string }) => {
+    const wiki = new Wiki(opts.wikiPath, opts.workspace);
     const docs = wiki.rawList();
     if (docs.length === 0) {
       console.log("No raw documents.");
@@ -107,9 +117,10 @@ program
 program
   .command("raw-verify")
   .description("Verify integrity of raw source documents (SHA-256)")
-  .option("-w, --wiki-path <path>", "Path to wiki root", ".")
-  .action((opts: { wikiPath: string }) => {
-    const wiki = new Wiki(opts.wikiPath);
+  .option("-w, --wiki-path <path>", "Path to config root", ".")
+  .option("--workspace <path>", "Workspace directory override")
+  .action((opts: { wikiPath: string; workspace?: string }) => {
+    const wiki = new Wiki(opts.wikiPath, opts.workspace);
     const results = wiki.rawVerify();
     if (results.length === 0) {
       console.log("No raw documents to verify.");
@@ -133,9 +144,10 @@ program
 program
   .command("lint")
   .description("Run health checks (contradictions, orphans, broken links, integrity)")
-  .option("-w, --wiki-path <path>", "Path to wiki root", ".")
-  .action((opts: { wikiPath: string }) => {
-    const wiki = new Wiki(opts.wikiPath);
+  .option("-w, --wiki-path <path>", "Path to config root", ".")
+  .option("--workspace <path>", "Workspace directory override")
+  .action((opts: { wikiPath: string; workspace?: string }) => {
+    const wiki = new Wiki(opts.wikiPath, opts.workspace);
     const report = wiki.lint();
     if (report.issues.length === 0) {
       console.log(`All ${report.pagesChecked} pages + ${report.rawChecked} raw files healthy.`);

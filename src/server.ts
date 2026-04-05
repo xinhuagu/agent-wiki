@@ -19,10 +19,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Wiki } from "./wiki.js";
 
-export function createServer(wikiPath?: string): Server {
-  const wiki = new Wiki(wikiPath);
+export function createServer(wikiPath?: string, workspace?: string): Server {
+  const wiki = new Wiki(wikiPath, workspace);
   const server = new Server(
-    { name: "agent-wiki", version: "0.2.0" },
+    { name: "agent-wiki", version: "0.3.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -221,15 +221,28 @@ export function createServer(wikiPath?: string): Server {
       {
         name: "wiki_init",
         description:
-          "Initialize a new knowledge base at a given path. Creates wiki/, raw/, schemas/ directories and default templates.",
+          "Initialize a new knowledge base. Creates wiki/, raw/, schemas/ directories and default templates. Optionally use a separate workspace directory for all data files.",
         inputSchema: {
           type: "object" as const,
           properties: {
             path: {
               type: "string",
-              description: "Path for the new knowledge base (default: current directory)",
+              description: "Config root — where .agent-wiki.yaml is created (default: current directory)",
+            },
+            workspace: {
+              type: "string",
+              description: "Separate workspace directory for all data (wiki/, raw/, schemas/). If omitted, data goes in path.",
             },
           },
+        },
+      },
+      {
+        name: "wiki_config",
+        description:
+          "Show the current workspace configuration: config root, workspace directory, data directories (wiki/, raw/, schemas/), and lint settings.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {},
         },
       },
       {
@@ -426,8 +439,29 @@ function handleTool(
 
     case "wiki_init": {
       const path = (args.path as string) ?? ".";
-      Wiki.init(path);
-      return JSON.stringify({ ok: true, path, message: "Knowledge base initialized with wiki/, raw/, schemas/" });
+      const ws = args.workspace as string | undefined;
+      Wiki.init(path, ws);
+      return JSON.stringify({
+        ok: true,
+        configRoot: path,
+        workspace: ws ?? path,
+        message: ws
+          ? `Knowledge base initialized. Config at ${path}, data at ${ws}`
+          : `Knowledge base initialized at ${path} with wiki/, raw/, schemas/`,
+      });
+    }
+
+    case "wiki_config": {
+      const cfg = wiki.config;
+      return JSON.stringify({
+        configRoot: cfg.configRoot,
+        workspace: cfg.workspace,
+        wikiDir: cfg.wikiDir,
+        rawDir: cfg.rawDir,
+        schemasDir: cfg.schemasDir,
+        lint: cfg.lint,
+        separateWorkspace: cfg.configRoot !== cfg.workspace,
+      }, null, 2);
     }
 
     case "wiki_schemas": {
@@ -466,8 +500,8 @@ function handleTool(
 
 // ── Entry point for stdio transport ───────────────────────────
 
-export async function runServer(wikiPath?: string): Promise<void> {
-  const server = createServer(wikiPath);
+export async function runServer(wikiPath?: string, workspace?: string): Promise<void> {
+  const server = createServer(wikiPath, workspace);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

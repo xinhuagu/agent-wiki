@@ -86,7 +86,10 @@ export interface TimelineEntry {
 }
 
 export interface WikiConfig {
-  root: string;
+  /** Where the config file was loaded from (or --wiki-path). */
+  configRoot: string;
+  /** The workspace directory — all data lives here. */
+  workspace: string;
   wikiDir: string;
   rawDir: string;
   schemasDir: string;
@@ -107,20 +110,32 @@ const SYSTEM_PAGES = new Set(["index.md", "log.md", "timeline.md"]);
 export class Wiki {
   readonly config: WikiConfig;
 
-  constructor(root?: string) {
+  /**
+   * @param root — path to config root (where .agent-wiki.yaml lives)
+   * @param workspace — override workspace directory (all data: wiki/, raw/, schemas/).
+   *                     If not set, falls back to: AGENT_WIKI_WORKSPACE env → config file → root.
+   */
+  constructor(root?: string, workspace?: string) {
     const resolvedRoot = resolve(root ?? ".");
-    this.config = Wiki.loadConfig(resolvedRoot);
+    this.config = Wiki.loadConfig(resolvedRoot, workspace);
   }
 
   // ── Init ──────────────────────────────────────────────────────
 
-  static init(path: string): Wiki {
-    const root = resolve(path);
-    const wikiDir = join(root, "wiki");
-    const rawDir = join(root, "raw");
-    const schemasDir = join(root, "schemas");
+  /**
+   * Initialize a new knowledge base.
+   * @param path — config root (where .agent-wiki.yaml is created)
+   * @param workspace — optional separate workspace directory for all data.
+   *                     If set, wiki/, raw/, schemas/ go there instead of path.
+   */
+  static init(path: string, workspace?: string): Wiki {
+    const configRoot = resolve(path);
+    const wsRoot = workspace ? resolve(workspace) : configRoot;
+    const wikiDir = join(wsRoot, "wiki");
+    const rawDir = join(wsRoot, "raw");
+    const schemasDir = join(wsRoot, "schemas");
 
-    for (const dir of [root, wikiDir, rawDir, schemasDir]) {
+    for (const dir of [configRoot, wsRoot, wikiDir, rawDir, schemasDir]) {
       mkdirSync(dir, { recursive: true });
     }
 
@@ -177,10 +192,15 @@ _Chronological view of all knowledge in this wiki._
 - **init** — Knowledge base created
 `);
 
-    // default config
-    const configData = {
+    // default config — include workspace if separate from config root
+    const configData: Record<string, unknown> = {
       version: "2",
-      wiki: { path: "wiki/", raw_path: "raw/", schemas_path: "schemas/" },
+      wiki: {
+        ...(workspace ? { workspace: wsRoot } : {}),
+        path: "wiki/",
+        raw_path: "raw/",
+        schemas_path: "schemas/",
+      },
       lint: {
         check_orphans: true,
         check_stale_days: 30,
@@ -189,20 +209,34 @@ _Chronological view of all knowledge in this wiki._
         check_integrity: true,
       },
     };
-    writeFileSync(join(root, ".agent-wiki.yaml"), yaml.dump(configData, { lineWidth: 100 }));
+    writeFileSync(join(configRoot, ".agent-wiki.yaml"), yaml.dump(configData, { lineWidth: 100 }));
 
     // default schemas
     writeDefaultSchemas(schemasDir);
 
-    // .gitignore
-    writeFileSync(join(root, ".gitignore"), "node_modules/\ndist/\n.env\n");
+    // .gitignore in workspace (if separate, also add one there)
+    writeFileSync(join(configRoot, ".gitignore"), "node_modules/\ndist/\n.env\n");
+    if (workspace && wsRoot !== configRoot) {
+      writeFileSync(join(wsRoot, ".gitignore"), "# Agent Wiki workspace data\n");
+    }
 
-    return new Wiki(root);
+    return new Wiki(configRoot, workspace);
   }
 
   // ── Config ────────────────────────────────────────────────────
 
-  static loadConfig(root: string): WikiConfig {
+  /**
+   * Load config from .agent-wiki.yaml.
+   * 
+   * Workspace resolution priority:
+   *   1. Explicit `workspaceOverride` parameter (from CLI --workspace)
+   *   2. `AGENT_WIKI_WORKSPACE` environment variable
+   *   3. `workspace` field in .agent-wiki.yaml (absolute, or relative to config file)
+   *   4. Fall back to config root itself
+   *
+   * All data dirs (wiki/, raw/, schemas/) resolve relative to workspace.
+   */
+  static loadConfig(root: string, workspaceOverride?: string): WikiConfig {
     let raw: Record<string, unknown> = {};
     const configPath = join(root, ".agent-wiki.yaml");
     const homeConfigPath = join(process.env.HOME ?? "~", ".agent-wiki.yaml");
@@ -216,11 +250,28 @@ _Chronological view of all knowledge in this wiki._
     const wikiData = (raw.wiki ?? {}) as Record<string, string>;
     const lintData = (raw.lint ?? {}) as Record<string, unknown>;
 
+    // Resolve workspace directory (priority: override > env > config > root)
+    let workspace: string;
+    if (workspaceOverride) {
+      workspace = resolve(workspaceOverride);
+    } else if (process.env.AGENT_WIKI_WORKSPACE) {
+      workspace = resolve(process.env.AGENT_WIKI_WORKSPACE);
+    } else if (wikiData.workspace) {
+      // Relative paths in config resolve against the config file's directory
+      workspace = resolve(root, wikiData.workspace);
+    } else {
+      workspace = root;
+    }
+
+    // Ensure workspace exists
+    mkdirSync(workspace, { recursive: true });
+
     return {
-      root,
-      wikiDir: join(root, wikiData.path ?? "wiki"),
-      rawDir: join(root, wikiData.raw_path ?? "raw"),
-      schemasDir: join(root, wikiData.schemas_path ?? "schemas"),
+      configRoot: root,
+      workspace,
+      wikiDir: join(workspace, wikiData.path ?? "wiki"),
+      rawDir: join(workspace, wikiData.raw_path ?? "raw"),
+      schemasDir: join(workspace, wikiData.schemas_path ?? "schemas"),
       lint: {
         checkOrphans: (lintData.check_orphans as boolean) ?? true,
         checkStaleDays: (lintData.check_stale_days as number) ?? 30,

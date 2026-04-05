@@ -54,15 +54,42 @@ Add to your agent's MCP config:
   "mcpServers": {
     "agent-wiki": {
       "command": "npx",
-      "args": ["-y", "agent-wiki", "serve", "--wiki-path", "/path/to/my-kb"]
+      "args": ["-y", "agent-wiki", "serve", "--wiki-path", "/path/to/config"]
     }
   }
 }
 ```
 
+### With separate workspace (recommended)
+
+Keep code/config and data in separate directories:
+
+```json
+{
+  "mcpServers": {
+    "agent-wiki": {
+      "command": "npx",
+      "args": ["-y", "agent-wiki", "serve", "--wiki-path", "/path/to/config", "--workspace", "/path/to/data"]
+    }
+  }
+}
+```
+
+Or set `AGENT_WIKI_WORKSPACE` env var, or add `workspace` to `.agent-wiki.yaml`:
+
+```yaml
+wiki:
+  workspace: /path/to/data   # absolute, or relative to config root
+  path: wiki/
+  raw_path: raw/
+  schemas_path: schemas/
+```
+
+**Workspace resolution priority:** CLI `--workspace` > `AGENT_WIKI_WORKSPACE` env > config file `workspace` field > config root.
+
 ### Cursor / Windsurf / any MCP client
 
-Same pattern — `npx -y agent-wiki serve --wiki-path /path/to/my-kb`.
+Same pattern — `npx -y agent-wiki serve --wiki-path /path/to/config`.
 
 ## MCP Tools
 
@@ -91,6 +118,8 @@ Same pattern — `npx -y agent-wiki serve --wiki-path /path/to/my-kb`.
 | `wiki_rebuild_index` | Rebuild index.md (grouped by type with counts) |
 | `wiki_rebuild_timeline` | Rebuild timeline.md (chronological view) |
 | `wiki_synthesize` | Prepare context for knowledge distillation across pages |
+| `wiki_classify` | Auto-classify content into entity type + suggest tags (heuristic, no LLM) |
+| `wiki_config` | Show current workspace configuration (config root, workspace, data dirs) |
 
 ## Self-Checking (Lint)
 
@@ -154,7 +183,8 @@ derived_from: [concept-yolo.md, concept-ssd.md, concept-rcnn.md]
 3. **No LLM dependency** — Zero API keys, zero cost per operation.
 4. **Self-checking** — Lint catches contradictions, broken links, integrity issues.
 5. **Knowledge compounds** — Every write enriches the whole wiki.
-6. **Git is version control** — Every change is diffable, blameable, revertable.
+6. **Code and data separate** — Configurable workspace directory keeps data independent from the tool.
+7. **Git is version control** — Every change is diffable, blameable, revertable.
 
 ## License
 

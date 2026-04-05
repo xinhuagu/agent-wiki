@@ -88,6 +88,10 @@ Three immutability layers, inspired by how compilers work:
 - [MCP Tools (21) & Entity Types](docs/tools.md)
 - [Configuration, CLI & Security](docs/configuration.md)
 
+## Acknowledgment
+
+Inspired by Andrej Karpathy's [LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) concept — the idea that AI agents should compile and maintain knowledge, not just retrieve raw fragments. This project is an independent, full implementation of that vision.
+
 ## License
 
 MIT

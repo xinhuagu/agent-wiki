@@ -49,26 +49,9 @@ schemas/  Entity templates (person, concept, event, artifact, ...)
 
 The agent reads from `raw/`, compiles understanding into `wiki/`, and the lint system ensures quality:
 
-```
-                  ┌──────────────────────────────────┐
-                  │     Your Agent                   │
-                  │     (Claude, GPT, Copilot, ...)  │
-                  └────────────┬─────────────────────┘
-                               │ MCP (stdio)
-                  ┌────────────▼─────────────────────┐
-                  │        agent-wiki                 │
-                  │                                   │
-                  │  ┌─────────┐  ┌───────────────┐  │
-                  │  │  raw/   │  │    wiki/       │  │
-                  │  │ (frozen)│──│  (compiled)    │  │
-                  │  └─────────┘  └───────┬───────┘  │
-                  │                       │          │
-                  │              ┌────────▼────────┐ │
-                  │              │     lint        │ │
-                  │              │ (self-checking) │ │
-                  │              └─────────────────┘ │
-                  └──────────────────────────────────┘
-```
+<p align="center">
+  <img src="architecture.svg" alt="agent-wiki architecture" width="700" />
+</p>
 
 ## Key Features
 

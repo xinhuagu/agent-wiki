@@ -467,7 +467,7 @@ _Chronological view of all knowledge in this wiki._
     // ── Download ──
     const response = await fetch(resolvedUrl, {
       headers: {
-        "User-Agent": "agent-wiki-mcp/0.3.0",
+        "User-Agent": "agent-wiki/0.3.0",
       },
       redirect: "follow",
     });

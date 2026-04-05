@@ -30,7 +30,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/xinhuagu/agent-wiki-mcp.git"
+    "url": "https://github.com/xinhuagu/agent-wiki.git"
   },
   "engines": {
     "node": ">=18"

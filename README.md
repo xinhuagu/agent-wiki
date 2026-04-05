@@ -1,6 +1,6 @@
 # agent-wiki
 
-[![CI](https://github.com/xinhuagu/agent-wiki-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/xinhuagu/agent-wiki-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/protocol-MCP-blue)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)

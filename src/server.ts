@@ -37,13 +37,13 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "raw_add",
         description:
-          "Add a raw source document to the knowledge base. Raw files are IMMUTABLE — once added, they cannot be modified or overwritten. Each file gets a .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Use this for downloaded articles, papers, web pages, data files. Supports both content string and local file path (physical copy).",
+          "Add a raw source document to the knowledge base. Raw files are IMMUTABLE — once added, they cannot be modified or overwritten. Each file gets a .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Use this for downloaded articles, papers, web pages, data files. Supports both content string and local file path (physical copy). If source_path points to a DIRECTORY, all files in it are imported recursively (use pattern to filter, e.g. '*.html').",
         inputSchema: {
           type: "object" as const,
           properties: {
             filename: {
               type: "string",
-              description: "Filename in raw/ (e.g. 'paper-attention.pdf', 'article-yolo.md')",
+              description: "Filename in raw/ (e.g. 'paper-attention.pdf', 'article-yolo.md'). When importing a directory, this becomes the subdirectory prefix in raw/ (e.g. 'my-docs').",
             },
             content: {
               type: "string",
@@ -51,7 +51,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             },
             source_path: {
               type: "string",
-              description: "Absolute path to a local file to physically copy into raw/. The original file is NOT modified — a full copy is made. Either content or source_path is required.",
+              description: "Absolute path to a local file OR DIRECTORY to physically copy into raw/. If a directory, all files are imported recursively. The original is NOT modified — full copies are made. Either content or source_path is required.",
             },
             source_url: {
               type: "string",
@@ -69,6 +69,10 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             auto_version: {
               type: "boolean",
               description: "If true and file already exists, automatically create a versioned copy (e.g. report_v2.xlsx) instead of failing. Default: false.",
+            },
+            pattern: {
+              type: "string",
+              description: "File pattern filter when importing a directory (e.g. '*.html', '*.xlsx', '*.{html,css}'). Only matching files are imported. Ignored for single file imports.",
             },
           },
           required: ["filename"],
@@ -386,15 +390,20 @@ async function handleTool(
     // ═══ RAW LAYER ═══
 
     case "raw_add": {
-      const doc = wiki.rawAdd(args.filename as string, {
+      const result = wiki.rawAdd(args.filename as string, {
         content: args.content as string | undefined,
         sourcePath: args.source_path as string | undefined,
         sourceUrl: args.source_url as string | undefined,
         description: args.description as string | undefined,
         tags: args.tags as string[] | undefined,
         autoVersion: args.auto_version as boolean | undefined,
+        pattern: args.pattern as string | undefined,
       });
-      return JSON.stringify({ ok: true, document: doc }, null, 2);
+      // Directory import returns array, single file returns single doc
+      if (Array.isArray(result)) {
+        return JSON.stringify({ ok: true, imported: result.length, documents: result }, null, 2);
+      }
+      return JSON.stringify({ ok: true, document: result }, null, 2);
     }
 
     case "raw_list": {

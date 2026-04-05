@@ -357,6 +357,116 @@ _Chronological view of all knowledge in this wiki._
       tags?: string[];
       mimeType?: string;
       autoVersion?: boolean;
+      pattern?: string;
+    }
+  ): RawDocument | RawDocument[] {
+    // ── Directory detection: if sourcePath is a directory, import all files ──
+    if (opts.sourcePath) {
+      const resolvedSource = resolve(opts.sourcePath);
+      this._validateSourcePath(resolvedSource, opts.sourcePath);
+      if (existsSync(resolvedSource) && statSync(resolvedSource).isDirectory()) {
+        return this._rawAddDirectory(filename, resolvedSource, opts);
+      }
+    }
+
+    // ── Single file path ──
+    return this._rawAddSingleFile(filename, opts);
+  }
+
+  /**
+   * Validate that a sourcePath is within allowed directories.
+   */
+  private _validateSourcePath(resolvedSource: string, originalPath: string): void {
+    const allowed = this.config.allowedSourceDirs.some(
+      dir => resolvedSource.startsWith(resolve(dir) + "/") || resolvedSource === resolve(dir)
+    );
+    if (!allowed) {
+      throw new Error(
+        `sourcePath "${originalPath}" is outside allowed directories. ` +
+        `Allowed: [${this.config.allowedSourceDirs.join(", ")}]. ` +
+        `Configure security.allowed_source_dirs in .agent-wiki.yaml to widen access.`
+      );
+    }
+  }
+
+  /**
+   * Import all files from a directory into raw/<filename>/.
+   * Preserves subdirectory structure. Optionally filters by glob pattern.
+   */
+  private _rawAddDirectory(
+    prefix: string,
+    dirPath: string,
+    opts: {
+      sourceUrl?: string;
+      description?: string;
+      tags?: string[];
+      autoVersion?: boolean;
+      pattern?: string;
+    }
+  ): RawDocument[] {
+    const files = this._walkDirectory(dirPath, dirPath);
+
+    // Filter by pattern (simple glob: *.html, *.xlsx, etc.)
+    const filtered = opts.pattern
+      ? files.filter(f => matchSimpleGlob(f, opts.pattern!))
+      : files;
+
+    if (filtered.length === 0) {
+      throw new Error(
+        `No files found in directory "${dirPath}"` +
+        (opts.pattern ? ` matching pattern "${opts.pattern}"` : "")
+      );
+    }
+
+    const docs: RawDocument[] = [];
+    for (const relFile of filtered) {
+      const targetFilename = join(prefix, relFile);
+      const srcFile = join(dirPath, relFile);
+      const doc = this._rawAddSingleFile(targetFilename, {
+        sourcePath: srcFile,
+        sourceUrl: opts.sourceUrl,
+        description: opts.description,
+        tags: opts.tags,
+        autoVersion: opts.autoVersion,
+      });
+      docs.push(doc);
+    }
+
+    this.log("raw-add-dir", prefix, `Imported directory: ${docs.length} files into raw/${prefix}/`);
+    return docs;
+  }
+
+  /**
+   * Walk a directory recursively, returning relative file paths.
+   */
+  private _walkDirectory(dir: string, root: string): string[] {
+    const result: string[] = [];
+    if (!existsSync(dir)) return result;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith(".")) continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        result.push(...this._walkDirectory(full, root));
+      } else {
+        result.push(relative(root, full));
+      }
+    }
+    return result.sort();
+  }
+
+  /**
+   * Add a single file to raw/. Core logic extracted from rawAdd.
+   */
+  private _rawAddSingleFile(
+    filename: string,
+    opts: {
+      content?: string;
+      sourcePath?: string;
+      sourceUrl?: string;
+      description?: string;
+      tags?: string[];
+      mimeType?: string;
+      autoVersion?: boolean;
     }
   ): RawDocument {
     let actualFilename = filename;
@@ -382,16 +492,7 @@ _Chronological view of all knowledge in this wiki._
     } else if (opts.sourcePath) {
       // Security: restrict sourcePath to allowed directories BEFORE any filesystem access
       const resolvedSource = resolve(opts.sourcePath);
-      const allowed = this.config.allowedSourceDirs.some(
-        dir => resolvedSource.startsWith(resolve(dir) + "/") || resolvedSource === resolve(dir)
-      );
-      if (!allowed) {
-        throw new Error(
-          `sourcePath "${opts.sourcePath}" is outside allowed directories. ` +
-          `Allowed: [${this.config.allowedSourceDirs.join(", ")}]. ` +
-          `Configure security.allowed_source_dirs in .agent-wiki.yaml to widen access.`
-        );
-      }
+      this._validateSourcePath(resolvedSource, opts.sourcePath);
       if (!existsSync(resolvedSource)) {
         throw new Error("Either content or a valid sourcePath is required");
       }
@@ -1978,4 +2079,33 @@ description: Distilled knowledge combining insights from multiple pages
   for (const [filename, content] of Object.entries(schemas)) {
     writeFileSync(join(dir, filename), content);
   }
+}
+
+/**
+ * Simple glob matching for file filtering.
+ * Supports: *.html, *.xlsx, *.{html,css}, **\/*.html
+ * Not a full glob — just enough for pattern filtering.
+ */
+function matchSimpleGlob(filepath: string, pattern: string): boolean {
+  // Handle brace expansion: *.{html,css} → [html, css]
+  const braceMatch = pattern.match(/\.\{([^}]+)\}$/);
+  if (braceMatch) {
+    const exts = braceMatch[1]!.split(",").map(e => e.trim());
+    const fileExt = extname(filepath).slice(1).toLowerCase();
+    return exts.some(e => e.toLowerCase() === fileExt);
+  }
+
+  // Handle simple extension pattern: *.html
+  if (pattern.startsWith("*.")) {
+    const ext = pattern.slice(1).toLowerCase(); // ".html"
+    return filepath.toLowerCase().endsWith(ext);
+  }
+
+  // Handle recursive pattern: **/*.html → just match extension
+  if (pattern.startsWith("**/")) {
+    return matchSimpleGlob(filepath, pattern.slice(3));
+  }
+
+  // Fallback: exact match
+  return filepath === pattern;
 }

@@ -10,7 +10,14 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { Wiki, safePath } from "./wiki.js";
-import type { WikiPage, LintReport } from "./wiki.js";
+import type { WikiPage, LintReport, RawDocument } from "./wiki.js";
+
+/** Helper: rawAdd for single file — asserts non-array return. */
+function rawAddOne(wiki: Wiki, filename: string, opts: Parameters<Wiki["rawAdd"]>[1]): RawDocument {
+  const result = wiki.rawAdd(filename, opts);
+  if (Array.isArray(result)) throw new Error("Expected single RawDocument, got array");
+  return result;
+}
 
 // ── Test helpers ─────────────────────────────────────────────────
 
@@ -127,7 +134,7 @@ describe("rawAdd", () => {
 
   it("adds a text file with content", () => {
     const wiki = freshWiki();
-    const doc = wiki.rawAdd("test.md", { content: "Hello world" });
+    const doc = rawAddOne(wiki, "test.md", { content: "Hello world" });
     expect(doc.path).toBe("test.md");
     expect(doc.size).toBeGreaterThan(0);
     expect(doc.sha256).toHaveLength(64);
@@ -143,7 +150,7 @@ describe("rawAdd", () => {
   it("stores correct SHA-256 hash", () => {
     const wiki = freshWiki();
     const content = "Test content for hashing";
-    const doc = wiki.rawAdd("hash-test.txt", { content });
+    const doc = rawAddOne(wiki, "hash-test.txt", { content });
     const expected = createHash("sha256").update(content).digest("hex");
     expect(doc.sha256).toBe(expected);
   });
@@ -165,7 +172,7 @@ describe("rawAdd", () => {
     const wiki = freshWiki();
     const srcFile = join(TEST_ROOT, "src_file.txt");
     writeFileSync(srcFile, "copied content");
-    const doc = wiki.rawAdd("copied.txt", { sourcePath: srcFile });
+    const doc = rawAddOne(wiki, "copied.txt", { sourcePath: srcFile });
     expect(doc.size).toBeGreaterThan(0);
     const stored = readFileSync(join(wiki.config.rawDir, "copied.txt"), "utf-8");
     expect(stored).toBe("copied content");
@@ -173,7 +180,7 @@ describe("rawAdd", () => {
 
   it("stores optional metadata (sourceUrl, description, tags)", () => {
     const wiki = freshWiki();
-    const doc = wiki.rawAdd("meta.txt", {
+    const doc = rawAddOne(wiki, "meta.txt", {
       content: "x",
       sourceUrl: "https://example.com",
       description: "A test file",
@@ -192,7 +199,7 @@ describe("rawAdd with autoVersion", () => {
   it("auto-versions when file already exists", () => {
     const wiki = freshWiki();
     wiki.rawAdd("report.xlsx", { content: "v1 data" });
-    const doc2 = wiki.rawAdd("report.xlsx", { content: "v2 data", autoVersion: true });
+    const doc2 = rawAddOne(wiki, "report.xlsx", { content: "v2 data", autoVersion: true });
     expect(doc2.path).toBe("report_v2.xlsx");
   });
 
@@ -200,13 +207,13 @@ describe("rawAdd with autoVersion", () => {
     const wiki = freshWiki();
     wiki.rawAdd("report.xlsx", { content: "v1" });
     wiki.rawAdd("report.xlsx", { content: "v2", autoVersion: true });
-    const doc3 = wiki.rawAdd("report.xlsx", { content: "v3", autoVersion: true });
+    const doc3 = rawAddOne(wiki, "report.xlsx", { content: "v3", autoVersion: true });
     expect(doc3.path).toBe("report_v3.xlsx");
   });
 
   it("creates v1 normally when file does not exist", () => {
     const wiki = freshWiki();
-    const doc = wiki.rawAdd("new-file.xlsx", { content: "first", autoVersion: true });
+    const doc = rawAddOne(wiki, "new-file.xlsx", { content: "first", autoVersion: true });
     expect(doc.path).toBe("new-file.xlsx");
   });
 
@@ -265,6 +272,124 @@ describe("rawVersions", () => {
       expect(v.downloadedAt).toBeTruthy();
     }
     expect(result.latest).toBe("data_v2.csv");
+  });
+});
+
+describe("rawAdd with directory", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("imports all files from a directory", () => {
+    const wiki = freshWiki();
+    // Create a test directory with files inside the workspace
+    const srcDir = join(TEST_ROOT, "import-src");
+    mkdirSync(srcDir, { recursive: true });
+    writeFileSync(join(srcDir, "page1.html"), "<h1>Page 1</h1>");
+    writeFileSync(join(srcDir, "page2.html"), "<h1>Page 2</h1>");
+    writeFileSync(join(srcDir, "style.css"), "body {}");
+
+    const docs = wiki.rawAdd("my-docs", { sourcePath: srcDir });
+    expect(Array.isArray(docs)).toBe(true);
+    expect((docs as any[]).length).toBe(3);
+    expect(existsSync(join(wiki.config.rawDir, "my-docs", "page1.html"))).toBe(true);
+    expect(existsSync(join(wiki.config.rawDir, "my-docs", "page2.html"))).toBe(true);
+    expect(existsSync(join(wiki.config.rawDir, "my-docs", "style.css"))).toBe(true);
+  });
+
+  it("filters by pattern", () => {
+    const wiki = freshWiki();
+    const srcDir = join(TEST_ROOT, "import-filtered");
+    mkdirSync(srcDir, { recursive: true });
+    writeFileSync(join(srcDir, "page.html"), "<h1>Page</h1>");
+    writeFileSync(join(srcDir, "data.json"), "{}");
+    writeFileSync(join(srcDir, "style.css"), "body {}");
+
+    const docs = wiki.rawAdd("filtered", { sourcePath: srcDir, pattern: "*.html" });
+    expect(Array.isArray(docs)).toBe(true);
+    expect((docs as any[]).length).toBe(1);
+    expect((docs as any[])[0].path).toBe(join("filtered", "page.html"));
+  });
+
+  it("supports brace expansion pattern", () => {
+    const wiki = freshWiki();
+    const srcDir = join(TEST_ROOT, "import-brace");
+    mkdirSync(srcDir, { recursive: true });
+    writeFileSync(join(srcDir, "page.html"), "<h1>Page</h1>");
+    writeFileSync(join(srcDir, "style.css"), "body {}");
+    writeFileSync(join(srcDir, "data.json"), "{}");
+
+    const docs = wiki.rawAdd("brace", { sourcePath: srcDir, pattern: "*.{html,css}" });
+    expect(Array.isArray(docs)).toBe(true);
+    expect((docs as any[]).length).toBe(2);
+  });
+
+  it("preserves subdirectory structure", () => {
+    const wiki = freshWiki();
+    const srcDir = join(TEST_ROOT, "import-nested");
+    mkdirSync(join(srcDir, "sub"), { recursive: true });
+    writeFileSync(join(srcDir, "index.html"), "<h1>Root</h1>");
+    writeFileSync(join(srcDir, "sub", "child.html"), "<h1>Child</h1>");
+
+    const docs = wiki.rawAdd("nested", { sourcePath: srcDir });
+    expect(Array.isArray(docs)).toBe(true);
+    expect((docs as any[]).length).toBe(2);
+    expect(existsSync(join(wiki.config.rawDir, "nested", "index.html"))).toBe(true);
+    expect(existsSync(join(wiki.config.rawDir, "nested", "sub", "child.html"))).toBe(true);
+  });
+
+  it("throws when directory is empty", () => {
+    const wiki = freshWiki();
+    const srcDir = join(TEST_ROOT, "import-empty");
+    mkdirSync(srcDir, { recursive: true });
+
+    expect(() => wiki.rawAdd("empty", { sourcePath: srcDir }))
+      .toThrow(/no files found/i);
+  });
+
+  it("throws when pattern matches nothing", () => {
+    const wiki = freshWiki();
+    const srcDir = join(TEST_ROOT, "import-nomatch");
+    mkdirSync(srcDir, { recursive: true });
+    writeFileSync(join(srcDir, "data.json"), "{}");
+
+    expect(() => wiki.rawAdd("nomatch", { sourcePath: srcDir, pattern: "*.html" }))
+      .toThrow(/no files found.*\*\.html/i);
+  });
+
+  it("respects security for directory imports", () => {
+    const wiki = freshWiki();
+    const outsideDir = join(TEST_ROOT, "..", "__outside_dir__");
+    mkdirSync(outsideDir, { recursive: true });
+    writeFileSync(join(outsideDir, "secret.txt"), "no");
+
+    try {
+      expect(() => wiki.rawAdd("stolen", { sourcePath: outsideDir }))
+        .toThrow(/outside allowed directories/i);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it("generates metadata sidecar for each imported file", () => {
+    const wiki = freshWiki();
+    const srcDir = join(TEST_ROOT, "import-meta");
+    mkdirSync(srcDir, { recursive: true });
+    writeFileSync(join(srcDir, "a.txt"), "hello");
+    writeFileSync(join(srcDir, "b.txt"), "world");
+
+    wiki.rawAdd("meta-dir", { sourcePath: srcDir, tags: ["test"] });
+    expect(existsSync(join(wiki.config.rawDir, "meta-dir", "a.txt.meta.yaml"))).toBe(true);
+    expect(existsSync(join(wiki.config.rawDir, "meta-dir", "b.txt.meta.yaml"))).toBe(true);
+  });
+
+  it("single file still works with sourcePath", () => {
+    const wiki = freshWiki();
+    const srcFile = join(TEST_ROOT, "single.txt");
+    writeFileSync(srcFile, "just a file");
+
+    const doc = wiki.rawAdd("single.txt", { sourcePath: srcFile });
+    expect(Array.isArray(doc)).toBe(false);
+    expect((doc as any).path).toBe("single.txt");
   });
 });
 
@@ -881,7 +1006,7 @@ describe("edge cases", () => {
 
   it("handles raw file with subdirectory", () => {
     const wiki = freshWiki();
-    const doc = wiki.rawAdd("papers/test.txt", { content: "nested" });
+    const doc = rawAddOne(wiki, "papers/test.txt", { content: "nested" });
     expect(doc.path).toBe("papers/test.txt");
     const result = wiki.rawList();
     expect(result.find(d => d.path === "papers/test.txt")).toBeDefined();
@@ -978,7 +1103,7 @@ describe("sourcePath allowed directory restriction", () => {
     const wiki = freshWiki();
     const srcFile = join(TEST_ROOT, "local.txt");
     writeFileSync(srcFile, "ok");
-    const doc = wiki.rawAdd("imported.txt", { sourcePath: srcFile });
+    const doc = rawAddOne(wiki, "imported.txt", { sourcePath: srcFile });
     expect(doc.size).toBeGreaterThan(0);
   });
 
@@ -1013,7 +1138,7 @@ describe("sourcePath allowed directory restriction", () => {
     wiki.config.allowedSourceDirs.push(externalDir);
 
     try {
-      const doc = wiki.rawAdd("from-ext.txt", { sourcePath: extFile });
+      const doc = rawAddOne(wiki, "from-ext.txt", { sourcePath: extFile });
       expect(doc.size).toBeGreaterThan(0);
     } finally {
       rmSync(externalDir, { recursive: true, force: true });

@@ -1,117 +1,95 @@
-<mxGraphModel>
+<mxGraphModel background="#FFFFFF">
   <root>
-    <mxCell id="0"/>
-    <mxCell id="1" parent="0"/>
+    <mxCell id="0" />
+    <mxCell id="1" parent="0" />
 
     <!-- Title -->
     <mxCell id="title" value="agent-wiki Architecture" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=20;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
-      <mxGeometry x="240" y="10" width="260" height="35" as="geometry"/>
+      <mxGeometry x="250" y="10" width="260" height="35" as="geometry" />
     </mxCell>
 
-    <!-- Agent box (top) -->
+    <!-- Agent box -->
     <mxCell id="agent" value="&lt;b style='font-size:14px'&gt;Your AI Agent&lt;/b&gt;&lt;br&gt;&lt;font color='#666' style='font-size:11px'&gt;Claude Code · Cursor · Windsurf · Copilot · Any MCP Client&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8DEF8;strokeColor=#7E57C2;fontSize=13;arcSize=20;shadow=1;strokeWidth=2;" vertex="1" parent="1">
-      <mxGeometry x="170" y="55" width="400" height="60" as="geometry"/>
+      <mxGeometry x="180" y="55" width="400" height="60" as="geometry" />
     </mxCell>
 
-    <!-- MCP edge: Agent -> container -->
+    <!-- MCP edge -->
     <mxCell id="mcp_edge" value="&lt;b&gt;MCP (stdio)&lt;/b&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=3;strokeColor=#7E57C2;fontSize=12;fontColor=#7E57C2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;endArrow=blockThin;endFill=1;endSize=8;" edge="1" source="agent" target="container" parent="1">
-      <mxGeometry relative="1" as="geometry"/>
+      <mxGeometry relative="1" as="geometry" />
     </mxCell>
 
-    <!-- agent-wiki container -->
-    <mxCell id="container" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFAFA;strokeColor=#424242;strokeWidth=2;arcSize=6;shadow=1;verticalAlign=top;dashed=0;" vertex="1" parent="1">
-      <mxGeometry x="40" y="170" width="660" height="400" as="geometry"/>
+    <!-- Container (WHITE background) -->
+    <mxCell id="container" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#424242;strokeWidth=2;arcSize=6;shadow=1;verticalAlign=top;" vertex="1" parent="1">
+      <mxGeometry x="40" y="170" width="680" height="450" as="geometry" />
     </mxCell>
 
     <!-- Container title -->
     <mxCell id="container_title" value="&lt;b style='font-size:16px;color:#333'&gt;agent-wiki&lt;/b&gt;&lt;font style='font-size:11px;color:#888'&gt;  — MCP Server (npx agent-wiki serve)&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=top;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
-      <mxGeometry x="210" y="178" width="320" height="28" as="geometry"/>
+      <mxGeometry x="215" y="178" width="330" height="28" as="geometry" />
     </mxCell>
 
-    <!-- ============ RAW LAYER (left) ============ -->
-    <mxCell id="raw_box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E1;strokeColor=#F9A825;strokeWidth=2;arcSize=10;shadow=0;" vertex="1" parent="1">
-      <mxGeometry x="65" y="220" width="200" height="160" as="geometry"/>
+    <!-- ======== RAW/ BOX (top-left) ======== -->
+    <mxCell id="raw_box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E1;strokeColor=#F9A825;strokeWidth=2;arcSize=10;" vertex="1" parent="1">
+      <mxGeometry x="65" y="215" width="200" height="140" as="geometry" />
     </mxCell>
     <mxCell id="raw_title" value="&lt;b style='font-size:14px'&gt;raw/&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontColor=#E65100;" vertex="1" parent="1">
-      <mxGeometry x="135" y="225" width="60" height="25" as="geometry"/>
+      <mxGeometry x="135" y="218" width="60" height="25" as="geometry" />
     </mxCell>
     <mxCell id="raw_desc" value="&lt;font color='#555' style='font-size:11px'&gt;Immutable Source Documents&lt;br&gt;&lt;br&gt;Write-once, never modified&lt;br&gt;SHA-256 integrity hashing&lt;br&gt;.meta.yaml provenance&lt;br&gt;URL fetch + local copy&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=top;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
-      <mxGeometry x="80" y="252" width="172" height="115" as="geometry"/>
-    </mxCell>
-    <!-- Lock icon indicator -->
-    <mxCell id="raw_lock" value="🔒" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=16;" vertex="1" parent="1">
-      <mxGeometry x="228" y="222" width="30" height="28" as="geometry"/>
+      <mxGeometry x="79" y="248" width="172" height="100" as="geometry" />
     </mxCell>
 
-    <!-- ============ WIKI LAYER (right) ============ -->
-    <mxCell id="wiki_box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#1976D2;strokeWidth=2;arcSize=10;shadow=0;" vertex="1" parent="1">
-      <mxGeometry x="475" y="220" width="200" height="160" as="geometry"/>
+    <!-- ======== WIKI/ BOX (top-right) ======== -->
+    <mxCell id="wiki_box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#1976D2;strokeWidth=2;arcSize=10;" vertex="1" parent="1">
+      <mxGeometry x="500" y="215" width="200" height="140" as="geometry" />
     </mxCell>
     <mxCell id="wiki_title" value="&lt;b style='font-size:14px'&gt;wiki/&lt;/b&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontColor=#0D47A1;" vertex="1" parent="1">
-      <mxGeometry x="545" y="225" width="60" height="25" as="geometry"/>
+      <mxGeometry x="570" y="218" width="60" height="25" as="geometry" />
     </mxCell>
     <mxCell id="wiki_desc" value="&lt;font color='#555' style='font-size:11px'&gt;Compiled Knowledge&lt;br&gt;&lt;br&gt;Structured Markdown + YAML&lt;br&gt;9 entity types&lt;br&gt;[[wiki-links]] graph&lt;br&gt;Synthesis pages&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=top;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
-      <mxGeometry x="490" y="252" width="170" height="115" as="geometry"/>
-    </mxCell>
-    <!-- Edit icon -->
-    <mxCell id="wiki_edit" value="✏️" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=16;" vertex="1" parent="1">
-      <mxGeometry x="638" y="222" width="30" height="28" as="geometry"/>
+      <mxGeometry x="515" y="248" width="170" height="100" as="geometry" />
     </mxCell>
 
-    <!-- ============ COMPILE arrow: raw -> wiki ============ -->
-    <mxCell id="compile_arrow" value="&lt;b&gt;compile&lt;/b&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2.5;strokeColor=#FF8F00;fontSize=12;fontColor=#E65100;fontStyle=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;endArrow=blockThin;endFill=1;endSize=7;" edge="1" source="raw_box" target="wiki_box" parent="1">
-      <mxGeometry relative="1" as="geometry"/>
+    <!-- ======== COMPILE ARROW: raw -> wiki (clear horizontal path) ======== -->
+    <mxCell id="compile_arrow" value="&lt;b&gt;compile&lt;/b&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2.5;strokeColor=#FF8F00;fontSize=12;fontColor=#E65100;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;endArrow=blockThin;endFill=1;endSize=7;" edge="1" source="raw_box" target="wiki_box" parent="1">
+      <mxGeometry relative="1" as="geometry" />
     </mxCell>
 
-    <!-- ============ CLASSIFY (center) ============ -->
-    <mxCell id="classify_box" value="&lt;b style='font-size:12px'&gt;classify&lt;/b&gt;&lt;br&gt;&lt;font color='#555' style='font-size:10px'&gt;Auto entity type&lt;br&gt;+ tag suggestion&lt;br&gt;Zero LLM&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5F5;strokeColor=#AB47BC;strokeWidth=1.5;arcSize=14;shadow=0;fontSize=11;" vertex="1" parent="1">
-      <mxGeometry x="310" y="240" width="120" height="72" as="geometry"/>
-    </mxCell>
-    <!-- classify -> wiki -->
-    <mxCell id="classify_to_wiki" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.5;strokeColor=#AB47BC;dashed=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;endArrow=open;endFill=0;endSize=6;" edge="1" source="classify_box" target="wiki_box" parent="1">
-      <mxGeometry relative="1" as="geometry">
-        <Array as="points">
-          <mxPoint x="460" y="276"/>
-          <mxPoint x="460" y="215"/>
-          <mxPoint x="575" y="215"/>
-        </Array>
-      </mxGeometry>
+    <!-- ======== CLASSIFY (center, below raw/wiki row) ======== -->
+    <mxCell id="classify_box" value="&lt;b style='font-size:12px'&gt;classify&lt;/b&gt;&lt;br&gt;&lt;font color='#555' style='font-size:10px'&gt;Auto entity type + tag suggestion&lt;br&gt;Zero LLM — pure heuristic&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5F5;strokeColor=#AB47BC;strokeWidth=1.5;arcSize=14;fontSize=11;" vertex="1" parent="1"><mxGeometry x="285" y="395" width="160" height="55" as="geometry" /></mxCell>
+
+    <!-- classify -> wiki (dashed, routes cleanly) -->
+    <mxCell id="classify_to_wiki" value="&lt;font style='font-size:10px'&gt;enrich&lt;/font&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.5;strokeColor=#AB47BC;dashed=1;fontSize=10;fontColor=#7B1FA2;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.3;entryY=1;entryDx=0;entryDy=0;endArrow=open;endFill=0;endSize=6;" edge="1" source="classify_box" target="wiki_box" parent="1"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="365" y="375" /><mxPoint x="560" y="375" /></Array></mxGeometry></mxCell>
+
+    <!-- ======== SCHEMAS (bottom-left) ======== -->
+    <mxCell id="schemas_box" value="&lt;b style='font-size:12px'&gt;schemas/&lt;/b&gt;&lt;br&gt;&lt;font color='#555' style='font-size:10px'&gt;9 Entity Templates&lt;br&gt;person · concept · event&lt;br&gt;artifact · comparison · ...&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EDE7F6;strokeColor=#7E57C2;strokeWidth=1.5;arcSize=14;fontSize=11;" vertex="1" parent="1">
+      <mxGeometry x="65" y="495" width="200" height="75" as="geometry" />
     </mxCell>
 
-    <!-- ============ SCHEMAS (bottom left) ============ -->
-    <mxCell id="schemas_box" value="&lt;b style='font-size:12px'&gt;schemas/&lt;/b&gt;&lt;br&gt;&lt;font color='#555' style='font-size:10px'&gt;9 Entity Templates&lt;br&gt;person · concept · event&lt;br&gt;artifact · comparison · ...&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EDE7F6;strokeColor=#7E57C2;strokeWidth=1.5;arcSize=14;shadow=0;fontSize=11;" vertex="1" parent="1">
-      <mxGeometry x="65" y="420" width="200" height="80" as="geometry"/>
-    </mxCell>
-    <!-- schemas -> wiki dashed -->
-    <mxCell id="schemas_to_wiki" value="&lt;font style='font-size:10px'&gt;structure&lt;/font&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.5;strokeColor=#7E57C2;dashed=1;fontSize=10;fontColor=#7E57C2;exitX=1;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=1;entryDx=0;entryDy=0;endArrow=open;endFill=0;endSize=5;" edge="1" source="schemas_box" target="wiki_box" parent="1">
-      <mxGeometry relative="1" as="geometry"/>
+    <!-- schemas -> classify (dashed) -->
+    <mxCell id="schemas_to_classify" value="&lt;font style='font-size:10px'&gt;templates&lt;/font&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.5;strokeColor=#7E57C2;dashed=1;fontSize=10;fontColor=#7E57C2;exitX=1;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=1;entryDx=0;entryDy=0;endArrow=open;endFill=0;endSize=5;" edge="1" source="schemas_box" target="classify_box" parent="1">
+      <mxGeometry relative="1" as="geometry" />
     </mxCell>
 
-    <!-- ============ LINT (bottom right) ============ -->
-    <mxCell id="lint_box" value="&lt;b style='font-size:12px'&gt;lint&lt;/b&gt;&lt;br&gt;&lt;font color='#555' style='font-size:10px'&gt;Self-Checking Engine&lt;br&gt;Contradictions · Orphans&lt;br&gt;Broken links · Stale content&lt;br&gt;SHA-256 re-verify&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#43A047;strokeWidth=1.5;arcSize=14;shadow=0;fontSize=11;" vertex="1" parent="1">
-      <mxGeometry x="475" y="420" width="200" height="90" as="geometry"/>
-    </mxCell>
-    <!-- lint -> wiki (verify) -->
-    <mxCell id="lint_to_wiki" value="&lt;font style='font-size:10px'&gt;verify&lt;/font&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.5;strokeColor=#43A047;fontSize=10;fontColor=#2E7D32;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;endArrow=blockThin;endFill=1;endSize=5;" edge="1" source="lint_box" target="wiki_box" parent="1">
-      <mxGeometry relative="1" as="geometry"/>
-    </mxCell>
-    <!-- lint -> raw (SHA-256 check) -->
-    <mxCell id="lint_to_raw" value="&lt;font style='font-size:10px'&gt;SHA-256&lt;/font&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.5;strokeColor=#43A047;dashed=1;fontSize=10;fontColor=#2E7D32;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;endArrow=open;endFill=0;endSize=5;" edge="1" source="lint_box" target="raw_box" parent="1">
-      <mxGeometry relative="1" as="geometry">
-        <Array as="points">
-          <mxPoint x="165" y="465"/>
-        </Array>
-      </mxGeometry>
+    <!-- ======== LINT (bottom-right) ======== -->
+    <mxCell id="lint_box" value="&lt;b style='font-size:12px'&gt;lint&lt;/b&gt;&lt;br&gt;&lt;font color='#555' style='font-size:10px'&gt;Self-Checking Engine&lt;br&gt;Contradictions · Orphans&lt;br&gt;Broken links · Stale content&lt;br&gt;SHA-256 re-verify&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#43A047;strokeWidth=1.5;arcSize=14;fontSize=11;" vertex="1" parent="1">
+      <mxGeometry x="505" y="490" width="195" height="85" as="geometry" />
     </mxCell>
 
-    <!-- ============ WORKSPACE annotation (bottom) ============ -->
-    <mxCell id="workspace_note" value="&lt;font color='#888' style='font-size:10px'&gt;Workspace: configurable data directory — code and data live separately. Plain Markdown, git-native.&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
-      <mxGeometry x="105" y="538" width="530" height="22" as="geometry"/>
+    <!-- lint -> wiki (verify, straight up) -->
+    <mxCell id="lint_to_wiki" value="&lt;font style='font-size:10px'&gt;verify&lt;/font&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.5;strokeColor=#43A047;fontSize=10;fontColor=#2E7D32;exitX=0.7;exitY=0;exitDx=0;exitDy=0;entryX=0.7;entryY=1;entryDx=0;entryDy=0;endArrow=blockThin;endFill=1;endSize=5;" edge="1" source="lint_box" target="wiki_box" parent="1"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+    <!-- lint -> raw (SHA-256, routed along bottom-left edge) -->
+    <mxCell id="lint_to_raw" value="&lt;font style='font-size:10px'&gt;SHA-256&lt;/font&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=1.5;strokeColor=#43A047;dashed=1;fontSize=10;fontColor=#2E7D32;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;endArrow=open;endFill=0;endSize=5;" edge="1" source="lint_box" target="raw_box" parent="1"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="420" y="532" /><mxPoint x="420" y="590" /><mxPoint x="165" y="590" /></Array></mxGeometry></mxCell>
+
+    <!-- ======== 17 MCP Tools badge (center-bottom) ======== -->
+    <mxCell id="tools_badge" value="&lt;b&gt;17 MCP Tools&lt;/b&gt;&lt;br&gt;&lt;font style='font-size:9px'&gt;raw_add · raw_fetch · raw_read · raw_list · raw_verify&lt;br&gt;wiki_read · wiki_write · wiki_delete · wiki_search&lt;br&gt;wiki_classify · wiki_synthesize · wiki_lint · wiki_init · ...&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#BDBDBD;strokeWidth=1;arcSize=10;fontSize=10;fontColor=#555;" vertex="1" parent="1">
+      <mxGeometry x="285" y="500" width="180" height="70" as="geometry" />
     </mxCell>
 
-    <!-- ============ 17 MCP Tools badge ============ -->
-    <mxCell id="tools_badge" value="&lt;b&gt;17 MCP Tools&lt;/b&gt;&lt;br&gt;&lt;font style='font-size:9px'&gt;raw_add · raw_fetch · raw_read · raw_list · raw_verify&lt;br&gt;wiki_read · wiki_write · wiki_delete · wiki_search · wiki_lint&lt;br&gt;wiki_classify · wiki_synthesize · wiki_init · wiki_log · ...&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF;strokeColor=#BDBDBD;strokeWidth=1;arcSize=10;shadow=0;fontSize=10;fontColor=#555;" vertex="1" parent="1">
-      <mxGeometry x="295" y="330" width="152" height="80" as="geometry"/>
+    <!-- Workspace note -->
+    <mxCell id="workspace_note" value="&lt;font color='#999' style='font-size:10px'&gt;Workspace: configurable data directory — code and data live separately. Plain Markdown, git-native.&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+      <mxGeometry x="105" y="585" width="530" height="22" as="geometry" />
     </mxCell>
 
   </root>

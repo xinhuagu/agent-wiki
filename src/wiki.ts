@@ -226,7 +226,7 @@ type: log
         // title match bonus
         if (page.title.toLowerCase().includes(term)) score += 5;
         // tag match bonus
-        if (page.tags.some((t) => t.toLowerCase().includes(term))) score += 3;
+        if (page.tags.some((t) => String(t).toLowerCase().includes(term))) score += 3;
       }
 
       if (score > 0) {
@@ -444,8 +444,8 @@ type: log
       path: pagePath,
       title: (fm.title as string) ?? basename(pagePath, extname(pagePath)),
       type: fm.type as string | undefined,
-      tags: Array.isArray(fm.tags) ? fm.tags : [],
-      sources: Array.isArray(fm.sources) ? fm.sources : [],
+      tags: Array.isArray(fm.tags) ? fm.tags.map(String) : [],
+      sources: Array.isArray(fm.sources) ? fm.sources.map(String) : [],
       content: body,
       frontmatter: fm,
       links,

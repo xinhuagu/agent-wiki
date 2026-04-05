@@ -94,15 +94,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           required: ["filename"],
         },
       },
-      {
-        name: "raw_verify",
-        description:
-          "Verify integrity of all raw files by checking SHA-256 hashes against stored metadata. Detects corruption or tampering.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {},
-        },
-      },
+      // raw_verify removed — wiki_lint already includes SHA-256 integrity checks
       {
         name: "raw_fetch",
         description:
@@ -303,19 +295,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           properties: {},
         },
       },
-      {
-        name: "wiki_log",
-        description: "View the operation history log with timestamps, operations, affected pages, and summaries.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            limit: {
-              type: "number",
-              description: "Max entries (default: 20)",
-            },
-          },
-        },
-      },
+      // wiki_log removed — use wiki_read("log.md") instead
       {
         name: "wiki_init",
         description:
@@ -337,70 +317,24 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "wiki_config",
         description:
-          "Show the current workspace configuration: config root, workspace directory, data directories (wiki/, raw/, schemas/), and lint settings.",
+          "Show the current workspace configuration: config root, workspace directory, data directories (wiki/, raw/, schemas/), lint settings, and available entity type templates.",
         inputSchema: {
           type: "object" as const,
           properties: {},
         },
       },
+      // wiki_schemas removed — merged into wiki_config
       {
-        name: "wiki_schemas",
+        name: "wiki_rebuild",
         description:
-          "List available entity type templates (person, concept, event, artifact, comparison, summary, how-to, note, synthesis). Use these to structure wiki pages consistently.",
+          "Rebuild the index.md and timeline.md from all wiki pages. Organizes pages by type with counts and dates, and creates a chronological view.",
         inputSchema: {
           type: "object" as const,
           properties: {},
         },
       },
-      {
-        name: "wiki_rebuild_index",
-        description:
-          "Rebuild the index.md from all wiki pages. Organizes pages by type with counts and dates.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {},
-        },
-      },
-      {
-        name: "wiki_rebuild_timeline",
-        description:
-          "Rebuild timeline.md — a chronological view of all knowledge entries, grouped by date.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {},
-        },
-      },
-      {
-        name: "wiki_classify",
-        description:
-          "Auto-classify content into entity type (person, concept, event, artifact, comparison, summary, how-to, synthesis, note) and suggest tags. Pure heuristic — zero LLM dependency. Useful for previewing classification before writing, or for enriching existing pages. Returns type, tags, and confidence score.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            content: {
-              type: "string",
-              description: "The full page content (with or without frontmatter) to classify",
-            },
-          },
-          required: ["content"],
-        },
-      },
-      {
-        name: "wiki_synthesize",
-        description:
-          "Prepare context for knowledge synthesis — reads multiple wiki pages and returns their content so the agent can distill them into a new synthesis page. Synthesis pages represent higher-order knowledge derived from combining multiple sources.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            pages: {
-              type: "array",
-              items: { type: "string" },
-              description: "List of page paths to synthesize from (e.g. ['concept-yolo.md', 'comparison-detectors.md'])",
-            },
-          },
-          required: ["pages"],
-        },
-      },
+      // wiki_classify removed — wiki_write auto-classifies internally
+      // wiki_synthesize removed — agent can call wiki_read on multiple pages directly
     ],
   }));
 
@@ -468,18 +402,7 @@ async function handleTool(
       }, null, 2);
     }
 
-    case "raw_verify": {
-      const results = wiki.rawVerify();
-      const corrupted = results.filter((r) => r.status === "corrupted");
-      const missingMeta = results.filter((r) => r.status === "missing-meta");
-      return JSON.stringify({
-        total: results.length,
-        ok: results.filter((r) => r.status === "ok").length,
-        corrupted: corrupted.length,
-        missingMeta: missingMeta.length,
-        details: results,
-      }, null, 2);
-    }
+    // raw_verify removed — use wiki_lint instead (includes SHA-256 checks)
 
     case "raw_fetch": {
       const doc = await wiki.rawFetch(args.url as string, {
@@ -585,10 +508,7 @@ async function handleTool(
       return JSON.stringify(report, null, 2);
     }
 
-    case "wiki_log": {
-      const entries = wiki.getLog((args.limit as number) ?? 20);
-      return JSON.stringify({ entries }, null, 2);
-    }
+    // wiki_log removed — use wiki_read("log.md") instead
 
     case "wiki_init": {
       const path = (args.path as string) ?? ".";
@@ -606,6 +526,7 @@ async function handleTool(
 
     case "wiki_config": {
       const cfg = wiki.config;
+      const schemas = wiki.schemas();
       return JSON.stringify({
         configRoot: cfg.configRoot,
         workspace: cfg.workspace,
@@ -614,37 +535,20 @@ async function handleTool(
         schemasDir: cfg.schemasDir,
         lint: cfg.lint,
         separateWorkspace: cfg.configRoot !== cfg.workspace,
+        schemas: schemas.map(s => s.name),
       }, null, 2);
     }
 
-    case "wiki_schemas": {
-      const schemas = wiki.schemas();
-      return JSON.stringify({ schemas }, null, 2);
-    }
+    // wiki_schemas removed — merged into wiki_config
 
-    case "wiki_rebuild_index": {
+    case "wiki_rebuild": {
       wiki.rebuildIndex();
-      return JSON.stringify({ ok: true, message: "Index rebuilt" });
-    }
-
-    case "wiki_rebuild_timeline": {
       wiki.rebuildTimeline();
-      return JSON.stringify({ ok: true, message: "Timeline rebuilt" });
+      return JSON.stringify({ ok: true, message: "Index and timeline rebuilt" });
     }
 
-    case "wiki_classify": {
-      const classification = wiki.classify(args.content as string);
-      return JSON.stringify(classification, null, 2);
-    }
-
-    case "wiki_synthesize": {
-      const pagePaths = args.pages as string[];
-      if (!pagePaths || pagePaths.length === 0) {
-        return JSON.stringify({ error: "Provide at least one page path to synthesize from" });
-      }
-      const ctx = wiki.synthesizeContext(pagePaths);
-      return JSON.stringify(ctx, null, 2);
-    }
+    // wiki_classify removed — wiki_write auto-classifies
+    // wiki_synthesize removed — agent can wiki_read multiple pages
 
     default:
       return `Unknown tool: ${name}`;

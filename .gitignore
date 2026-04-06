@@ -6,3 +6,4 @@ dist/
 coverage/
 .npm-cache/
 .aceclaw/
+.lint-cache.json

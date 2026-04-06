@@ -374,6 +374,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
   const WRITE_TOOLS = new Set([
     "raw_add", "raw_fetch", "raw_import_confluence", "raw_import_jira",
     "wiki_write", "wiki_delete", "wiki_init", "wiki_rebuild",
+    "wiki_lint", // writes .lint-cache.json + log.md
   ]);
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {

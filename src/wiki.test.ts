@@ -1043,6 +1043,72 @@ describe("wiki.rebuildTimeline", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
+//  AUTO-ROUTE (resolvePagePath)
+// ═══════════════════════════════════════════════════════════════════
+
+describe("wiki.resolvePagePath", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("keeps path as-is if already in a subdirectory", () => {
+    const wiki = freshWiki();
+    wiki.write("cobol/concept-cobol.md", "---\ntitle: COBOL\ntype: concept\n---\nCOBOL.");
+    const resolved = wiki.resolvePagePath("cobol/new-page.md", "---\ntitle: New\n---\nContent");
+    expect(resolved).toBe("cobol/new-page.md");
+  });
+
+  it("routes via explicit topic frontmatter field", () => {
+    const wiki = freshWiki();
+    wiki.write("cobol/concept-cobol.md", "---\ntitle: COBOL\ntype: concept\n---\nCOBOL.");
+    const resolved = wiki.resolvePagePath("new-page.md", "---\ntitle: New\ntopic: cobol\n---\nContent");
+    expect(resolved).toBe("cobol/new-page.md");
+  });
+
+  it("routes via tag matching against existing topic dirs", () => {
+    const wiki = freshWiki();
+    wiki.write("yolo/concept-yolo.md", "---\ntitle: YOLO\ntype: concept\n---\nYOLO.");
+    // Content about YOLO should be routed to the yolo/ directory
+    const resolved = wiki.resolvePagePath("yolo-v8.md", "---\ntitle: YOLOv8 Architecture\ntype: concept\n---\nYOLO v8 object detection model.");
+    expect(resolved).toBe("yolo/yolo-v8.md");
+  });
+
+  it("keeps at root when no matching topic dir exists", () => {
+    const wiki = freshWiki();
+    wiki.write("cobol/concept-cobol.md", "---\ntitle: COBOL\ntype: concept\n---\nCOBOL.");
+    const resolved = wiki.resolvePagePath("rust-basics.md", "---\ntitle: Rust Basics\ntype: concept\n---\nRust programming.");
+    expect(resolved).toBe("rust-basics.md");
+  });
+
+  it("returns original path when no topic dirs exist", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-a.md", "---\ntitle: A\ntype: concept\n---\nA.");
+    const resolved = wiki.resolvePagePath("new-page.md", "---\ntitle: New\n---\nContent");
+    expect(resolved).toBe("new-page.md");
+  });
+});
+
+describe("wiki.listTopicDirs", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("lists existing topic subdirectories", () => {
+    const wiki = freshWiki();
+    wiki.write("cobol/a.md", "---\ntitle: A\n---\nA");
+    wiki.write("yolo/b.md", "---\ntitle: B\n---\nB");
+    const dirs = wiki.listTopicDirs();
+    expect(dirs).toContain("cobol");
+    expect(dirs).toContain("yolo");
+  });
+
+  it("returns empty when no subdirectories", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-a.md", "---\ntitle: A\n---\nA");
+    const dirs = wiki.listTopicDirs();
+    expect(dirs).toEqual([]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
 //  EDGE CASES & ROBUSTNESS
 // ═══════════════════════════════════════════════════════════════════
 

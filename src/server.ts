@@ -237,7 +237,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "wiki_write",
         description:
-          "Create or update a wiki page. Content should include YAML frontmatter (title, type, tags, sources) and Markdown body. Timestamps (created/updated) are auto-managed. Wiki pages are MUTABLE — they represent compiled knowledge that improves over time.",
+          "Create or update a wiki page. Content should include YAML frontmatter (title, type, tags, sources) and Markdown body. Timestamps (created/updated) are auto-managed. Auto-routes root-level pages to matching topic subdirectories (via frontmatter `topic` field or tag matching). Wiki pages are MUTABLE — they represent compiled knowledge that improves over time.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -514,15 +514,18 @@ async function handleTool(
     case "wiki_write": {
       // Auto-classify if type/tags are missing
       const enrichedContent = wiki.autoClassifyContent(args.content as string);
+      // Auto-route to matching topic subdirectory
+      const resolvedPage = wiki.resolvePagePath(args.page as string, enrichedContent);
       wiki.write(
-        args.page as string,
+        resolvedPage,
         enrichedContent,
         args.source as string | undefined
       );
       const classification = wiki.classify(enrichedContent);
       return JSON.stringify({
         ok: true,
-        page: args.page,
+        page: resolvedPage,
+        routed: resolvedPage !== args.page,
         autoClassified: { type: classification.type, tags: classification.tags, confidence: classification.confidence },
       });
     }

@@ -39,6 +39,7 @@ export type {
   WikiConfig,
 } from "./wiki.js";
 export { createServer, runServer } from "./server.js";
+export { RequestQueue } from "./queue.js";
 export type {
   AtlassianConfig,
   ConfluenceImportResult,

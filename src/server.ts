@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Wiki } from "./wiki.js";
 import { VERSION } from "./version.js";
+import { RequestQueue } from "./queue.js";
 
 export function createServer(wikiPath?: string, workspace?: string): Server {
   const wiki = new Wiki(wikiPath, workspace);
@@ -361,21 +362,35 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
     ],
   }));
 
-  // ── Call Tool ───────────────────────────────────────────────
+  // ── Call Tool (with concurrency control) ────────────────────
+
+  const queue = new RequestQueue();
+
+  // Tools that mutate state — serialized through the write queue
+  const WRITE_TOOLS = new Set([
+    "raw_add", "raw_fetch", "raw_import_confluence", "raw_import_jira",
+    "wiki_write", "wiki_delete", "wiki_init", "wiki_rebuild",
+  ]);
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
+    const params = args as Record<string, unknown>;
+    const isWrite = WRITE_TOOLS.has(name);
 
-    try {
-      const result = await handleTool(wiki, name, args as Record<string, unknown>);
-      return { content: [{ type: "text" as const, text: result }] };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: "text" as const, text: `Error: ${msg}` }],
-        isError: true,
-      };
-    }
+    const run = async () => {
+      try {
+        const result = await handleTool(wiki, name, params);
+        return { content: [{ type: "text" as const, text: result }] };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text" as const, text: `Error: ${msg}` }],
+          isError: true,
+        };
+      }
+    };
+
+    return isWrite ? queue.write(run) : queue.read(run);
   });
 
   return server;

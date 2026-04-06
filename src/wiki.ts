@@ -962,7 +962,8 @@ _Chronological view of all knowledge in this wiki._
       // Check if page already exists — preserve original created time
       if (existsSync(fullPath)) {
         const existing = matter(readFileSync(fullPath, "utf-8"));
-        parsed.data.created = existing.data.created ?? now;
+        const ec = existing.data.created;
+        parsed.data.created = ec instanceof Date ? ec.toISOString() : (ec as string) ?? now;
       } else {
         parsed.data.created = now;
       }
@@ -1852,8 +1853,8 @@ _Chronological view of all knowledge in this wiki._
       content: body,
       frontmatter: fm,
       links,
-      created: fm.created as string | undefined,
-      updated: fm.updated as string | undefined,
+      created: fm.created instanceof Date ? fm.created.toISOString() : fm.created as string | undefined,
+      updated: fm.updated instanceof Date ? fm.updated.toISOString() : fm.updated as string | undefined,
       derivedFrom: Array.isArray(fm.derived_from) ? fm.derived_from.map(String) : undefined,
     };
   }

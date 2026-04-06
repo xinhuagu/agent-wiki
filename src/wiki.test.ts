@@ -1040,6 +1040,19 @@ describe("wiki.rebuildTimeline", () => {
     expect(timeline).toContain("[[cobol/concept-cobol]]");
     expect(timeline).toContain("COBOL Basics");
   });
+
+  it("handles unquoted dates parsed as Date objects by js-yaml", () => {
+    const wiki = freshWiki();
+    // Write frontmatter with unquoted ISO date — js-yaml parses this as a Date object
+    const rawContent =
+      "---\ntitle: Date Bug\ntype: note\ncreated: 2025-06-15T10:00:00.000Z\n---\nBody.";
+    writeFileSync(join(wiki.config.wikiDir, "date-bug.md"), rawContent);
+    // rebuildTimeline calls .slice(0,10) on created — should not throw
+    expect(() => wiki.rebuildTimeline()).not.toThrow();
+    const timeline = readFileSync(join(wiki.config.wikiDir, "timeline.md"), "utf-8");
+    expect(timeline).toContain("2025-06-15");
+    expect(timeline).toContain("Date Bug");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════

@@ -10,6 +10,9 @@
  * bounded concurrent reads. Writes wait for in-flight reads to drain
  * before executing, preventing dirty reads.
  *
+ * Timeout: operations that exceed the configured timeout are rejected
+ * to prevent queue starvation (e.g. a slow raw_fetch blocking all reads).
+ *
  * This is intentionally simple — no file-level locking, no external
  * dependencies. A single-process MCP server over stdio doesn't need
  * distributed locks.
@@ -19,10 +22,12 @@ type Deferred<T = unknown> = {
   fn: () => Promise<T>;
   resolve: (value: T) => void;
   reject: (error: unknown) => void;
+  timer?: ReturnType<typeof setTimeout>;
 };
 
 export class RequestQueue {
   private readonly maxReadConcurrency: number;
+  private readonly timeoutMs: number;
 
   // Write state
   private writeQueue: Deferred[] = [];
@@ -32,22 +37,32 @@ export class RequestQueue {
   private readQueue: Deferred[] = [];
   private readActive = 0;
 
-  constructor(maxReadConcurrency = 8) {
+  constructor(maxReadConcurrency = 8, timeoutMs = 120_000) {
     this.maxReadConcurrency = maxReadConcurrency;
+    this.timeoutMs = timeoutMs;
   }
 
   /**
    * Enqueue a read (non-mutating) operation.
    * Runs concurrently with other reads, up to maxReadConcurrency.
-   * Waits if a write is running or queued (write priority).
+   * Waits if a write is currently running (but NOT if writes are merely queued —
+   * this prevents queued writes from starving reads indefinitely).
    */
   read<T>(fn: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      this.readQueue.push({
+      const entry: Deferred = {
         fn: fn as () => Promise<unknown>,
         resolve: resolve as (v: unknown) => void,
         reject,
-      });
+      };
+      entry.timer = setTimeout(() => {
+        const idx = this.readQueue.indexOf(entry);
+        if (idx !== -1) {
+          this.readQueue.splice(idx, 1);
+          reject(new Error("Read operation timed out waiting in queue"));
+        }
+      }, this.timeoutMs);
+      this.readQueue.push(entry);
       this.drain();
     });
   }
@@ -59,11 +74,19 @@ export class RequestQueue {
    */
   write<T>(fn: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      this.writeQueue.push({
+      const entry: Deferred = {
         fn: fn as () => Promise<unknown>,
         resolve: resolve as (v: unknown) => void,
         reject,
-      });
+      };
+      entry.timer = setTimeout(() => {
+        const idx = this.writeQueue.indexOf(entry);
+        if (idx !== -1) {
+          this.writeQueue.splice(idx, 1);
+          reject(new Error("Write operation timed out waiting in queue"));
+        }
+      }, this.timeoutMs);
+      this.writeQueue.push(entry);
       this.drain();
     });
   }
@@ -93,8 +116,8 @@ export class RequestQueue {
 
     this.writeRunning = true;
     const entry = this.writeQueue.shift()!;
+    if (entry.timer) clearTimeout(entry.timer);
 
-    // Update state BEFORE resolving/rejecting so callers see clean state
     entry.fn().then(
       (result) => {
         this.writeRunning = false;
@@ -110,14 +133,16 @@ export class RequestQueue {
   }
 
   private drainReads(): void {
-    // Don't start reads while a write is running or queued (write priority)
-    if (this.writeRunning || this.writeQueue.length > 0) return;
+    // Don't start reads while a write is actively running
+    // (but queued writes don't block reads — prevents starvation)
+    if (this.writeRunning) return;
 
     while (
       this.readQueue.length > 0 &&
       this.readActive < this.maxReadConcurrency
     ) {
       const entry = this.readQueue.shift()!;
+      if (entry.timer) clearTimeout(entry.timer);
       this.readActive++;
 
       entry.fn().then(

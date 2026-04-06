@@ -71,17 +71,19 @@ describe("RequestQueue", () => {
     expect(readEnd).toBeLessThan(writeStart);
   });
 
-  it("reads wait for queued writes", async () => {
+  it("reads are not starved by queued writes", async () => {
     const q = new RequestQueue();
     const log: string[] = [];
 
-    // Queue a write first, then reads
-    const writePromise = q.write(tracked("w1", log, 20));
+    // Start a write, then queue a read while write is running
+    const writePromise = q.write(tracked("w1", log, 30));
+    // Give write time to start
+    await new Promise((r) => setTimeout(r, 5));
     const readPromise = q.read(tracked("r1", log));
 
     await Promise.all([writePromise, readPromise]);
 
-    // Write must complete before read starts
+    // Read must wait for the running write, but not be blocked indefinitely
     const writeEnd = log.indexOf("end:w1");
     const readStart = log.indexOf("start:r1");
     expect(writeEnd).toBeLessThan(readStart);
@@ -121,6 +123,26 @@ describe("RequestQueue", () => {
     ]);
 
     expect(peak).toBeLessThanOrEqual(2);
+  });
+
+  it("rejects operations that exceed timeout", async () => {
+    const q = new RequestQueue(8, 50); // 50ms timeout
+
+    // Block the queue with a slow write
+    let resolveBlocker!: () => void;
+    const blocker = q.write(() => new Promise<void>((r) => { resolveBlocker = r; }));
+    await new Promise((r) => setTimeout(r, 5));
+
+    // Queue another write that will timeout waiting
+    const timedOut = q.write(async () => "should-not-run");
+
+    await expect(timedOut).rejects.toThrow("timed out");
+
+    // Unblock and verify queue still works
+    resolveBlocker();
+    await blocker;
+    const result = await q.write(async () => "ok");
+    expect(result).toBe("ok");
   });
 
   it("reports stats correctly", async () => {

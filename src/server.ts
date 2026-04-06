@@ -612,5 +612,21 @@ async function handleTool(
 export async function runServer(wikiPath?: string, workspace?: string): Promise<void> {
   const server = createServer(wikiPath, workspace);
   const transport = new StdioServerTransport();
+
+  // Handle transport/process errors gracefully instead of crashing
+  process.on("SIGPIPE", () => {
+    // Client disconnected — ignore, let transport handle cleanup
+  });
+  process.stdin.on("error", () => { /* stdin closed */ });
+  process.stdout.on("error", () => { /* stdout closed */ });
+
+  server.onerror = (err) => {
+    console.error(`[agent-wiki] MCP error: ${err instanceof Error ? err.message : String(err)}`);
+  };
+
+  server.onclose = () => {
+    process.exit(0);
+  };
+
   await server.connect(transport);
 }

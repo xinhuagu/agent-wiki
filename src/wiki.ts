@@ -124,9 +124,11 @@ const SYSTEM_PAGES = new Set(["index.md", "log.md", "timeline.md"]);
 
 /** Check if a page path is a system page (top-level or topic sub-index). */
 function isSystemPage(pagePath: string): boolean {
-  if (SYSTEM_PAGES.has(pagePath)) return true;
+  // Normalize to forward slashes for cross-platform consistency
+  const normalized = pagePath.replace(/\\/g, "/");
+  if (SYSTEM_PAGES.has(normalized)) return true;
   // Topic sub-indexes: e.g. "cobol/index.md"
-  return /^[^/]+\/index\.md$/.test(pagePath);
+  return /^[^/]+\/index\.md$/.test(normalized);
 }
 
 /**
@@ -972,6 +974,55 @@ _Chronological view of all knowledge in this wiki._
     writeFileSync(fullPath, finalContent.trimEnd() + "\n");
 
     this.log("write", pagePath, `Wrote ${pagePath}${source ? ` (${source})` : ""}`);
+  }
+
+  /** Resolve page path to the correct topic subdirectory.
+   *  If the path already has a subdirectory, returns as-is.
+   *  Otherwise, routes based on: (1) explicit `topic` frontmatter field,
+   *  (2) tag/title matching against existing topic directories. */
+  resolvePagePath(pagePath: string, content: string): string {
+    // Already in a subdirectory? Use as-is.
+    if (pagePath.includes("/")) return pagePath;
+
+    // No existing topic dirs → nothing to route to
+    const topics = this.listTopicDirs();
+    if (topics.length === 0) return pagePath;
+
+    const parsed = matter(content);
+
+    // 1. Explicit `topic` frontmatter field
+    const explicitTopic = parsed.data.topic as string | undefined;
+    if (explicitTopic && typeof explicitTopic === "string") {
+      const normalized = explicitTopic.toLowerCase().replace(/\s+/g, "-");
+      return `${normalized}/${pagePath}`;
+    }
+
+    // 2. Match tags/title against existing topic directory names
+    const classification = this.classify(content);
+    const title = ((parsed.data.title as string) ?? "").toLowerCase();
+    const signals = [
+      ...classification.tags.map((t) => t.toLowerCase()),
+      ...title.split(/[\s\-_]+/).filter(Boolean),
+    ];
+
+    for (const topic of topics) {
+      const topicLower = topic.toLowerCase();
+      if (signals.some((s) => s === topicLower || s.includes(topicLower) || topicLower.includes(s))) {
+        return `${topic}/${pagePath}`;
+      }
+    }
+
+    return pagePath;
+  }
+
+  /** List existing topic subdirectories under wiki/. */
+  listTopicDirs(): string[] {
+    const dir = this.config.wikiDir;
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .map((e) => e.name)
+      .sort();
   }
 
   /** Delete a wiki page. Returns true if it existed. */
@@ -1837,7 +1888,8 @@ function listMdFiles(dir: string, root: string): string[] {
     if (entry.isDirectory()) {
       result.push(...listMdFiles(full, root));
     } else if (entry.name.endsWith(".md")) {
-      result.push(relative(root, full));
+      // Normalize to forward slashes for cross-platform consistency
+      result.push(relative(root, full).replace(/\\/g, "/"));
     }
   }
   return result.sort();
@@ -1852,7 +1904,7 @@ function listAllFiles(dir: string, root: string): string[] {
     if (entry.isDirectory()) {
       result.push(...listAllFiles(full, root));
     } else {
-      result.push(relative(root, full));
+      result.push(relative(root, full).replace(/\\/g, "/"));
     }
   }
   return result.sort();

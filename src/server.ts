@@ -351,7 +351,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "wiki_rebuild",
         description:
-          "Rebuild the index.md and timeline.md from all wiki pages. Organizes pages by type with counts and dates, and creates a chronological view.",
+          "Rebuild the index.md and timeline.md from all wiki pages. If topic subdirectories exist, generates per-topic sub-indexes and a top-level hub. Otherwise groups pages by type with counts and dates.",
         inputSchema: {
           type: "object" as const,
           properties: {},

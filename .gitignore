@@ -3,3 +3,6 @@ dist/
 *.tgz
 .env
 .DS_Store
+coverage/
+.npm-cache/
+.aceclaw/

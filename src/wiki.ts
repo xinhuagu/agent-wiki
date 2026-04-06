@@ -1934,8 +1934,10 @@ function parsePageRange(pages: string, totalPages: number): Set<number> {
     const trimmed = part.trim();
     const match = trimmed.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
     if (!match) continue;
-    const start = Math.max(1, Math.min(totalPages, parseInt(match[1], 10)));
-    const end = Math.min(totalPages, match[2] ? parseInt(match[2], 10) : start);
+    const rawStart = parseInt(match[1], 10);
+    if (rawStart > totalPages) continue; // entirely out of bounds
+    const start = Math.max(1, rawStart);
+    const end = Math.min(totalPages, match[2] ? parseInt(match[2], 10) : rawStart);
     for (let i = start; i <= end; i++) indices.add(i - 1); // 0-based
   }
   return indices;

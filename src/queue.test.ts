@@ -145,6 +145,35 @@ describe("RequestQueue", () => {
     expect(result).toBe("ok");
   });
 
+  it("concurrent writes to same file are serialized (lint cache scenario)", async () => {
+    const q = new RequestQueue();
+    const results: number[] = [];
+    let sharedState = 0;
+
+    // Simulate wiki_lint cache write: read shared state, delay, write back
+    const lintLike = async () => {
+      const snapshot = sharedState;
+      await new Promise((r) => setTimeout(r, 15));
+      // If not serialized, multiple calls would read same snapshot
+      // and the final value would be wrong
+      sharedState = snapshot + 1;
+      results.push(sharedState);
+      return sharedState;
+    };
+
+    // Fire 3 "lint" calls concurrently — all go through write queue
+    await Promise.all([
+      q.write(lintLike),
+      q.write(lintLike),
+      q.write(lintLike),
+    ]);
+
+    // Serialized: each sees the previous write, so results are [1, 2, 3]
+    // If concurrent (race): all would read 0, results would be [1, 1, 1]
+    expect(results).toEqual([1, 2, 3]);
+    expect(sharedState).toBe(3);
+  });
+
   it("reports stats correctly", async () => {
     const q = new RequestQueue();
 

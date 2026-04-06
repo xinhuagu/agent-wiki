@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Wiki } from "./wiki.js";
 
@@ -132,6 +132,19 @@ describe("server tool: wiki_lint", () => {
     const report = wiki.lint();
     expect(report.pagesChecked).toBeGreaterThan(0);
     expect(report.issues.some(i => i.category === "broken-link")).toBe(true);
+  });
+
+  it("sequential lints produce valid cache file", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("cache-check.txt", { content: "test" });
+    wiki.lint();
+    wiki.lint();
+    const cachePath = join(wiki.config.workspace, ".lint-cache.json");
+    expect(existsSync(cachePath)).toBe(true);
+    const cache = JSON.parse(readFileSync(cachePath, "utf-8"));
+    expect(cache.version).toBe(1);
+    expect(cache.entries["cache-check.txt"]).toBeDefined();
+    expect(cache.entries["cache-check.txt"].status).toBe("ok");
   });
 });
 

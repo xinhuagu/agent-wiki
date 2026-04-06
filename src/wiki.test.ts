@@ -963,6 +963,74 @@ Combined insights.`);
   });
 });
 
+describe("wiki.lint — integrity cache", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("creates .lint-cache.json after lint", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("cached.txt", { content: "hello" });
+    wiki.lint();
+    expect(existsSync(join(wiki.config.workspace, ".lint-cache.json"))).toBe(true);
+  });
+
+  it("returns same results on second lint (cache hit)", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("stable.txt", { content: "stable content" });
+    const report1 = wiki.lint();
+    const report2 = wiki.lint();
+    expect(report2.rawChecked).toBe(report1.rawChecked);
+    expect(report2.issues.filter(i => i.category === "integrity"))
+      .toEqual(report1.issues.filter(i => i.category === "integrity"));
+  });
+
+  it("detects corruption even with stale cache", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("will-corrupt.txt", { content: "original" });
+    wiki.lint(); // populates cache with "ok"
+    writeFileSync(join(wiki.config.rawDir, "will-corrupt.txt"), "tampered");
+    const report = wiki.lint();
+    const corruption = report.issues.find(
+      i => i.category === "integrity" && i.message.includes("corrupted"),
+    );
+    expect(corruption).toBeDefined();
+  });
+
+  it("re-checks when meta.yaml changes", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("meta-change.txt", { content: "content" });
+    wiki.lint(); // populates cache
+    // Corrupt the expected hash in meta
+    const metaPath = join(wiki.config.rawDir, "meta-change.txt.meta.yaml");
+    const metaContent = readFileSync(metaPath, "utf-8");
+    writeFileSync(metaPath, metaContent.replace(/sha256: [a-f0-9]+/, "sha256: 0000000000000000000000000000000000000000000000000000000000000000"));
+    const report = wiki.lint();
+    const corruption = report.issues.find(
+      i => i.category === "integrity" && i.message.includes("corrupted"),
+    );
+    expect(corruption).toBeDefined();
+  });
+
+  it("handles corrupt cache file gracefully", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("robust.txt", { content: "data" });
+    writeFileSync(join(wiki.config.workspace, ".lint-cache.json"), "not json!!!");
+    const report = wiki.lint();
+    expect(report.rawChecked).toBeGreaterThan(0);
+  });
+
+  it("ignores cache with wrong version", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("versioned.txt", { content: "data" });
+    writeFileSync(
+      join(wiki.config.workspace, ".lint-cache.json"),
+      JSON.stringify({ version: 999, entries: {} }),
+    );
+    const report = wiki.lint();
+    expect(report.rawChecked).toBeGreaterThan(0);
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════
 //  CLASSIFY
 // ═══════════════════════════════════════════════════════════════════

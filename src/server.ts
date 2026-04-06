@@ -594,8 +594,13 @@ async function handleTool(
     // wiki_schemas removed — merged into wiki_config
 
     case "wiki_rebuild": {
-      wiki.rebuildIndex();
-      wiki.rebuildTimeline();
+      // Read all pages once into cache — avoids double I/O on slow filesystems
+      // (e.g. OneDrive cloud storage where each readFileSync has network latency).
+      const pageCache = wiki.buildPageCache();
+      wiki.rebuildIndex(pageCache);
+      // Yield event loop so MCP transport can respond to client pings.
+      await new Promise((r) => setImmediate(r));
+      wiki.rebuildTimeline(pageCache);
       return JSON.stringify({ ok: true, message: "Index and timeline rebuilt" });
     }
 

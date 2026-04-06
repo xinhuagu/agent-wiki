@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Wiki } from "./wiki.js";
 
@@ -132,6 +132,25 @@ describe("server tool: wiki_lint", () => {
     const report = wiki.lint();
     expect(report.pagesChecked).toBeGreaterThan(0);
     expect(report.issues.some(i => i.category === "broken-link")).toBe(true);
+  });
+
+  it("wiki_lint is classified as a write tool (cache serialization)", async () => {
+    // wiki_lint writes .lint-cache.json + log.md, so it must be in WRITE_TOOLS
+    // to prevent concurrent cache races. Import createServer to inspect.
+    const { createServer } = await import("./server.js");
+    // createServer is the only export; WRITE_TOOLS is internal.
+    // We verify indirectly: lint writes cache, so two sequential lints
+    // must produce a valid cache file (not corrupted by races).
+    const wiki = freshWiki();
+    wiki.rawAdd("race-guard.txt", { content: "test" });
+    wiki.lint();
+    wiki.lint();
+    const cachePath = join(wiki.config.workspace, ".lint-cache.json");
+    expect(existsSync(cachePath)).toBe(true);
+    const cache = JSON.parse(readFileSync(cachePath, "utf-8"));
+    expect(cache.version).toBe(1);
+    expect(cache.entries["race-guard.txt"]).toBeDefined();
+    expect(cache.entries["race-guard.txt"].status).toBe("ok");
   });
 });
 

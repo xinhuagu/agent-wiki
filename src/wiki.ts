@@ -82,6 +82,20 @@ export interface Contradiction {
   severity: "error" | "warning";
 }
 
+/** Per-file cache entry for raw integrity verification. */
+interface RawIntegrityCacheEntry {
+  fileMtimeMs: number;
+  fileSize: number;
+  metaMtimeMs: number;
+  status: "ok" | "corrupted" | "missing-meta";
+}
+
+/** On-disk shape of .lint-cache.json. */
+interface LintCache {
+  version: 1;
+  entries: Record<string, RawIntegrityCacheEntry>;
+}
+
 export interface TimelineEntry {
   time: string;
   operation: string;
@@ -266,9 +280,9 @@ _Chronological view of all knowledge in this wiki._
     writeDefaultSchemas(schemasDir);
 
     // .gitignore in workspace (if separate, also add one there)
-    writeFileSync(join(configRoot, ".gitignore"), "node_modules/\ndist/\n.env\n");
+    writeFileSync(join(configRoot, ".gitignore"), "node_modules/\ndist/\n.env\n.lint-cache.json\n");
     if (workspace && wsRoot !== configRoot) {
-      writeFileSync(join(wsRoot, ".gitignore"), "# Agent Wiki workspace data\n");
+      writeFileSync(join(wsRoot, ".gitignore"), "# Agent Wiki workspace data\n.lint-cache.json\n");
     }
 
     return new Wiki(configRoot, workspace);
@@ -697,8 +711,11 @@ _Chronological view of all knowledge in this wiki._
     return { content: null, meta, binary: true };
   }
 
-  /** Verify integrity of all raw files against their stored hashes. */
-  rawVerify(): Array<{ path: string; status: "ok" | "corrupted" | "missing-meta" }> {
+  /** Verify integrity of all raw files against their stored hashes.
+   *  When a `cache` is provided, files whose mtime+size haven't changed
+   *  since the last check are skipped (cache hit). Cache entries are
+   *  updated in-place for misses; the caller persists the cache. */
+  rawVerify(cache?: LintCache | null): Array<{ path: string; status: "ok" | "corrupted" | "missing-meta" }> {
     const results: Array<{ path: string; status: "ok" | "corrupted" | "missing-meta" }> = [];
     if (!existsSync(this.config.rawDir)) return results;
 
@@ -712,16 +729,56 @@ _Chronological view of all knowledge in this wiki._
         continue;
       }
 
+      // Stat both files (cheap metadata-only I/O)
+      const fileStat = statSync(fullPath);
+      const metaStat = statSync(metaPath);
+
+      // Cache hit — mtime+size of both file and sidecar unchanged
+      const cached = cache?.entries[file];
+      if (
+        cached &&
+        cached.fileMtimeMs === fileStat.mtimeMs &&
+        cached.fileSize === fileStat.size &&
+        cached.metaMtimeMs === metaStat.mtimeMs
+      ) {
+        results.push({ path: file, status: cached.status });
+        continue;
+      }
+
+      // Cache miss — full hash computation
       const meta = yaml.load(readFileSync(metaPath, "utf-8")) as RawDocument;
       const buf = readFileSync(fullPath);
       const actualHash = createHash("sha256").update(buf).digest("hex");
+      const status = actualHash === meta.sha256 ? "ok" : "corrupted";
+      results.push({ path: file, status });
 
-      results.push({
-        path: file,
-        status: actualHash === meta.sha256 ? "ok" : "corrupted",
-      });
+      // Update cache entry in-place
+      if (cache) {
+        cache.entries[file] = {
+          fileMtimeMs: fileStat.mtimeMs,
+          fileSize: fileStat.size,
+          metaMtimeMs: metaStat.mtimeMs,
+          status,
+        };
+      }
     }
     return results;
+  }
+
+  private loadLintCache(): LintCache | null {
+    const cachePath = join(this.config.workspace, ".lint-cache.json");
+    if (!existsSync(cachePath)) return null;
+    try {
+      const raw = JSON.parse(readFileSync(cachePath, "utf-8"));
+      if (raw?.version !== 1) return null;
+      return raw as LintCache;
+    } catch {
+      return null;
+    }
+  }
+
+  private saveLintCache(cache: LintCache): void {
+    writeFileSync(join(this.config.workspace, ".lint-cache.json"), JSON.stringify(cache));
   }
 
   /**
@@ -1116,6 +1173,25 @@ _Chronological view of all knowledge in this wiki._
       if (page) pageMap.set(pagePath, page);
     }
 
+    // ── O(1) lookup indexes ──
+    const pageSet = new Set(pages);
+    const basenameToPages = new Map<string, string[]>();
+    for (const p of pages) {
+      const bn = basename(p, extname(p));
+      const existing = basenameToPages.get(bn);
+      if (existing) existing.push(p);
+      else basenameToPages.set(bn, [p]);
+    }
+    // Reverse link index: slug → set of pages that link TO this slug
+    const incomingLinks = new Map<string, Set<string>>();
+    for (const [sourcePath, page] of pageMap) {
+      for (const link of page.links) {
+        let targets = incomingLinks.get(link);
+        if (!targets) { targets = new Set(); incomingLinks.set(link, targets); }
+        targets.add(sourcePath);
+      }
+    }
+
     for (const [pagePath, page] of pageMap) {
       // ── Missing frontmatter ──
       if (Object.keys(page.frontmatter).length === 0) {
@@ -1146,11 +1222,12 @@ _Chronological view of all knowledge in this wiki._
         const slug = basename(pagePath, extname(pagePath));
         // Full relative slug: "topic/page-name" (without .md)
         const fullSlug = pagePath.endsWith(".md") ? pagePath.slice(0, -3) : pagePath;
-        const hasIncoming = [...pageMap].some(([other, otherPage]) => {
-          if (other === pagePath) return false;
-          // Match by basename slug or full relative path slug
-          return otherPage.links.includes(slug) || otherPage.links.includes(fullSlug);
-        });
+        const slugIncoming = incomingLinks.get(slug);
+        const fullSlugIncoming = incomingLinks.get(fullSlug);
+        // Check that at least one *other* page links here (exclude self-links)
+        const hasIncoming =
+          (slugIncoming !== undefined && (slugIncoming.size > 1 || !slugIncoming.has(pagePath))) ||
+          (fullSlugIncoming !== undefined && (fullSlugIncoming.size > 1 || !fullSlugIncoming.has(pagePath)));
         if (!hasIncoming) {
           report.issues.push({
             severity: "warning",
@@ -1166,22 +1243,19 @@ _Chronological view of all knowledge in this wiki._
       // ── Broken links ──
       for (const link of page.links) {
         const linkPath = link.endsWith(".md") ? link : link + ".md";
-        // Direct match by relative path
-        if (pages.includes(linkPath) || pages.includes(link)) continue;
-        // Basename match: [[slug]] resolves to any "topic/slug.md"
-        const matchByBasename = pages.some(
-          (p) => basename(p, extname(p)) === link || basename(p, extname(p)) === link.replace(/\.md$/, ""),
-        );
-        if (!matchByBasename) {
-          report.issues.push({
-            severity: "error",
-            page: pagePath,
-            message: `Broken link: [[${link}]]`,
-            suggestion: `Create ${link}.md or fix the link`,
-            autoFixable: false,
-            category: "broken-link",
-          });
-        }
+        // O(1) direct-path check
+        if (pageSet.has(linkPath) || pageSet.has(link)) continue;
+        // O(1) basename check
+        const bareLink = link.replace(/\.md$/, "");
+        if (basenameToPages.has(link) || basenameToPages.has(bareLink)) continue;
+        report.issues.push({
+          severity: "error",
+          page: pagePath,
+          message: `Broken link: [[${link}]]`,
+          suggestion: `Create ${link}.md or fix the link`,
+          autoFixable: false,
+          category: "broken-link",
+        });
       }
 
       // ── Missing sources (non-system pages) ──
@@ -1202,10 +1276,12 @@ _Chronological view of all knowledge in this wiki._
       if (page.type === "synthesis" && page.derivedFrom) {
         for (const src of page.derivedFrom) {
           const srcPath = src.endsWith(".md") ? src : src + ".md";
+          const bareSrc = src.replace(/\.md$/, "");
           const found =
-            pages.includes(srcPath) ||
-            pages.includes(src) ||
-            pages.some((p) => basename(p, extname(p)) === src || basename(p, extname(p)) === src.replace(/\.md$/, ""));
+            pageSet.has(srcPath) ||
+            pageSet.has(src) ||
+            basenameToPages.has(src) ||
+            basenameToPages.has(bareSrc);
           if (!found) {
             report.issues.push({
               severity: "error",
@@ -1257,9 +1333,10 @@ _Chronological view of all knowledge in this wiki._
       }
     }
 
-    // ── Raw file integrity ──
+    // ── Raw file integrity (incremental — cached by mtime+size) ──
     if (this.config.lint.checkIntegrity) {
-      const rawResults = this.rawVerify();
+      const lintCache = this.loadLintCache() ?? { version: 1 as const, entries: {} };
+      const rawResults = this.rawVerify(lintCache);
       report.rawChecked = rawResults.length;
       for (const r of rawResults) {
         if (r.status === "corrupted") {
@@ -1282,6 +1359,7 @@ _Chronological view of all knowledge in this wiki._
           });
         }
       }
+      this.saveLintCache(lintCache);
     }
 
     this.log("lint", "—", `Checked ${report.pagesChecked} pages + ${report.rawChecked} raw files, found ${report.issues.length} issues (${report.contradictions.length} contradictions)`);

@@ -966,7 +966,7 @@ describe("wiki.rebuildIndex", () => {
   beforeEach(cleanUp);
   afterEach(cleanUp);
 
-  it("rebuilds index with page counts", () => {
+  it("rebuilds index with page counts (flat mode)", () => {
     const wiki = freshWiki();
     wiki.write("concept-a.md", "---\ntitle: A\ntype: concept\n---\nA");
     wiki.write("person-b.md", "---\ntitle: B\ntype: person\n---\nB");
@@ -975,6 +975,47 @@ describe("wiki.rebuildIndex", () => {
     expect(index).toContain("concept-a");
     expect(index).toContain("person-b");
     expect(index).toContain("2 pages");
+  });
+
+  it("generates topic sub-indexes when subdirectories exist", () => {
+    const wiki = freshWiki();
+    wiki.write("cobol/concept-cobol.md", "---\ntitle: COBOL Basics\ntype: concept\n---\nCOBOL.");
+    wiki.write("cobol/how-to-cobol-modernization.md", "---\ntitle: COBOL Modernization\ntype: how-to\n---\nModernize.");
+    wiki.write("yolo/concept-yolo-overview.md", "---\ntitle: YOLO Overview\ntype: concept\n---\nYOLO.");
+    wiki.rebuildIndex();
+
+    // Top-level index should list topics
+    const index = readFileSync(join(wiki.config.wikiDir, "index.md"), "utf-8");
+    expect(index).toContain("3 pages");
+    expect(index).toContain("2 topics");
+    expect(index).toContain("[[cobol/index]]");
+    expect(index).toContain("[[yolo/index]]");
+    expect(index).toContain("cobol (2 pages)");
+    expect(index).toContain("yolo (1 pages)");
+
+    // COBOL sub-index should exist and list its pages
+    const cobolIndex = readFileSync(join(wiki.config.wikiDir, "cobol/index.md"), "utf-8");
+    expect(cobolIndex).toContain("COBOL Basics");
+    expect(cobolIndex).toContain("COBOL Modernization");
+    expect(cobolIndex).toContain("[[cobol/concept-cobol]]");
+    expect(cobolIndex).toContain("2 pages");
+
+    // YOLO sub-index
+    const yoloIndex = readFileSync(join(wiki.config.wikiDir, "yolo/index.md"), "utf-8");
+    expect(yoloIndex).toContain("YOLO Overview");
+    expect(yoloIndex).toContain("1 pages");
+  });
+
+  it("mixes topic dirs with root-level pages", () => {
+    const wiki = freshWiki();
+    wiki.write("cobol/concept-cobol.md", "---\ntitle: COBOL Basics\ntype: concept\n---\nCOBOL.");
+    wiki.write("note-misc.md", "---\ntitle: Misc Note\ntype: note\n---\nMisc.");
+    wiki.rebuildIndex();
+
+    const index = readFileSync(join(wiki.config.wikiDir, "index.md"), "utf-8");
+    expect(index).toContain("2 pages");
+    expect(index).toContain("[[cobol/index]]");
+    expect(index).toContain("[[note-misc]]");
   });
 });
 
@@ -989,6 +1030,15 @@ describe("wiki.rebuildTimeline", () => {
     const timeline = readFileSync(join(wiki.config.wikiDir, "timeline.md"), "utf-8");
     expect(timeline).toContain("Event X");
     expect(timeline).toContain("[event]");
+  });
+
+  it("uses full paths in timeline for subdirectory pages", () => {
+    const wiki = freshWiki();
+    wiki.write("cobol/concept-cobol.md", "---\ntitle: COBOL Basics\ntype: concept\n---\nCOBOL.");
+    wiki.rebuildTimeline();
+    const timeline = readFileSync(join(wiki.config.wikiDir, "timeline.md"), "utf-8");
+    expect(timeline).toContain("[[cobol/concept-cobol]]");
+    expect(timeline).toContain("COBOL Basics");
   });
 });
 

@@ -122,6 +122,13 @@ export interface WikiConfig {
 // System pages that lint should treat specially
 const SYSTEM_PAGES = new Set(["index.md", "log.md", "timeline.md"]);
 
+/** Check if a page path is a system page (top-level or topic sub-index). */
+function isSystemPage(pagePath: string): boolean {
+  if (SYSTEM_PAGES.has(pagePath)) return true;
+  // Topic sub-indexes: e.g. "cobol/index.md"
+  return /^[^/]+\/index\.md$/.test(pagePath);
+}
+
 /**
  * Validate that a user-supplied relative path stays within the base directory.
  * Prevents directory traversal attacks (e.g. "../../etc/passwd").
@@ -970,7 +977,7 @@ _Chronological view of all knowledge in this wiki._
   /** Delete a wiki page. Returns true if it existed. */
   delete(pagePath: string): boolean {
     // Guard: never delete system pages
-    if (SYSTEM_PAGES.has(pagePath)) {
+    if (isSystemPage(pagePath)) {
       throw new Error(`Cannot delete system page: ${pagePath}`);
     }
     const fullPath = safePath(this.config.wikiDir, pagePath);
@@ -1082,18 +1089,21 @@ _Chronological view of all knowledge in this wiki._
       }
 
       // ── Orphan pages ──
-      if (this.config.lint.checkOrphans && !SYSTEM_PAGES.has(pagePath)) {
+      if (this.config.lint.checkOrphans && !isSystemPage(pagePath)) {
         const slug = basename(pagePath, extname(pagePath));
+        // Full relative slug: "topic/page-name" (without .md)
+        const fullSlug = pagePath.endsWith(".md") ? pagePath.slice(0, -3) : pagePath;
         const hasIncoming = [...pageMap].some(([other, otherPage]) => {
           if (other === pagePath) return false;
-          return otherPage.links.includes(slug);
+          // Match by basename slug or full relative path slug
+          return otherPage.links.includes(slug) || otherPage.links.includes(fullSlug);
         });
         if (!hasIncoming) {
           report.issues.push({
             severity: "warning",
             page: pagePath,
             message: "Orphan page — no other pages link here",
-            suggestion: `Add [[${slug}]] to related pages or index.md`,
+            suggestion: `Add [[${fullSlug}]] to related pages or index.md`,
             autoFixable: true,
             category: "orphan",
           });
@@ -1103,7 +1113,13 @@ _Chronological view of all knowledge in this wiki._
       // ── Broken links ──
       for (const link of page.links) {
         const linkPath = link.endsWith(".md") ? link : link + ".md";
-        if (!pages.includes(linkPath) && !pages.includes(link)) {
+        // Direct match by relative path
+        if (pages.includes(linkPath) || pages.includes(link)) continue;
+        // Basename match: [[slug]] resolves to any "topic/slug.md"
+        const matchByBasename = pages.some(
+          (p) => basename(p, extname(p)) === link || basename(p, extname(p)) === link.replace(/\.md$/, ""),
+        );
+        if (!matchByBasename) {
           report.issues.push({
             severity: "error",
             page: pagePath,
@@ -1116,7 +1132,7 @@ _Chronological view of all knowledge in this wiki._
       }
 
       // ── Missing sources (non-system pages) ──
-      if (this.config.lint.checkMissingSources && !SYSTEM_PAGES.has(pagePath)) {
+      if (this.config.lint.checkMissingSources && !isSystemPage(pagePath)) {
         if (page.sources.length === 0 && page.type && page.type !== "index" && page.type !== "log" && page.type !== "timeline") {
           report.issues.push({
             severity: "info",
@@ -1133,7 +1149,11 @@ _Chronological view of all knowledge in this wiki._
       if (page.type === "synthesis" && page.derivedFrom) {
         for (const src of page.derivedFrom) {
           const srcPath = src.endsWith(".md") ? src : src + ".md";
-          if (!pages.includes(srcPath) && !pages.includes(src)) {
+          const found =
+            pages.includes(srcPath) ||
+            pages.includes(src) ||
+            pages.some((p) => basename(p, extname(p)) === src || basename(p, extname(p)) === src.replace(/\.md$/, ""));
+          if (!found) {
             report.issues.push({
               severity: "error",
               page: pagePath,
@@ -1227,7 +1247,7 @@ _Chronological view of all knowledge in this wiki._
     const claims = new Map<string, Array<{ page: string; excerpt: string; value: string }>>();
 
     for (const [pagePath, page] of pageMap) {
-      if (SYSTEM_PAGES.has(pagePath)) continue;
+      if (isSystemPage(pagePath)) continue;
 
       // Extract date claims: "published in YYYY", "released YYYY", "founded YYYY"
       const datePatterns = page.content.matchAll(
@@ -1531,74 +1551,195 @@ _Chronological view of all knowledge in this wiki._
 
   // ── Index rebuild ─────────────────────────────────────────────
 
-  /** Rebuild index.md from all pages. Groups by type with page counts. */
+  /** Rebuild index.md from all pages.
+   *  If topic subdirectories exist, generates per-topic sub-indexes and
+   *  a top-level hub. Otherwise falls back to flat type-based grouping. */
   rebuildIndex(): void {
-    const pages = this.listAllPages().filter((p) => !SYSTEM_PAGES.has(p));
-    const categories: Record<string, string[]> = {};
+    const pages = this.listAllPages().filter((p) => !isSystemPage(p));
     let rawCount = 0;
     try {
       rawCount = this.rawList().length;
     } catch { /* no raw dir */ }
 
+    // Partition pages into topic dirs vs root-level
+    const topicPages: Record<string, string[]> = {};  // topic -> page paths
+    const rootPages: string[] = [];
+
     for (const pagePath of pages) {
+      const parts = pagePath.split("/");
+      if (parts.length >= 2) {
+        const topic = parts[0]!;
+        if (!topicPages[topic]) topicPages[topic] = [];
+        topicPages[topic]!.push(pagePath);
+      } else {
+        rootPages.push(pagePath);
+      }
+    }
+
+    const hasTopics = Object.keys(topicPages).length > 0;
+    const now = new Date().toISOString();
+
+    if (hasTopics) {
+      // ── Build per-topic sub-indexes ──
+      for (const [topic, tPages] of Object.entries(topicPages)) {
+        this.rebuildTopicIndex(topic, tPages, now);
+      }
+
+      // ── Build top-level hub index ──
+      const topicCount = Object.keys(topicPages).length;
+      let lines = [
+        "---",
+        "title: Knowledge Base Index",
+        "type: index",
+        `created: "${this.read("index.md")?.created ?? now}"`,
+        `updated: "${now}"`,
+        "---",
+        "",
+        "# Knowledge Base Index",
+        "",
+        `**${pages.length} pages** across **${topicCount} topics** | **${rawCount} raw sources**`,
+        "",
+        "## Topics",
+        "",
+      ];
+
+      const sortedTopics = Object.keys(topicPages).sort();
+      for (const topic of sortedTopics) {
+        const count = topicPages[topic]!.length;
+        // Try to read topic sub-index title for a description
+        const subIndex = this.read(`${topic}/index.md`);
+        const desc = subIndex?.frontmatter?.description as string | undefined;
+        const suffix = desc ? ` — ${desc}` : "";
+        lines.push(`- [[${topic}/index]] — ${topic} (${count} pages)${suffix}`);
+      }
+      lines.push("");
+
+      // Root-level pages (not in any topic dir)
+      if (rootPages.length > 0) {
+        const categories: Record<string, string[]> = {};
+        for (const pagePath of rootPages) {
+          const page = this.read(pagePath);
+          if (!page) continue;
+          const type = page.type ?? "uncategorized";
+          if (!categories[type]) categories[type] = [];
+          const slug = basename(pagePath, extname(pagePath));
+          const updated = page.updated ? ` _(${page.updated.slice(0, 10)})_` : "";
+          categories[type]!.push(`- [[${slug}]] — ${page.title}${updated}`);
+        }
+        for (const type of Object.keys(categories).sort()) {
+          const label = type.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+          lines.push(`## ${label} (${categories[type]!.length})`, "");
+          lines.push(...categories[type]!, "");
+        }
+      }
+
+      lines.push("---", "", `_Last rebuilt: ${now.replace("T", " ").slice(0, 16)} UTC_`, "");
+      writeFileSync(join(this.config.wikiDir, "index.md"), lines.join("\n"));
+    } else {
+      // ── Flat mode: group by type (backward compatible) ──
+      const categories: Record<string, string[]> = {};
+      for (const pagePath of pages) {
+        const page = this.read(pagePath);
+        if (!page) continue;
+        const type = page.type ?? "uncategorized";
+        if (!categories[type]) categories[type] = [];
+        const slug = basename(pagePath, extname(pagePath));
+        const updated = page.updated ? ` _(${page.updated.slice(0, 10)})_` : "";
+        categories[type]!.push(`- [[${slug}]] — ${page.title}${updated}`);
+      }
+
+      let lines = [
+        "---",
+        "title: Knowledge Base Index",
+        "type: index",
+        `created: "${this.read("index.md")?.created ?? now}"`,
+        `updated: "${now}"`,
+        "---",
+        "",
+        "# Knowledge Base Index",
+        "",
+        `**${pages.length} pages** across **${Object.keys(categories).length} categories** | **${rawCount} raw sources**`,
+        "",
+      ];
+
+      const sortedTypes = Object.keys(categories).sort();
+      if (sortedTypes.length > 0) {
+        for (const type of sortedTypes) {
+          const label = type.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+          lines.push(`## ${label} (${categories[type]!.length})`, "");
+          lines.push(...categories[type]!, "");
+        }
+      } else {
+        lines.push("_No pages yet._", "");
+      }
+
+      lines.push("---", "", `_Last rebuilt: ${now.replace("T", " ").slice(0, 16)} UTC_`, "");
+      writeFileSync(join(this.config.wikiDir, "index.md"), lines.join("\n"));
+    }
+
+    this.log("rebuild-index", "index.md", `Rebuilt index with ${pages.length} pages`);
+  }
+
+  /** Rebuild a topic sub-index at {topic}/index.md. */
+  private rebuildTopicIndex(topic: string, topicPages: string[], now: string): void {
+    const categories: Record<string, string[]> = {};
+    for (const pagePath of topicPages) {
       const page = this.read(pagePath);
       if (!page) continue;
       const type = page.type ?? "uncategorized";
       if (!categories[type]) categories[type] = [];
       const slug = basename(pagePath, extname(pagePath));
       const updated = page.updated ? ` _(${page.updated.slice(0, 10)})_` : "";
-      categories[type].push(`- [[${slug}]] — ${page.title}${updated}`);
+      categories[type]!.push(`- [[${topic}/${slug}]] — ${page.title}${updated}`);
     }
 
-    const now = new Date().toISOString();
+    const topicIndexPath = `${topic}/index.md`;
+    const existing = this.read(topicIndexPath);
+    const label = topic.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
     let lines = [
       "---",
-      "title: Knowledge Base Index",
+      `title: "${label}"`,
       "type: index",
-      `created: "${this.read("index.md")?.created ?? now}"`,
+      `created: "${existing?.created ?? now}"`,
       `updated: "${now}"`,
       "---",
       "",
-      "# Knowledge Base Index",
+      `# ${label}`,
       "",
-      `**${pages.length} pages** across **${Object.keys(categories).length} categories** | **${rawCount} raw sources**`,
+      `_${topicPages.length} pages_`,
       "",
     ];
 
-    const sortedTypes = Object.keys(categories).sort();
-    if (sortedTypes.length > 0) {
-      for (const type of sortedTypes) {
-        const label = type.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-        lines.push(`## ${label} (${categories[type]!.length})`);
-        lines.push("");
-        lines.push(...categories[type]!);
-        lines.push("");
-      }
-    } else {
-      lines.push("_No pages yet._");
-      lines.push("");
+    for (const type of Object.keys(categories).sort()) {
+      const typeLabel = type.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      lines.push(`## ${typeLabel} (${categories[type]!.length})`, "");
+      lines.push(...categories[type]!, "");
     }
 
     lines.push("---", "", `_Last rebuilt: ${now.replace("T", " ").slice(0, 16)} UTC_`, "");
 
-    writeFileSync(join(this.config.wikiDir, "index.md"), lines.join("\n"));
-    this.log("rebuild-index", "index.md", `Rebuilt index with ${pages.length} pages`);
+    const fullPath = join(this.config.wikiDir, topicIndexPath);
+    mkdirSync(dirname(fullPath), { recursive: true });
+    writeFileSync(fullPath, lines.join("\n"));
   }
 
   // ── Timeline ──────────────────────────────────────────────────
 
   /** Rebuild timeline.md — chronological view of all knowledge. */
   rebuildTimeline(): void {
-    const pages = this.listAllPages().filter((p) => !SYSTEM_PAGES.has(p));
+    const pages = this.listAllPages().filter((p) => !isSystemPage(p));
     const entries: Array<{ date: string; page: string; title: string; type: string }> = [];
 
     for (const pagePath of pages) {
       const page = this.read(pagePath);
       if (!page) continue;
       const date = page.created ?? page.updated ?? "unknown";
+      // Use full relative path (without .md) as link slug for subdirectory support
+      const slug = pagePath.endsWith(".md") ? pagePath.slice(0, -3) : pagePath;
       entries.push({
         date: date.slice(0, 10),
-        page: basename(pagePath, extname(pagePath)),
+        page: slug,
         title: page.title,
         type: page.type ?? "note",
       });

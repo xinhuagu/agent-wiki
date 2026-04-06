@@ -1606,8 +1606,21 @@ _Chronological view of all knowledge in this wiki._
   /** Rebuild index.md from all pages.
    *  If topic subdirectories exist, generates per-topic sub-indexes and
    *  a top-level hub. Otherwise falls back to flat type-based grouping. */
-  rebuildIndex(): void {
+  /** Build a page cache to avoid reading each page multiple times during rebuild. */
+  buildPageCache(): Map<string, WikiPage> {
     const pages = this.listAllPages().filter((p) => !isSystemPage(p));
+    const cache = new Map<string, WikiPage>();
+    for (const pagePath of pages) {
+      const page = this.read(pagePath);
+      if (page) cache.set(pagePath, page);
+    }
+    return cache;
+  }
+
+  rebuildIndex(pageCache?: Map<string, WikiPage>): void {
+    const pages = pageCache
+      ? [...pageCache.keys()]
+      : this.listAllPages().filter((p) => !isSystemPage(p));
     let rawCount = 0;
     try {
       rawCount = this.rawList().length;
@@ -1634,7 +1647,7 @@ _Chronological view of all knowledge in this wiki._
     if (hasTopics) {
       // ── Build per-topic sub-indexes ──
       for (const [topic, tPages] of Object.entries(topicPages)) {
-        this.rebuildTopicIndex(topic, tPages, now);
+        this.rebuildTopicIndex(topic, tPages, now, pageCache);
       }
 
       // ── Build top-level hub index ──
@@ -1670,7 +1683,7 @@ _Chronological view of all knowledge in this wiki._
       if (rootPages.length > 0) {
         const categories: Record<string, string[]> = {};
         for (const pagePath of rootPages) {
-          const page = this.read(pagePath);
+          const page = pageCache?.get(pagePath) ?? this.read(pagePath);
           if (!page) continue;
           const type = page.type ?? "uncategorized";
           if (!categories[type]) categories[type] = [];
@@ -1691,7 +1704,7 @@ _Chronological view of all knowledge in this wiki._
       // ── Flat mode: group by type (backward compatible) ──
       const categories: Record<string, string[]> = {};
       for (const pagePath of pages) {
-        const page = this.read(pagePath);
+        const page = pageCache?.get(pagePath) ?? this.read(pagePath);
         if (!page) continue;
         const type = page.type ?? "uncategorized";
         if (!categories[type]) categories[type] = [];
@@ -1733,10 +1746,10 @@ _Chronological view of all knowledge in this wiki._
   }
 
   /** Rebuild a topic sub-index at {topic}/index.md. */
-  private rebuildTopicIndex(topic: string, topicPages: string[], now: string): void {
+  private rebuildTopicIndex(topic: string, topicPages: string[], now: string, pageCache?: Map<string, WikiPage>): void {
     const categories: Record<string, string[]> = {};
     for (const pagePath of topicPages) {
-      const page = this.read(pagePath);
+      const page = pageCache?.get(pagePath) ?? this.read(pagePath);
       if (!page) continue;
       const type = page.type ?? "uncategorized";
       if (!categories[type]) categories[type] = [];
@@ -1779,12 +1792,14 @@ _Chronological view of all knowledge in this wiki._
   // ── Timeline ──────────────────────────────────────────────────
 
   /** Rebuild timeline.md — chronological view of all knowledge. */
-  rebuildTimeline(): void {
-    const pages = this.listAllPages().filter((p) => !isSystemPage(p));
+  rebuildTimeline(pageCache?: Map<string, WikiPage>): void {
+    const pages = pageCache
+      ? [...pageCache.keys()]
+      : this.listAllPages().filter((p) => !isSystemPage(p));
     const entries: Array<{ date: string; page: string; title: string; type: string }> = [];
 
     for (const pagePath of pages) {
-      const page = this.read(pagePath);
+      const page = pageCache?.get(pagePath) ?? this.read(pagePath);
       if (!page) continue;
       const date = page.created ?? page.updated ?? "unknown";
       // Use full relative path (without .md) as link slug for subdirectory support

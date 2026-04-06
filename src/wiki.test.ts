@@ -595,6 +595,56 @@ describe("rawRead — PDF extraction", () => {
     const result = await wiki.rawRead("noheader.pdf");
     expect(result!.content).not.toContain("[Pages");
   });
+
+  it("extracts all pages from a 25-page PDF without pages parameter", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "large.pdf", 25);
+    const result = await wiki.rawRead("large.pdf");
+    expect(result!.binary).toBe(false);
+    for (let p = 1; p <= 25; p++) {
+      expect(result!.content).toContain(`Page ${p}`);
+    }
+  });
+
+  it("preserves page ordering in output", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "order.pdf", 5);
+    const result = await wiki.rawRead("order.pdf", { pages: "3,1,5" });
+    const content = result!.content!;
+    const pos1 = content.indexOf("Page 1");
+    const pos3 = content.indexOf("Page 3");
+    const pos5 = content.indexOf("Page 5");
+    // Pages should appear in ascending order regardless of input order
+    expect(pos1).toBeLessThan(pos3);
+    expect(pos3).toBeLessThan(pos5);
+  });
+
+  it("handles whitespace in page range", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "ws.pdf", 5);
+    const result = await wiki.rawRead("ws.pdf", { pages: " 2 - 4 " });
+    expect(result!.content).toContain("Page 2");
+    expect(result!.content).toContain("Page 3");
+    expect(result!.content).toContain("Page 4");
+    expect(result!.content).not.toContain("Page 1");
+    expect(result!.content).not.toContain("Page 5");
+  });
+
+  it("clamps page 0 to page 1", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "zero.pdf", 3);
+    const result = await wiki.rawRead("zero.pdf", { pages: "0-2" });
+    expect(result!.content).toContain("Page 1");
+    expect(result!.content).toContain("Page 2");
+  });
+
+  it("pages parameter is ignored for non-PDF documents", async () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("text.md", { content: "# Hello" });
+    const result = await wiki.rawRead("text.md", { pages: "1-2" });
+    expect(result!.binary).toBe(false);
+    expect(result!.content).toBe("# Hello");
+  });
 });
 
 describe("rawVerify", () => {

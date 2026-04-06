@@ -9,7 +9,7 @@ agent-wiki exposes 21 tools through the Model Context Protocol.
 | `raw_add` | Add a source document (content string, local file, or entire directory). SHA-256 hashed with `.meta.yaml` sidecar. Supports `auto_version` for same-name files and `pattern` filtering for directories. |
 | `raw_fetch` | Download from URL to raw/ (smart arXiv handling — `arxiv.org/abs/XXXX` auto-converts to PDF) |
 | `raw_list` | List all raw documents with metadata (path, source URL, hash, size) |
-| `raw_read` | Read a raw document — text/SVG return content; PDF/DOCX/XLSX/PPTX extracted via Python preprocessor; other binary return metadata only |
+| `raw_read` | Read a raw document — text/SVG return content; PDF/DOCX/XLSX/PPTX extracted automatically; other binary return metadata only. For PDFs, optional `pages` parameter (e.g. `"1-5"`, `"3,7-10"`) extracts specific pages without parsing the entire file. |
 | `raw_verify` | Verify integrity of all raw files via SHA-256 re-check |
 | `raw_versions` | List all versions of a file with metadata, returns latest version |
 

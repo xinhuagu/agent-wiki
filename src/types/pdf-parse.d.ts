@@ -7,5 +7,11 @@ declare module "pdf-parse" {
     metadata: unknown;
     version: string;
   }
-  export default function parse(buffer: Buffer): Promise<PDFData>;
+  interface PDFOptions {
+    /** Max pages to parse. 0 = all pages (default). */
+    max?: number;
+    /** Custom page render function. Return empty string to skip a page. */
+    pagerender?: (pageData: { pageIndex: number; getTextContent: () => Promise<any> }) => Promise<string>;
+  }
+  export default function parse(buffer: Buffer, options?: PDFOptions): Promise<PDFData>;
 }

@@ -106,13 +106,17 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "raw_read",
         description:
-          "Read a raw source document's content and metadata. Raw files are immutable — this is read-only. Text/SVG files return content as string; document files (PDF, DOCX, XLSX, PPTX) have text extracted automatically; other binary files (images, etc.) return metadata only.",
+          "Read a raw source document's content and metadata. Raw files are immutable — this is read-only. Text/SVG files return content as string; document files (PDF, DOCX, XLSX, PPTX) have text extracted automatically; other binary files (images, etc.) return metadata only. For large PDFs, use the 'pages' parameter to read specific page ranges instead of the entire document.",
         inputSchema: {
           type: "object" as const,
           properties: {
             filename: {
               type: "string",
               description: "Filename relative to raw/ (e.g. 'article-yolo.md')",
+            },
+            pages: {
+              type: "string",
+              description: "Page range for PDF files (e.g. '1-5', '3', '1-3,7-10'). Only applies to PDFs. Omit to read all pages.",
             },
           },
           required: ["filename"],
@@ -432,7 +436,9 @@ async function handleTool(
     }
 
     case "raw_read": {
-      const result = await wiki.rawRead(args.filename as string);
+      const result = await wiki.rawRead(args.filename as string, {
+        pages: args.pages as string | undefined,
+      });
       if (!result) return `Raw file not found: ${args.filename}`;
       if (result.binary) {
         return JSON.stringify({

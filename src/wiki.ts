@@ -652,8 +652,9 @@ _Chronological view of all knowledge in this wiki._
   /** Read a raw document's content and metadata.
    *  Text/SVG/JSON/XML files return content as UTF-8 string.
    *  Document files (PDF, DOCX, XLSX, PPTX) are extracted via Node.js libraries.
+   *  For PDFs, optional `pages` parameter limits extraction to specific pages (e.g. "1-5").
    *  Other binary files (images, etc.) return metadata only. */
-  async rawRead(filename: string): Promise<{ content: string | null; meta: RawDocument | null; binary: boolean; note?: string } | null> {
+  async rawRead(filename: string, opts?: { pages?: string }): Promise<{ content: string | null; meta: RawDocument | null; binary: boolean; note?: string } | null> {
     const fullPath = safePath(this.config.rawDir, filename);
     if (!existsSync(fullPath)) return null;
 
@@ -681,7 +682,7 @@ _Chronological view of all knowledge in this wiki._
     const extractable = new Set([".pdf", ".docx", ".xlsx", ".pptx", ".html", ".htm"]);
     if (extractable.has(ext)) {
       try {
-        const text = await extractTextNode(fullPath);
+        const text = await extractTextNode(fullPath, ext === ".pdf" ? opts?.pages : undefined);
         return { content: text, meta, binary: false };
       } catch (e: any) {
         const stat = statSync(fullPath);
@@ -1926,15 +1927,73 @@ function listAllFiles(dir: string, root: string): string[] {
   return result.sort();
 }
 
-/** Extract text from document files using pure Node.js libraries (no Python). */
-async function extractTextNode(filePath: string): Promise<string> {
+/** Parse a page range string like "1-5", "3", "1-3,7-10" into a Set of 0-based page indices. */
+function parsePageRange(pages: string, totalPages: number): Set<number> {
+  const indices = new Set<number>();
+  for (const part of pages.split(",")) {
+    const trimmed = part.trim();
+    const match = trimmed.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+    if (!match) continue;
+    const start = Math.max(1, parseInt(match[1], 10));
+    const end = match[2] ? Math.min(totalPages, parseInt(match[2], 10)) : start;
+    for (let i = start; i <= end; i++) indices.add(i - 1); // 0-based
+  }
+  return indices;
+}
+
+/** Extract text from document files using pure Node.js libraries (no Python).
+ *  For PDF files, an optional `pages` parameter limits extraction to specific pages. */
+async function extractTextNode(filePath: string, pages?: string): Promise<string> {
   const ext = extname(filePath).toLowerCase();
 
   if (ext === ".pdf") {
-    const pdfParse = (await import("pdf-parse")).default;
-    const buf = readFileSync(filePath);
-    const data = await pdfParse(buf);
-    return data.text;
+    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const { readFile } = await import("fs/promises");
+    const data = new Uint8Array(await readFile(filePath));
+
+    const doc = await pdfjsLib.getDocument({ data, useSystemFonts: true }).promise;
+    const totalPages = doc.numPages; // 1-based in pdfjs
+
+    // Determine which pages to extract (1-based indices)
+    let pageIndices: number[];
+    if (pages) {
+      const wanted = parsePageRange(pages, totalPages);
+      if (wanted.size === 0) {
+        doc.destroy();
+        return `(no pages matched range "${pages}" — PDF has ${totalPages} pages)`;
+      }
+      pageIndices = [...wanted].sort((a, b) => a - b).map(i => i + 1); // 0-based → 1-based
+    } else {
+      pageIndices = Array.from({ length: totalPages }, (_, i) => i + 1);
+    }
+
+    // Extract text page by page — only getPage() for wanted pages, true O(n)
+    const parts: string[] = [];
+    for (const pageNum of pageIndices) {
+      const page = await doc.getPage(pageNum);
+      const content = await page.getTextContent();
+      let lastY: number | undefined;
+      let text = "";
+      for (const item of content.items) {
+        if (!("str" in item)) continue; // skip marked content items
+        const y = (item as any).transform[5];
+        if (lastY === y || lastY === undefined) {
+          text += (item as any).str;
+        } else {
+          text += "\n" + (item as any).str;
+        }
+        lastY = y;
+      }
+      if (text.trim()) parts.push(text);
+    }
+
+    doc.destroy();
+
+    const body = parts.join("\n\n");
+    if (pages) {
+      return `[Pages ${pages} of ${totalPages}]\n${body}`;
+    }
+    return body;
   }
 
   if (ext === ".docx") {

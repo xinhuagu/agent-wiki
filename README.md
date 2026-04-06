@@ -55,7 +55,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **Atlassian Import** | One-command Confluence pages and Jira issues with full hierarchy |
 | **File Versioning** | Auto-version same-name files, query latest, list all versions |
 | **Directory Import** | Point to a folder — imports all files with optional glob filtering |
-| **Document Extraction** | PDF, DOCX, XLSX (multi-tab), PPTX — text extracted automatically |
+| **Document Extraction** | PDF (with per-page access), DOCX, XLSX (multi-tab), PPTX — text extracted automatically |
 | **21 MCP Tools** | Full CRUD + search + synthesis + health checks |
 | **Git-Native** | Plain Markdown — diffable, blameable, revertable |
 

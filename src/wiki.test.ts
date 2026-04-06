@@ -452,6 +452,201 @@ describe("rawRead", () => {
   });
 });
 
+// ── PDF extraction & pages parameter ──────────────────────────────
+
+/** Generate a minimal valid PDF with N pages, each containing "Page X" text. */
+function makePdf(numPages: number): Buffer {
+  const objects: Array<{ num: number; body: string }> = [];
+  let objNum = 1;
+  const catalogNum = objNum++;
+  const pagesNum = objNum++;
+  const fontNum = objNum++;
+  const pageNums: number[] = [];
+  const contentNums: number[] = [];
+
+  for (let i = 0; i < numPages; i++) {
+    pageNums.push(objNum++);
+    contentNums.push(objNum++);
+  }
+
+  objects.push({ num: catalogNum, body: `<< /Type /Catalog /Pages ${pagesNum} 0 R >>` });
+  objects.push({ num: pagesNum, body: `<< /Type /Pages /Kids [${pageNums.map(n => n + " 0 R").join(" ")}] /Count ${numPages} >>` });
+  objects.push({ num: fontNum, body: `<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>` });
+
+  for (let i = 0; i < numPages; i++) {
+    const text = `Page ${i + 1}`;
+    const stream = `BT /F1 12 Tf 100 700 Td (${text}) Tj ET`;
+    objects.push({ num: pageNums[i]!, body: `<< /Type /Page /Parent ${pagesNum} 0 R /MediaBox [0 0 612 792] /Contents ${contentNums[i]} 0 R /Resources << /Font << /F1 ${fontNum} 0 R >> >> >>` });
+    objects.push({ num: contentNums[i]!, body: `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream` });
+  }
+
+  objects.sort((a, b) => a.num - b.num);
+  let pdf = "%PDF-1.4\n";
+  const offsets: Array<{ num: number; offset: number }> = [];
+  for (const obj of objects) {
+    offsets.push({ num: obj.num, offset: pdf.length });
+    pdf += `${obj.num} 0 obj\n${obj.body}\nendobj\n`;
+  }
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const { offset } of offsets) {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogNum} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(pdf, "binary");
+}
+
+/** Write a synthetic PDF into the wiki's raw/ directory with a .meta.yaml sidecar. */
+function placePdf(wiki: Wiki, filename: string, numPages: number) {
+  const buf = makePdf(numPages);
+  const rawPath = join(wiki.config.rawDir, filename);
+  writeFileSync(rawPath, buf);
+  const sha = createHash("sha256").update(buf).digest("hex");
+  writeFileSync(rawPath + ".meta.yaml",
+    `path: ${filename}\ndownloadedAt: "2024-01-01"\nsha256: ${sha}\nsize: ${buf.length}\nmimeType: application/pdf\n`);
+}
+
+describe("rawRead — PDF extraction", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("extracts text from a small PDF", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "small.pdf", 3);
+    const result = await wiki.rawRead("small.pdf");
+    expect(result).not.toBeNull();
+    expect(result!.binary).toBe(false);
+    expect(result!.content).toContain("Page 1");
+    expect(result!.content).toContain("Page 2");
+    expect(result!.content).toContain("Page 3");
+  });
+
+  it("extracts specific pages with pages parameter", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "multi.pdf", 5);
+    const result = await wiki.rawRead("multi.pdf", { pages: "2-3" });
+    expect(result!.binary).toBe(false);
+    expect(result!.content).toContain("Page 2");
+    expect(result!.content).toContain("Page 3");
+    expect(result!.content).not.toContain("Page 1");
+    expect(result!.content).not.toContain("Page 4");
+    expect(result!.content).not.toContain("Page 5");
+  });
+
+  it("extracts a single page with pages parameter", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "single.pdf", 5);
+    const result = await wiki.rawRead("single.pdf", { pages: "3" });
+    expect(result!.binary).toBe(false);
+    expect(result!.content).toContain("Page 3");
+    expect(result!.content).not.toContain("Page 1");
+    expect(result!.content).not.toContain("Page 5");
+  });
+
+  it("supports comma-separated page ranges", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "combo.pdf", 10);
+    const result = await wiki.rawRead("combo.pdf", { pages: "1-2,5,8-9" });
+    expect(result!.binary).toBe(false);
+    for (const p of [1, 2, 5, 8, 9]) {
+      expect(result!.content).toContain(`Page ${p}`);
+    }
+    for (const p of [3, 4, 6, 7, 10]) {
+      expect(result!.content).not.toContain(`Page ${p}`);
+    }
+  });
+
+  it("returns 'no pages matched' for out-of-range page", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "bounds.pdf", 3);
+    const result = await wiki.rawRead("bounds.pdf", { pages: "999" });
+    expect(result!.binary).toBe(false);
+    expect(result!.content).toContain("no pages matched");
+  });
+
+  it("clamps range end beyond total pages", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "clamp.pdf", 3);
+    const result = await wiki.rawRead("clamp.pdf", { pages: "2-100" });
+    expect(result!.binary).toBe(false);
+    expect(result!.content).toContain("Page 2");
+    expect(result!.content).toContain("Page 3");
+    expect(result!.content).not.toContain("Page 1");
+  });
+
+  it("returns 'no pages matched' for completely invalid range", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "invalid.pdf", 3);
+    const result = await wiki.rawRead("invalid.pdf", { pages: "abc" });
+    expect(result!.binary).toBe(false);
+    expect(result!.content).toContain("no pages matched");
+  });
+
+  it("includes page header when pages parameter is used", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "header.pdf", 5);
+    const result = await wiki.rawRead("header.pdf", { pages: "1-2" });
+    expect(result!.content).toMatch(/\[Pages 1-2 of 5\]/);
+  });
+
+  it("omits page header when reading all pages", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "noheader.pdf", 3);
+    const result = await wiki.rawRead("noheader.pdf");
+    expect(result!.content).not.toContain("[Pages");
+  });
+
+  it("extracts all pages from a 25-page PDF without pages parameter", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "large.pdf", 25);
+    const result = await wiki.rawRead("large.pdf");
+    expect(result!.binary).toBe(false);
+    for (let p = 1; p <= 25; p++) {
+      expect(result!.content).toContain(`Page ${p}`);
+    }
+  });
+
+  it("preserves page ordering in output", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "order.pdf", 5);
+    const result = await wiki.rawRead("order.pdf", { pages: "3,1,5" });
+    const content = result!.content!;
+    const pos1 = content.indexOf("Page 1");
+    const pos3 = content.indexOf("Page 3");
+    const pos5 = content.indexOf("Page 5");
+    // Pages should appear in ascending order regardless of input order
+    expect(pos1).toBeLessThan(pos3);
+    expect(pos3).toBeLessThan(pos5);
+  });
+
+  it("handles whitespace in page range", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "ws.pdf", 5);
+    const result = await wiki.rawRead("ws.pdf", { pages: " 2 - 4 " });
+    expect(result!.content).toContain("Page 2");
+    expect(result!.content).toContain("Page 3");
+    expect(result!.content).toContain("Page 4");
+    expect(result!.content).not.toContain("Page 1");
+    expect(result!.content).not.toContain("Page 5");
+  });
+
+  it("clamps page 0 to page 1", async () => {
+    const wiki = freshWiki();
+    placePdf(wiki, "zero.pdf", 3);
+    const result = await wiki.rawRead("zero.pdf", { pages: "0-2" });
+    expect(result!.content).toContain("Page 1");
+    expect(result!.content).toContain("Page 2");
+  });
+
+  it("pages parameter is ignored for non-PDF documents", async () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("text.md", { content: "# Hello" });
+    const result = await wiki.rawRead("text.md", { pages: "1-2" });
+    expect(result!.binary).toBe(false);
+    expect(result!.content).toBe("# Hello");
+  });
+});
+
 describe("rawVerify", () => {
   beforeEach(cleanUp);
   afterEach(cleanUp);

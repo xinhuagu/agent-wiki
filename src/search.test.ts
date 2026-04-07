@@ -10,10 +10,13 @@ import {
   expandTerms,
   buildSearchDoc,
   buildIndex,
+  searchIndex,
   scoreDoc,
   makeSnippet,
   editDistance,
   fuzzyThreshold,
+  isCJK,
+  cjkNgrams,
   SearchEngine,
 } from "./search.js";
 import type { WikiPage } from "./wiki.js";
@@ -61,9 +64,59 @@ describe("tokenize", () => {
     expect(result).toEqual(["hello", "world"]);
   });
 
-  it("preserves Chinese characters", () => {
+  it("tokenizes Chinese text with Intl.Segmenter and n-grams", () => {
+    const result = tokenize("深度学习");
+    // Should contain: full run, segmenter words, and n-grams
+    expect(result).toContain("深度学习"); // full run
+    expect(result).toContain("深度"); // segmenter or bigram
+    expect(result).toContain("学习"); // segmenter or bigram
+  });
+
+  it("handles mixed Chinese and English", () => {
+    const result = tokenize("YOLO 目标检测 model");
+    expect(result).toContain("yolo");
+    expect(result).toContain("model");
+    expect(result).toContain("目标检测"); // full CJK run
+  });
+
+  it("handles space-separated Chinese phrases", () => {
     const result = tokenize("深度学习 目标检测");
-    expect(result).toEqual(["深度学习", "目标检测"]);
+    expect(result).toContain("深度学习");
+    expect(result).toContain("目标检测");
+  });
+});
+
+describe("isCJK", () => {
+  it("detects Chinese", () => {
+    expect(isCJK("你好")).toBe(true);
+    expect(isCJK("知识库")).toBe(true);
+  });
+
+  it("returns false for Latin", () => {
+    expect(isCJK("hello")).toBe(false);
+    expect(isCJK("deploy")).toBe(false);
+  });
+
+  it("detects mixed text", () => {
+    expect(isCJK("YOLO 目标检测")).toBe(true);
+  });
+});
+
+describe("cjkNgrams", () => {
+  it("generates bigrams and trigrams", () => {
+    const grams = cjkNgrams("知识库系统");
+    expect(grams).toContain("知识");
+    expect(grams).toContain("识库");
+    expect(grams).toContain("库系");
+    expect(grams).toContain("系统");
+    expect(grams).toContain("知识库");
+    expect(grams).toContain("识库系");
+    expect(grams).toContain("库系统");
+  });
+
+  it("handles 2-char input (only bigram)", () => {
+    const grams = cjkNgrams("目标");
+    expect(grams).toEqual(["目标"]);
   });
 });
 
@@ -411,7 +464,7 @@ describe("SearchEngine", () => {
     expect(results[0]!.score).toBeGreaterThan(0);
   });
 
-  it("P1: setLoader auto-invalidates cached index", () => {
+  it("setLoader auto-invalidates cached index", () => {
     const pagesA = [makePage({ path: "a.md", title: "Alpha", content: "alpha content" })];
     const pagesB = [makePage({ path: "b.md", title: "Beta", content: "beta content" })];
 
@@ -431,7 +484,7 @@ describe("SearchEngine", () => {
     expect(engine.search("alpha")).toEqual([]);
   });
 
-  it("P2: warm search does not call loader again", () => {
+  it("warm search does not call loader again", () => {
     let loadCount = 0;
     const engine = new SearchEngine();
     engine.setLoader(() => { loadCount++; return pages; });
@@ -447,9 +500,123 @@ describe("SearchEngine", () => {
     expect(loadCount).toBe(1);
   });
 
-  it("legacy signature (pages, query) still works", () => {
+  it("throws if no loader set", () => {
     const engine = new SearchEngine();
-    const results = engine.search(pages, "YOLO");
-    expect(results[0]!.path).toBe("concept-yolo.md");
+    expect(() => engine.search("anything")).toThrow("no page loader set");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+//  searchIndex (stateless pure function)
+// ═══════════════════════════════════════════════════════════════════
+
+describe("searchIndex", () => {
+  it("searches an index without any engine state", () => {
+    const pages = [
+      makePage({ path: "a.md", title: "Alpha", content: "alpha content" }),
+      makePage({ path: "b.md", title: "Beta", content: "beta content" }),
+    ];
+    const index = buildIndex(pages);
+    const results = searchIndex(index, "alpha");
+    expect(results.length).toBe(1);
+    expect(results[0]!.path).toBe("a.md");
+  });
+
+  it("returns same results as SearchEngine for same corpus", () => {
+    const pages = [
+      makePage({ path: "a.md", title: "YOLO", tags: ["detection"], content: "YOLO model." }),
+      makePage({ path: "b.md", title: "BERT", tags: ["nlp"], content: "BERT model." }),
+    ];
+    const index = buildIndex(pages);
+    const stateless = searchIndex(index, "YOLO");
+
+    const engine = new SearchEngine();
+    engine.setLoader(() => pages);
+    const cached = engine.search("YOLO");
+
+    expect(stateless.map((r) => r.path)).toEqual(cached.map((r) => r.path));
+    expect(stateless.map((r) => r.score)).toEqual(cached.map((r) => r.score));
+  });
+
+  it("returns empty for empty query", () => {
+    const index = buildIndex([]);
+    expect(searchIndex(index, "")).toEqual([]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+//  CJK SEARCH
+// ═══════════════════════════════════════════════════════════════════
+
+describe("CJK search", () => {
+  const cjkPages = [
+    makePage({
+      path: "concept-knowledge-base.md",
+      title: "知识库系统概述",
+      type: "concept",
+      tags: ["知识库", "系统"],
+      content: "知识库系统是一种用于存储和检索结构化知识的工具。",
+    }),
+    makePage({
+      path: "concept-yolo-cn.md",
+      title: "YOLO 目标检测",
+      type: "concept",
+      tags: ["目标检测", "yolo"],
+      content: "YOLO 是一种实时目标检测模型，广泛用于计算机视觉。",
+    }),
+    makePage({
+      path: "concept-deep-learning.md",
+      title: "深度学习入门",
+      type: "concept",
+      tags: ["深度学习"],
+      content: "深度学习是机器学习的一个分支，使用神经网络进行学习。",
+    }),
+  ];
+
+  it("Chinese query matches Chinese title", () => {
+    const engine = new SearchEngine();
+    engine.setLoader(() => cjkPages);
+    const results = engine.search("知识库");
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0]!.path).toBe("concept-knowledge-base.md");
+  });
+
+  it("Chinese query matches Chinese tag", () => {
+    const engine = new SearchEngine();
+    engine.setLoader(() => cjkPages);
+    const results = engine.search("目标检测");
+    expect(results.some((r) => r.path === "concept-yolo-cn.md")).toBe(true);
+  });
+
+  it("Chinese query matches Chinese body", () => {
+    const engine = new SearchEngine();
+    engine.setLoader(() => cjkPages);
+    const results = engine.search("神经网络");
+    expect(results.some((r) => r.path === "concept-deep-learning.md")).toBe(true);
+  });
+
+  it("mixed Chinese-English query", () => {
+    const engine = new SearchEngine();
+    engine.setLoader(() => cjkPages);
+    const results = engine.search("YOLO 目标检测");
+    expect(results[0]!.path).toBe("concept-yolo-cn.md");
+  });
+
+  it("short Chinese query (2 chars) still matches", () => {
+    const engine = new SearchEngine();
+    engine.setLoader(() => cjkPages);
+    const results = engine.search("知识");
+    expect(results.some((r) => r.path === "concept-knowledge-base.md")).toBe(true);
+  });
+
+  it("CJK n-grams do not flood unrelated pages", () => {
+    const engine = new SearchEngine();
+    engine.setLoader(() => cjkPages);
+    const results = engine.search("知识库");
+    // Should not return deep learning or YOLO pages at high score
+    if (results.length > 1) {
+      expect(results[0]!.score).toBeGreaterThan(results[results.length - 1]!.score);
+      expect(results[0]!.path).toBe("concept-knowledge-base.md");
+    }
   });
 });

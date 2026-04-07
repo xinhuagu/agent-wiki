@@ -568,12 +568,37 @@ export function searchIndex(
   if (queryTerms.length === 0) return [];
   const expandedTerms = expandTerms(queryTerms);
 
-  // Derive candidate documents from the postings union — O(matching docs)
+  // Derive candidate documents from postings union + prefix/fuzzy expansion.
+  // Exact and synonym matches come from direct postings lookup (O(1) per term).
+  // Prefix and fuzzy matches scan the postings key set once per query term.
   const candidates = new Set<string>();
+
+  // 1. Exact + synonym hits
   for (const term of expandedTerms) {
     const docMap = index.postings.get(term);
     if (docMap) {
       for (const path of docMap.keys()) candidates.add(path);
+    }
+  }
+
+  // 2. Prefix + fuzzy hits (scan indexed terms, collect matching docs)
+  for (const term of queryTerms) {
+    if (term.length < 2) continue;
+    const maxDist = isCJK(term) ? 0 : fuzzyThreshold(term);
+
+    for (const [indexedTerm, docMap] of index.postings) {
+      if (candidates.size > 0 && docMap.size === 0) continue;
+      // Skip if already an exact/synonym hit
+      if (expandedTerms.includes(indexedTerm)) continue;
+      // Prefix match
+      if (indexedTerm.startsWith(term) && indexedTerm !== term) {
+        for (const path of docMap.keys()) candidates.add(path);
+        continue;
+      }
+      // Fuzzy match (only for non-CJK terms above threshold)
+      if (maxDist > 0 && editDistance(term, indexedTerm) <= maxDist) {
+        for (const path of docMap.keys()) candidates.add(path);
+      }
     }
   }
 

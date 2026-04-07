@@ -50,13 +50,14 @@ That's it. Your agent now has a persistent, structured knowledge base.
 |---------|-------------|
 | **Immutable Sources** | SHA-256 verified `raw/` layer — write-once, tamper-proof, full provenance |
 | **Knowledge Compilation** | Agent builds structured wiki pages from raw sources — not retrieve-and-forget |
-| **Auto-Classification** | Zero-LLM heuristic assigns entity types and tags across 9 categories |
+| **BM25 Search** | Field-weighted scoring, synonym expansion, fuzzy matching, CJK tokenization — zero LLM |
+| **Auto-Classification** | Zero-LLM heuristic assigns entity types and tags across 10 categories |
 | **Self-Checking Lint** | Catches contradictions, broken links, orphan pages, stale content |
 | **Atlassian Import** | One-command Confluence pages and Jira issues with full hierarchy |
 | **File Versioning** | Auto-version same-name files, query latest, list all versions |
 | **Directory Import** | Point to a folder — imports all files with optional glob filtering |
 | **Document Extraction** | PDF (with per-page access), DOCX, XLSX (multi-tab), PPTX — text extracted automatically |
-| **21 MCP Tools** | Full CRUD + search + synthesis + health checks |
+| **16 MCP Tools** | Full CRUD + search + lint + health checks |
 | **Git-Native** | Plain Markdown — diffable, blameable, revertable |
 
 ## Architecture
@@ -85,7 +86,7 @@ Three immutability layers, inspired by how compilers work:
 
 ## Documentation
 
-- [MCP Tools (21) & Entity Types](docs/tools.md)
+- [MCP Tools (16) & Entity Types](docs/tools.md)
 - [Configuration, CLI & Security](docs/configuration.md)
 
 ## Acknowledgment

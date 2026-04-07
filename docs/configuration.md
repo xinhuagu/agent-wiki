@@ -3,8 +3,22 @@
 ## `.agent-wiki.yaml`
 
 ```yaml
-# Workspace separation (optional)
-workspace: ./data
+version: "2"
+
+# Wiki data paths (optional — defaults shown)
+wiki:
+  workspace: ./data               # separate data directory
+  path: "wiki/"                   # wiki pages directory name
+  raw_path: "raw/"                # raw sources directory name
+  schemas_path: "schemas/"        # entity templates directory name
+
+# Lint settings (optional — defaults shown)
+lint:
+  check_orphans: true
+  check_stale_days: 30
+  check_missing_sources: true
+  check_contradictions: true
+  check_integrity: true
 
 # Atlassian integration (optional)
 atlassian:

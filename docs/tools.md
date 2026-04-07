@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-agent-wiki exposes 21 tools through the Model Context Protocol.
+agent-wiki exposes 16 tools through the Model Context Protocol.
 
 ## Raw Layer — Immutable Sources
 
@@ -10,7 +10,6 @@ agent-wiki exposes 21 tools through the Model Context Protocol.
 | `raw_fetch` | Download from URL to raw/ (smart arXiv handling — `arxiv.org/abs/XXXX` auto-converts to PDF) |
 | `raw_list` | List all raw documents with metadata (path, source URL, hash, size) |
 | `raw_read` | Read a raw document — text/SVG return content; PDF/DOCX/XLSX/PPTX extracted automatically; other binary return metadata only. For PDFs, optional `pages` parameter (e.g. `"1-5"`, `"3,7-10"`) extracts specific pages without parsing the entire file. |
-| `raw_verify` | Verify integrity of all raw files via SHA-256 re-check |
 | `raw_versions` | List all versions of a file with metadata, returns latest version |
 
 ## Atlassian — Confluence & Jira
@@ -28,16 +27,24 @@ agent-wiki exposes 21 tools through the Model Context Protocol.
 | `wiki_write` | Create or update a page (auto-timestamps, auto-classify) |
 | `wiki_delete` | Delete a page (guards system pages) |
 | `wiki_list` | List pages, filter by entity type or tag |
-| `wiki_search` | Full-text keyword search with relevance scoring and snippets |
-| `wiki_classify` | Auto-classify content into entity type + suggest tags |
-| `wiki_synthesize` | Prepare context for knowledge distillation across multiple pages |
-| `wiki_lint` | Health checks: contradictions, orphans, broken links, integrity |
-| `wiki_log` | View operation history with timestamps |
+| `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support |
+| `wiki_lint` | Health checks: contradictions, orphans, broken links, SHA-256 integrity |
 | `wiki_init` | Initialize a new knowledge base (creates wiki/, raw/, schemas/) |
-| `wiki_config` | Show current workspace configuration and paths |
-| `wiki_schemas` | List available entity templates |
-| `wiki_rebuild_index` | Rebuild index.md organized by type with counts |
-| `wiki_rebuild_timeline` | Rebuild timeline.md as a chronological view |
+| `wiki_config` | Show current workspace configuration, paths, and available entity templates |
+| `wiki_rebuild` | Rebuild index.md (organized by type) and timeline.md (chronological view) |
+
+### Removed Tools
+
+These tools were consolidated into other tools in v0.6.0:
+
+| Former Tool | Replacement |
+|-------------|-------------|
+| `raw_verify` | `wiki_lint` — includes SHA-256 integrity checks |
+| `wiki_log` | `wiki_read("log.md")` — read the log page directly |
+| `wiki_classify` | `wiki_write` — auto-classifies internally when no type is specified |
+| `wiki_synthesize` | Agent calls `wiki_read` on multiple pages directly |
+| `wiki_schemas` | `wiki_config` — returns entity templates alongside configuration |
+| `wiki_rebuild_index` / `wiki_rebuild_timeline` | `wiki_rebuild` — single tool rebuilds both |
 
 ## Entity Types
 
@@ -47,6 +54,7 @@ agent-wiki exposes 21 tools through the Model Context Protocol.
 | `concept` | Ideas and definitions | YOLO, attention mechanism, GIL |
 | `event` | Things that happened | Conference talks, releases, incidents |
 | `artifact` | Created things | Papers, tools, models, datasets |
+| `code` | Code examples and snippets | Implementation patterns, code recipes |
 | `comparison` | Side-by-side analysis | YOLOv8 vs YOLOv9, PyTorch vs TensorFlow |
 | `summary` | Document summaries | Paper summaries, article digests |
 | `how-to` | Procedures and guides | Setup guides, deployment steps |
@@ -81,6 +89,21 @@ type: synthesis
 derived_from: [concept-yolo.md, concept-ssd.md, concept-rcnn.md]
 ---
 ```
+
+## Search
+
+`wiki_search` uses a local BM25 engine — zero LLM dependency, deterministic, low-latency.
+
+| Feature | Details |
+|---------|---------|
+| **Field-weighted BM25** | Five fields scored independently: title (4×), tags (3×), slug (3×), frontmatter (1.5×), body (1×) |
+| **Inverted index** | Postings-based O(1) term lookup. Lazy build with incremental invalidation on write/delete. |
+| **Synonym expansion** | Built-in abbreviation table (e.g. `llm` → large language model, `k8s` → kubernetes). Expanded terms scored at 0.4× weight. |
+| **Prefix matching** | Partial terms match in title, tags, and slug fields (e.g. `deploy` matches `deployment`) |
+| **Fuzzy matching** | Levenshtein edit distance — 1 for 4–7 char terms, 2 for 8+ chars. Latin only. |
+| **CJK tokenization** | `Intl.Segmenter` word segmentation + 2/3-gram fallback for Chinese, Japanese, Korean text |
+| **Exact phrase boost** | Full query phrase in title (+8), slug (+6), or body (+3) |
+| **Postings union** | Only scores documents containing at least one query term — skips the rest of the corpus |
 
 ## Auto-Classification
 

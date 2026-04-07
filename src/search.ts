@@ -41,20 +41,20 @@ export interface SearchDoc {
   };
 }
 
-interface Posting {
-  path: string;
-  tf: {
-    title: number;
-    tags: number;
-    slug: number;
-    frontmatter: number;
-    body: number;
-  };
+interface FieldTF {
+  title: number;
+  tags: number;
+  slug: number;
+  frontmatter: number;
+  body: number;
 }
+
+/** Postings map: term → (docPath → per-field term frequencies). */
+type PostingsMap = Map<string, Map<string, FieldTF>>;
 
 export interface SearchIndex {
   docs: Map<string, SearchDoc>;
-  postings: Map<string, Posting[]>;
+  postings: PostingsMap;
   docFreq: Map<string, number>;
   docCount: number;
   avgFieldLength: {
@@ -296,10 +296,11 @@ export function buildSearchDoc(page: WikiPage): SearchDoc {
 
 // ── Inverted Index ────────────────────────────────────────────────
 
-/** Build an inverted index from a collection of pages. */
+/** Build an inverted index from a collection of pages.
+ *  Postings are stored as Map<term, Map<docPath, FieldTF>> for O(1) lookup. */
 export function buildIndex(pages: Iterable<WikiPage>): SearchIndex {
   const docs = new Map<string, SearchDoc>();
-  const postings = new Map<string, Posting[]>();
+  const postings: PostingsMap = new Map();
   const docFreq = new Map<string, number>();
 
   const totals = { title: 0, tags: 0, slug: 0, frontmatter: 0, body: 0 };
@@ -308,16 +309,11 @@ export function buildIndex(pages: Iterable<WikiPage>): SearchIndex {
     const doc = buildSearchDoc(page);
     docs.set(doc.path, doc);
 
-    // Accumulate field lengths for averages
     for (const field of Object.keys(totals) as FieldName[]) {
       totals[field] += doc.lengths[field];
     }
 
-    // Track which terms appear in this doc (for docFreq)
     const seenTerms = new Set<string>();
-
-    // Build postings for each field
-    const tf: Posting["tf"] = { title: 0, tags: 0, slug: 0, frontmatter: 0, body: 0 };
 
     const fieldTermsMap: Record<FieldName, string[]> = {
       title: doc.fields.titleTerms,
@@ -335,18 +331,20 @@ export function buildIndex(pages: Iterable<WikiPage>): SearchIndex {
       }
 
       for (const [term, count] of termCounts) {
-        if (!postings.has(term)) postings.set(term, []);
-        // Find or create posting for this doc
-        let posting = postings.get(term)!.find((p) => p.path === doc.path);
-        if (!posting) {
-          posting = { path: doc.path, tf: { title: 0, tags: 0, slug: 0, frontmatter: 0, body: 0 } };
-          postings.get(term)!.push(posting);
+        let docMap = postings.get(term);
+        if (!docMap) {
+          docMap = new Map();
+          postings.set(term, docMap);
         }
-        posting.tf[field] = count;
+        let tf = docMap.get(doc.path);
+        if (!tf) {
+          tf = { title: 0, tags: 0, slug: 0, frontmatter: 0, body: 0 };
+          docMap.set(doc.path, tf);
+        }
+        tf[field] = count;
       }
     }
 
-    // Update document frequencies
     for (const term of seenTerms) {
       docFreq.set(term, (docFreq.get(term) ?? 0) + 1);
     }
@@ -400,21 +398,20 @@ export function scoreDoc(
 
   // BM25 scoring for each term
   for (const term of expandedTerms) {
-    const postingList = index.postings.get(term);
-    if (!postingList) continue;
-    const posting = postingList.find((p) => p.path === doc.path);
-    if (!posting) continue;
+    const docMap = index.postings.get(term);
+    if (!docMap) continue;
+    const tf = docMap.get(doc.path);
+    if (!tf) continue;
     const df = index.docFreq.get(term) ?? 0;
 
     for (const field of fields) {
       const fieldScore = bm25Field(
-        posting.tf[field],
+        tf[field],
         df,
         index.docCount,
         doc.lengths[field],
         index.avgFieldLength[field],
       );
-      // Expanded (synonym) terms get reduced weight
       const isOriginal = queryTerms.includes(term);
       const expansionPenalty = isOriginal ? 1.0 : 0.4;
       score += fieldScore * FIELD_WEIGHTS[field] * expansionPenalty;
@@ -559,8 +556,9 @@ export function makeSnippet(doc: SearchDoc, queryTerms: string[]): string {
 
 // ── Stateless search function ─────────────────────────────────────
 
-/** Pure-function search: build index, score, return results.
- *  No caching — suitable for one-shot / ad-hoc corpus searches. */
+/** Pure-function search against a pre-built index.
+ *  Uses postings union to derive candidate docs — only scores documents
+ *  that contain at least one query term, not the full corpus. */
 export function searchIndex(
   index: SearchIndex,
   query: string,
@@ -570,8 +568,19 @@ export function searchIndex(
   if (queryTerms.length === 0) return [];
   const expandedTerms = expandTerms(queryTerms);
 
+  // Derive candidate documents from the postings union — O(matching docs)
+  const candidates = new Set<string>();
+  for (const term of expandedTerms) {
+    const docMap = index.postings.get(term);
+    if (docMap) {
+      for (const path of docMap.keys()) candidates.add(path);
+    }
+  }
+
   const results: SearchResult[] = [];
-  for (const doc of index.docs.values()) {
+  for (const path of candidates) {
+    const doc = index.docs.get(path);
+    if (!doc) continue;
     const score = scoreDoc(doc, queryTerms, expandedTerms, index);
     if (score > 0) {
       results.push({

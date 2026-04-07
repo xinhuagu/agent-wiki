@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import matter from "gray-matter";
 import yaml from "js-yaml";
 import { VERSION } from "./version.js";
+import { SearchEngine } from "./search.js";
 import type { AtlassianConfig, ConfluenceImportResult, JiraImportResult } from "./atlassian.js";
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -174,6 +175,7 @@ export function safePath(base: string, userPath: string): string {
 
 export class Wiki {
   readonly config: WikiConfig;
+  private readonly searchEngine = new SearchEngine();
 
   /**
    * @param root — path to config root (where .agent-wiki.yaml lives)
@@ -1032,6 +1034,7 @@ _Chronological view of all knowledge in this wiki._
     const finalContent = matter.stringify(parsed.content, parsed.data);
     writeFileSync(fullPath, finalContent.trimEnd() + "\n");
 
+    this.searchEngine.invalidate();
     this.log("write", pagePath, `Wrote ${pagePath}${source ? ` (${source})` : ""}`);
   }
 
@@ -1093,6 +1096,7 @@ _Chronological view of all knowledge in this wiki._
     const fullPath = safePath(this.config.wikiDir, pagePath);
     if (!existsSync(fullPath)) return false;
     unlinkSync(fullPath);
+    this.searchEngine.invalidate();
     this.log("delete", pagePath, `Deleted ${pagePath}`);
     return true;
   }
@@ -1113,43 +1117,13 @@ _Chronological view of all knowledge in this wiki._
 
   // ── Search ────────────────────────────────────────────────────
 
-  /** Keyword search across all wiki pages. Returns paths sorted by relevance. */
+  /** BM25 search across all wiki pages with inverted index, synonym expansion,
+   *  prefix/fuzzy matching, and field-weighted scoring. */
   search(query: string, limit = 10): Array<{ path: string; score: number; snippet: string }> {
-    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-    if (terms.length === 0) return [];
-
-    const pages = this.listAllPages();
-    const results: Array<{ path: string; score: number; snippet: string }> = [];
-
-    for (const pagePath of pages) {
-      const page = this.read(pagePath);
-      if (!page) continue;
-
-      const text = (page.title + " " + page.tags.join(" ") + " " + page.content).toLowerCase();
-      let score = 0;
-      for (const term of terms) {
-        let idx = 0;
-        while ((idx = text.indexOf(term, idx)) !== -1) {
-          score++;
-          idx += term.length;
-        }
-        if (page.title.toLowerCase().includes(term)) score += 5;
-        if (page.tags.some((t) => String(t).toLowerCase().includes(term))) score += 3;
-        // Boost synthesis pages slightly — they represent distilled knowledge
-        if (page.type === "synthesis") score += 1;
-      }
-
-      if (score > 0) {
-        const firstIdx = text.indexOf(terms[0]!);
-        const start = Math.max(0, firstIdx - 50);
-        const end = Math.min(text.length, firstIdx + 100);
-        const snippet = (start > 0 ? "..." : "") + text.slice(start, end).trim() + (end < text.length ? "..." : "");
-        results.push({ path: pagePath, score, snippet });
-      }
-    }
-
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, limit);
+    const allPages = this.listAllPages()
+      .map((p) => this.read(p))
+      .filter((p): p is WikiPage => p !== null);
+    return this.searchEngine.search(allPages, query, limit);
   }
 
   // ── Lint — Self-checking & error detection ────────────────────

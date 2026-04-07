@@ -458,6 +458,16 @@ describe("SearchEngine", () => {
     expect(results.some((r) => r.path === "how-to-deploy.md")).toBe(true);
   });
 
+  it("prefix query finds pages (e.g. 'depl' matches 'deployment')", () => {
+    const results = engineWithPages().search("depl");
+    expect(results.some((r) => r.path === "how-to-deploy.md")).toBe(true);
+  });
+
+  it("fuzzy query finds pages (e.g. 'deploymnet' typo)", () => {
+    const results = engineWithPages().search("deploymnet");
+    expect(results.some((r) => r.path === "how-to-deploy.md")).toBe(true);
+  });
+
   it("scores include snippets", () => {
     const results = engineWithPages().search("YOLO");
     expect(results[0]!.snippet).toBeTruthy();

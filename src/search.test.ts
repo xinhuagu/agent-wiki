@@ -411,7 +411,7 @@ describe("SearchEngine", () => {
     expect(results[0]!.score).toBeGreaterThan(0);
   });
 
-  it("P1: invalidate + new loader switches corpus correctly", () => {
+  it("P1: setLoader auto-invalidates cached index", () => {
     const pagesA = [makePage({ path: "a.md", title: "Alpha", content: "alpha content" })];
     const pagesB = [makePage({ path: "b.md", title: "Beta", content: "beta content" })];
 
@@ -421,14 +421,13 @@ describe("SearchEngine", () => {
     expect(resultsA.length).toBe(1);
     expect(resultsA[0]!.path).toBe("a.md");
 
-    // Switch corpus
-    engine.invalidate();
+    // Just setLoader — no explicit invalidate() needed
     engine.setLoader(() => pagesB);
     const resultsB = engine.search("beta");
     expect(resultsB.length).toBe(1);
     expect(resultsB[0]!.path).toBe("b.md");
 
-    // Old corpus should not leak
+    // Old corpus must not leak
     expect(engine.search("alpha")).toEqual([]);
   });
 

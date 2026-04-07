@@ -1802,6 +1802,7 @@ _Chronological view of all knowledge in this wiki._
       writeFileSync(join(this.config.wikiDir, "index.md"), lines.join("\n"));
     }
 
+    this.searchEngine.invalidate();
     this.log("rebuild-index", "index.md", `Rebuilt index with ${pages.length} pages`);
   }
 
@@ -1900,6 +1901,7 @@ _Chronological view of all knowledge in this wiki._
     lines.push("");
 
     writeFileSync(join(this.config.wikiDir, "timeline.md"), lines.join("\n"));
+    this.searchEngine.invalidate();
     this.log("rebuild-timeline", "timeline.md", `Rebuilt timeline with ${entries.length} entries`);
   }
 

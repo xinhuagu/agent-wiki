@@ -467,9 +467,10 @@ export class SearchEngine {
   private index: SearchIndex | null = null;
   private loader: (() => WikiPage[]) | null = null;
 
-  /** Set the page loader. Called lazily when the index needs building. */
+  /** Set the page loader. Invalidates any cached index so the next search rebuilds. */
   setLoader(loader: () => WikiPage[]): void {
     this.loader = loader;
+    this.index = null;
   }
 
   /** Mark the index as needing a rebuild (after write/delete/init). */

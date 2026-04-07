@@ -40,7 +40,7 @@ export type {
 } from "./wiki.js";
 export { createServer, runServer } from "./server.js";
 export { RequestQueue } from "./queue.js";
-export { SearchEngine } from "./search.js";
+export { SearchEngine, searchIndex, buildIndex } from "./search.js";
 export type { SearchResult, SearchIndex, SearchDoc } from "./search.js";
 export type {
   AtlassianConfig,

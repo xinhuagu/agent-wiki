@@ -117,24 +117,123 @@ const SYNONYMS: Record<string, string[]> = {
   infra: ["infrastructure"],
 };
 
+// ── CJK detection ────────────────────────────────────────────────
+
+/** Regex matching CJK Unified Ideographs + extensions + Kana + Hangul. */
+const CJK_RE = /[\u2e80-\u9fff\uf900-\ufaff\ufe30-\ufe4f\u3040-\u30ff\u31f0-\u31ff\uac00-\ud7af]/;
+const CJK_RUN_RE = /[\u2e80-\u9fff\uf900-\ufaff\ufe30-\ufe4f\u3040-\u30ff\u31f0-\u31ff\uac00-\ud7af]+/g;
+
+/** Check whether a string contains CJK characters. */
+export function isCJK(text: string): boolean {
+  return CJK_RE.test(text);
+}
+
+// ── Intl.Segmenter (Node >= 16) ──────────────────────────────────
+
+let zhSegmenter: Intl.Segmenter | null = null;
+function getZhSegmenter(): Intl.Segmenter | null {
+  if (zhSegmenter) return zhSegmenter;
+  try {
+    zhSegmenter = new Intl.Segmenter("zh", { granularity: "word" });
+    return zhSegmenter;
+  } catch {
+    return null;
+  }
+}
+
+/** Segment CJK text using Intl.Segmenter. Returns word-level tokens. */
+function segmentCJK(text: string): string[] {
+  const seg = getZhSegmenter();
+  if (!seg) return [];
+  const words: string[] = [];
+  for (const { segment, isWordLike } of seg.segment(text)) {
+    if (isWordLike && segment.trim().length > 0) {
+      words.push(segment);
+    }
+  }
+  return words;
+}
+
+/** Generate 2-gram and 3-gram tokens from a CJK string. */
+export function cjkNgrams(text: string): string[] {
+  const grams: string[] = [];
+  const chars = [...text]; // handle surrogate pairs
+  for (let i = 0; i < chars.length - 1; i++) {
+    grams.push(chars.slice(i, i + 2).join(""));
+    if (i < chars.length - 2) {
+      grams.push(chars.slice(i, i + 3).join(""));
+    }
+  }
+  return grams;
+}
+
 // ── Tokenization & Normalization ──────────────────────────────────
 
-/** Normalize and tokenize text into search terms. */
-export function tokenize(text: string): string[] {
-  if (!text) return [];
+/** Normalize text: lowercase, full-width → half-width, strip punctuation. */
+function normalizeText(text: string): string {
   return text
     .toLowerCase()
-    // Normalize full-width to half-width (CJK punctuation)
     .replace(/[\uff01-\uff5e]/g, (ch) =>
       String.fromCharCode(ch.charCodeAt(0) - 0xfee0),
     )
-    // Normalize separators to spaces
     .replace(/[_\-/.,:;!?'"()\[\]{}<>|\\@#$%^&*+=~`]+/g, " ")
-    // Collapse whitespace
     .replace(/\s+/g, " ")
-    .trim()
-    .split(" ")
-    .filter((t) => t.length > 0);
+    .trim();
+}
+
+/** Script-aware tokenization.
+ *  - Latin/ASCII: split on whitespace and separators.
+ *  - CJK runs: segment with Intl.Segmenter, then add n-gram fallback.
+ *  - Mixed text: split into script runs, tokenize each separately. */
+export function tokenize(text: string): string[] {
+  if (!text) return [];
+  const normalized = normalizeText(text);
+  if (!isCJK(normalized)) {
+    // Pure Latin path — fast
+    return normalized.split(" ").filter((t) => t.length > 0);
+  }
+
+  // Mixed or pure CJK: split into script runs
+  const tokens: string[] = [];
+  let remaining = normalized;
+
+  while (remaining.length > 0) {
+    const cjkMatch = CJK_RUN_RE.exec(remaining);
+    if (!cjkMatch) {
+      // Rest is Latin
+      for (const t of remaining.split(" ")) {
+        if (t.length > 0) tokens.push(t);
+      }
+      break;
+    }
+
+    // Latin text before the CJK run
+    const before = remaining.slice(0, cjkMatch.index);
+    for (const t of before.split(" ")) {
+      if (t.length > 0) tokens.push(t);
+    }
+
+    // CJK run
+    const cjkText = cjkMatch[0];
+    // Keep full CJK run as a token for exact phrase matching
+    if (cjkText.length > 1) tokens.push(cjkText);
+    // Intl.Segmenter words
+    const words = segmentCJK(cjkText);
+    for (const w of words) {
+      if (!tokens.includes(w)) tokens.push(w);
+    }
+    // N-gram fallback (lower priority, but ensures partial matches)
+    if (cjkText.length >= 2) {
+      for (const gram of cjkNgrams(cjkText)) {
+        if (!tokens.includes(gram)) tokens.push(gram);
+      }
+    }
+
+    remaining = remaining.slice(cjkMatch.index + cjkText.length);
+    CJK_RUN_RE.lastIndex = 0; // reset regex
+  }
+
+  return tokens;
 }
 
 /** Normalize a query string into terms. */
@@ -364,8 +463,9 @@ export function scoreDoc(
     }
   }
 
-  // ── Fuzzy matching in high-signal fields ──
+  // ── Fuzzy matching in high-signal fields (Latin only — skip CJK) ──
   for (const term of queryTerms) {
+    if (isCJK(term)) continue; // CJK uses n-gram overlap, not edit distance
     const maxDist = fuzzyThreshold(term);
     if (maxDist === 0) continue;
 
@@ -457,12 +557,42 @@ export function makeSnippet(doc: SearchDoc, queryTerms: string[]): string {
 
 // ── Search Engine ─────────────────────────────────────────────────
 
-/** Main search engine with lazy index and incremental invalidation.
+// ── Stateless search function ─────────────────────────────────────
+
+/** Pure-function search: build index, score, return results.
+ *  No caching — suitable for one-shot / ad-hoc corpus searches. */
+export function searchIndex(
+  index: SearchIndex,
+  query: string,
+  limit = 10,
+): SearchResult[] {
+  const queryTerms = normalizeQuery(query);
+  if (queryTerms.length === 0) return [];
+  const expandedTerms = expandTerms(queryTerms);
+
+  const results: SearchResult[] = [];
+  for (const doc of index.docs.values()) {
+    const score = scoreDoc(doc, queryTerms, expandedTerms, index);
+    if (score > 0) {
+      results.push({
+        path: doc.path,
+        score: Math.round(score * 100) / 100,
+        snippet: makeSnippet(doc, queryTerms),
+      });
+    }
+  }
+  results.sort((a, b) => b.score - a.score);
+  return results.slice(0, limit);
+}
+
+// ── Search Engine (cached, loader-based) ──────────────────────────
+
+/** Cached search engine with lazy index build and incremental invalidation.
  *
- *  The engine owns the corpus snapshot: callers supply a loader function
- *  that is only invoked when the index needs to be (re)built. This avoids
- *  re-reading every page from disk on warm searches and prevents stale
- *  results when the engine is reused across different page sets. */
+ *  The engine owns the corpus snapshot via a loader function.
+ *  The loader is only invoked when the index needs to be (re)built.
+ *
+ *  For stateless / ad-hoc searches, use `searchIndex(buildIndex(pages), query)`. */
 export class SearchEngine {
   private index: SearchIndex | null = null;
   private loader: (() => WikiPage[]) | null = null;
@@ -490,50 +620,7 @@ export class SearchEngine {
   }
 
   /** Execute a search query against the cached index. */
-  search(query: string, limit?: number): SearchResult[];
-  /** Execute a search query, building/rebuilding the index from the given pages.
-   *  @deprecated Pass pages via setLoader() instead for proper caching. */
-  search(pages: Iterable<WikiPage>, query: string, limit?: number): SearchResult[];
-  search(
-    pagesOrQuery: Iterable<WikiPage> | string,
-    queryOrLimit?: string | number,
-    maybeLimit?: number,
-  ): SearchResult[] {
-    let query: string;
-    let limit: number;
-
-    if (typeof pagesOrQuery === "string") {
-      // New signature: search(query, limit?)
-      query = pagesOrQuery;
-      limit = (queryOrLimit as number | undefined) ?? 10;
-    } else {
-      // Legacy signature: search(pages, query, limit?)
-      // Rebuild index from provided pages (no caching across calls)
-      this.index = buildIndex(pagesOrQuery);
-      query = queryOrLimit as string;
-      limit = maybeLimit ?? 10;
-    }
-
-    const queryTerms = normalizeQuery(query);
-    if (queryTerms.length === 0) return [];
-
-    const expandedTerms = expandTerms(queryTerms);
-    const index = this.ensureIndex();
-
-    const results: SearchResult[] = [];
-
-    for (const doc of index.docs.values()) {
-      const score = scoreDoc(doc, queryTerms, expandedTerms, index);
-      if (score > 0) {
-        results.push({
-          path: doc.path,
-          score: Math.round(score * 100) / 100,
-          snippet: makeSnippet(doc, queryTerms),
-        });
-      }
-    }
-
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, limit);
+  search(query: string, limit = 10): SearchResult[] {
+    return searchIndex(this.ensureIndex(), query, limit);
   }
 }

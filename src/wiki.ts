@@ -175,7 +175,7 @@ export function safePath(base: string, userPath: string): string {
 
 export class Wiki {
   readonly config: WikiConfig;
-  private readonly searchEngine = new SearchEngine();
+  private readonly searchEngine: SearchEngine;
 
   /**
    * @param root — path to config root (where .agent-wiki.yaml lives)
@@ -185,6 +185,15 @@ export class Wiki {
   constructor(root?: string, workspace?: string) {
     const resolvedRoot = resolve(root ?? ".");
     this.config = Wiki.loadConfig(resolvedRoot, workspace);
+    this.searchEngine = new SearchEngine();
+    this.searchEngine.setLoader(() => this.loadAllPages());
+  }
+
+  /** Load and parse all wiki pages from disk. Used as search index loader. */
+  private loadAllPages(): WikiPage[] {
+    return this.listAllPages()
+      .map((p) => this.read(p))
+      .filter((p): p is WikiPage => p !== null);
   }
 
   // ── Init ──────────────────────────────────────────────────────
@@ -1118,12 +1127,10 @@ _Chronological view of all knowledge in this wiki._
   // ── Search ────────────────────────────────────────────────────
 
   /** BM25 search across all wiki pages with inverted index, synonym expansion,
-   *  prefix/fuzzy matching, and field-weighted scoring. */
+   *  prefix/fuzzy matching, and field-weighted scoring.
+   *  Index is built lazily on first search and cached until invalidated by write/delete. */
   search(query: string, limit = 10): Array<{ path: string; score: number; snippet: string }> {
-    const allPages = this.listAllPages()
-      .map((p) => this.read(p))
-      .filter((p): p is WikiPage => p !== null);
-    return this.searchEngine.search(allPages, query, limit);
+    return this.searchEngine.search(query, limit);
   }
 
   // ── Lint — Self-checking & error detection ────────────────────

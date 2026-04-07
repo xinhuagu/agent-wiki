@@ -340,65 +340,117 @@ describe("SearchEngine", () => {
     }),
   ];
 
-  it("returns results sorted by relevance", () => {
+  function engineWithPages(p: WikiPage[] = pages): SearchEngine {
     const engine = new SearchEngine();
-    const results = engine.search(pages, "YOLO");
+    engine.setLoader(() => p);
+    return engine;
+  }
+
+  it("returns results sorted by relevance", () => {
+    const results = engineWithPages().search("YOLO");
     expect(results.length).toBeGreaterThan(0);
     expect(results[0]!.path).toBe("concept-yolo.md");
   });
 
   it("returns empty for no matches", () => {
-    const engine = new SearchEngine();
-    expect(engine.search(pages, "xyznonexistent12345")).toEqual([]);
+    expect(engineWithPages().search("xyznonexistent12345")).toEqual([]);
   });
 
   it("returns empty for empty query", () => {
-    const engine = new SearchEngine();
-    expect(engine.search(pages, "")).toEqual([]);
-    expect(engine.search(pages, "   ")).toEqual([]);
+    const engine = engineWithPages();
+    expect(engine.search("")).toEqual([]);
+    expect(engine.search("   ")).toEqual([]);
   });
 
   it("respects limit", () => {
-    const engine = new SearchEngine();
-    const results = engine.search(pages, "model", 1);
+    const results = engineWithPages().search("model", 1);
     expect(results.length).toBeLessThanOrEqual(1);
   });
 
-  it("caches index across searches", () => {
+  it("caches index across searches (no re-read)", () => {
+    let loadCount = 0;
     const engine = new SearchEngine();
-    engine.search(pages, "YOLO");
-    // Second search should use cached index
-    const results = engine.search(pages, "BERT");
+    engine.setLoader(() => { loadCount++; return pages; });
+
+    engine.search("YOLO");
+    engine.search("BERT");
+    // Loader should only be called once — index is cached
+    expect(loadCount).toBe(1);
+    const results = engine.search("BERT");
     expect(results.length).toBeGreaterThan(0);
     expect(results[0]!.path).toBe("concept-bert.md");
   });
 
-  it("invalidate forces index rebuild", () => {
+  it("invalidate forces index rebuild via loader", () => {
+    let loadCount = 0;
     const engine = new SearchEngine();
-    engine.search(pages, "YOLO");
+    engine.setLoader(() => { loadCount++; return pages; });
+
+    engine.search("YOLO");
+    expect(loadCount).toBe(1);
     engine.invalidate();
-    // Should still work after invalidation
-    const results = engine.search(pages, "YOLO");
+    const results = engine.search("YOLO");
+    expect(loadCount).toBe(2);
     expect(results[0]!.path).toBe("concept-yolo.md");
   });
 
   it("no duplicate results", () => {
-    const engine = new SearchEngine();
-    const results = engine.search(pages, "model overview");
+    const results = engineWithPages().search("model overview");
     const paths = results.map((r) => r.path);
     expect(new Set(paths).size).toBe(paths.length);
   });
 
   it("deploy finds deployment via synonyms", () => {
-    const engine = new SearchEngine();
-    const results = engine.search(pages, "deploy");
+    const results = engineWithPages().search("deploy");
     expect(results.some((r) => r.path === "how-to-deploy.md")).toBe(true);
   });
 
   it("scores include snippets", () => {
-    const engine = new SearchEngine();
-    const results = engine.search(pages, "YOLO");
+    const results = engineWithPages().search("YOLO");
     expect(results[0]!.snippet).toBeTruthy();
     expect(results[0]!.score).toBeGreaterThan(0);
+  });
+
+  it("P1: invalidate + new loader switches corpus correctly", () => {
+    const pagesA = [makePage({ path: "a.md", title: "Alpha", content: "alpha content" })];
+    const pagesB = [makePage({ path: "b.md", title: "Beta", content: "beta content" })];
+
+    const engine = new SearchEngine();
+    engine.setLoader(() => pagesA);
+    const resultsA = engine.search("alpha");
+    expect(resultsA.length).toBe(1);
+    expect(resultsA[0]!.path).toBe("a.md");
+
+    // Switch corpus
+    engine.invalidate();
+    engine.setLoader(() => pagesB);
+    const resultsB = engine.search("beta");
+    expect(resultsB.length).toBe(1);
+    expect(resultsB[0]!.path).toBe("b.md");
+
+    // Old corpus should not leak
+    expect(engine.search("alpha")).toEqual([]);
+  });
+
+  it("P2: warm search does not call loader again", () => {
+    let loadCount = 0;
+    const engine = new SearchEngine();
+    engine.setLoader(() => { loadCount++; return pages; });
+
+    // Cold: builds index
+    engine.search("YOLO");
+    expect(loadCount).toBe(1);
+
+    // Warm: uses cached index — no loader call
+    engine.search("BERT");
+    engine.search("deploy");
+    engine.search("model");
+    expect(loadCount).toBe(1);
+  });
+
+  it("legacy signature (pages, query) still works", () => {
+    const engine = new SearchEngine();
+    const results = engine.search(pages, "YOLO");
+    expect(results[0]!.path).toBe("concept-yolo.md");
   });
 });

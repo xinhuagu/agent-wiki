@@ -457,37 +457,67 @@ export function makeSnippet(doc: SearchDoc, queryTerms: string[]): string {
 
 // ── Search Engine ─────────────────────────────────────────────────
 
-/** Main search engine with lazy index and incremental invalidation. */
+/** Main search engine with lazy index and incremental invalidation.
+ *
+ *  The engine owns the corpus snapshot: callers supply a loader function
+ *  that is only invoked when the index needs to be (re)built. This avoids
+ *  re-reading every page from disk on warm searches and prevents stale
+ *  results when the engine is reused across different page sets. */
 export class SearchEngine {
   private index: SearchIndex | null = null;
-  private dirty = true;
+  private loader: (() => WikiPage[]) | null = null;
+
+  /** Set the page loader. Called lazily when the index needs building. */
+  setLoader(loader: () => WikiPage[]): void {
+    this.loader = loader;
+  }
 
   /** Mark the index as needing a rebuild (after write/delete/init). */
   invalidate(): void {
     this.index = null;
-    this.dirty = true;
   }
 
   /** Build or return the cached index. */
-  ensureIndex(pages: Iterable<WikiPage>): SearchIndex {
-    if (!this.index || this.dirty) {
-      this.index = buildIndex(pages);
-      this.dirty = false;
+  private ensureIndex(): SearchIndex {
+    if (!this.index) {
+      if (!this.loader) {
+        throw new Error("SearchEngine: no page loader set — call setLoader() before searching");
+      }
+      this.index = buildIndex(this.loader());
     }
     return this.index;
   }
 
-  /** Execute a search query against the index. */
+  /** Execute a search query against the cached index. */
+  search(query: string, limit?: number): SearchResult[];
+  /** Execute a search query, building/rebuilding the index from the given pages.
+   *  @deprecated Pass pages via setLoader() instead for proper caching. */
+  search(pages: Iterable<WikiPage>, query: string, limit?: number): SearchResult[];
   search(
-    pages: Iterable<WikiPage>,
-    query: string,
-    limit = 10,
+    pagesOrQuery: Iterable<WikiPage> | string,
+    queryOrLimit?: string | number,
+    maybeLimit?: number,
   ): SearchResult[] {
+    let query: string;
+    let limit: number;
+
+    if (typeof pagesOrQuery === "string") {
+      // New signature: search(query, limit?)
+      query = pagesOrQuery;
+      limit = (queryOrLimit as number | undefined) ?? 10;
+    } else {
+      // Legacy signature: search(pages, query, limit?)
+      // Rebuild index from provided pages (no caching across calls)
+      this.index = buildIndex(pagesOrQuery);
+      query = queryOrLimit as string;
+      limit = maybeLimit ?? 10;
+    }
+
     const queryTerms = normalizeQuery(query);
     if (queryTerms.length === 0) return [];
 
     const expandedTerms = expandTerms(queryTerms);
-    const index = this.ensureIndex(pages);
+    const index = this.ensureIndex();
 
     const results: SearchResult[] = [];
 

@@ -234,7 +234,7 @@ describe("buildIndex", () => {
 
     expect(index.docCount).toBe(2);
     expect(index.postings.has("beta")).toBe(true);
-    expect(index.postings.get("beta")!.length).toBe(2);
+    expect(index.postings.get("beta")!.size).toBe(2);
     expect(index.docFreq.get("beta")).toBe(2);
     expect(index.docFreq.get("alpha")).toBe(1);
   });

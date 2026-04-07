@@ -862,6 +862,30 @@ describe("wiki.search", () => {
     expect(results[0]!.snippet).toBeTruthy();
     expect(results[0]!.snippet.toLowerCase()).toContain("fox");
   });
+
+  it("rebuild invalidates search cache so new pages are found", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-a.md", "---\ntitle: Alpha Concept\ntype: concept\n---\nAlpha.");
+    // Warm the search cache
+    wiki.search("Alpha");
+    // Rebuild writes index.md which should invalidate the cache
+    wiki.rebuildIndex();
+    // Now search for content in the rebuilt index
+    const results = wiki.search("Knowledge Base Index");
+    expect(results.some((r) => r.path === "index.md")).toBe(true);
+  });
+
+  it("write invalidates search cache", () => {
+    const wiki = freshWiki();
+    wiki.write("a.md", "---\ntitle: Old\n---\nOld content.");
+    // Warm cache
+    expect(wiki.search("Old").length).toBeGreaterThan(0);
+    // Write new page
+    wiki.write("b.md", "---\ntitle: Brand New Page\n---\nBrand new unique content.");
+    // Must find the new page without manual invalidation
+    const results = wiki.search("Brand New Page");
+    expect(results.some((r) => r.path === "b.md")).toBe(true);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════

@@ -98,9 +98,11 @@ describe("server tool: wiki_delete", () => {
 
   it("does not resurrect user-authored nested index after delete via wiki_delete", async () => {
     const wiki = freshWiki();
-    // Create user-authored index + sibling page
+    // Create user-authored index + sibling page under lang/js/
+    // Also add a sibling topic so lang/index.md has multiple sub-topics
     wiki.write("lang/js/index.md", "---\ntitle: My JS Guide\ntype: concept\n---\nCurated content.");
     wiki.write("lang/js/concept-closures.md", "---\ntitle: Closures\ntype: concept\n---\nClosures.");
+    wiki.write("lang/python/concept-py.md", "---\ntitle: Python\ntype: concept\n---\nPython.");
     wiki.rebuildIndex();
 
     // User-authored index should be preserved by rebuild
@@ -113,6 +115,12 @@ describe("server tool: wiki_delete", () => {
 
     // The file must stay deleted — not resurrected as a generated index
     expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(false);
+
+    // Parent generated index should be refreshed and no longer link to deleted index
+    const langIndex = readFileSync(join(wiki.config.wikiDir, "lang/index.md"), "utf-8");
+    expect(langIndex).not.toContain("[[lang/js/index]]");
+    // But the python sub-topic should still be there
+    expect(langIndex).toContain("[[lang/python/index]]");
   });
 
   it("rejects deletion of generated index pages", async () => {

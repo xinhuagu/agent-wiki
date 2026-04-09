@@ -578,9 +578,10 @@ export async function handleTool(
     case "wiki_delete": {
       const pagePath = args.page as string;
       const existed = wiki.delete(pagePath);
-      // Skip rebuild when deleting an index page to avoid resurrecting it as generated
-      if (existed && !pagePath.endsWith("/index.md")) {
-        wiki.rebuildIndex();
+      if (existed) {
+        // When deleting a nested index, rebuild but skip recreating that specific path
+        const skip = pagePath.endsWith("/index.md") ? new Set([pagePath]) : undefined;
+        wiki.rebuildIndex(undefined, skip);
       }
       return JSON.stringify({ ok: existed, page: pagePath });
     }

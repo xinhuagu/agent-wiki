@@ -137,13 +137,10 @@ export interface WikiConfig {
 // System pages that lint should treat specially
 const SYSTEM_PAGES = new Set(["index.md", "log.md", "timeline.md"]);
 
-/** Check if a page path is a system page (top-level or any sub-index). */
+/** Check if a page path is a root-level system page (index.md, log.md, timeline.md). */
 function isSystemPage(pagePath: string): boolean {
-  // Normalize to forward slashes for cross-platform consistency
   const normalized = pagePath.replace(/\\/g, "/");
-  if (SYSTEM_PAGES.has(normalized)) return true;
-  // Sub-indexes at any depth: e.g. "cobol/index.md", "cobol/sub/index.md"
-  return normalized.endsWith("/index.md");
+  return SYSTEM_PAGES.has(normalized);
 }
 
 /**
@@ -194,6 +191,19 @@ export class Wiki {
     return this.listAllPages()
       .map((p) => this.read(p))
       .filter((p): p is WikiPage => p !== null);
+  }
+
+  /** Check if a page is an auto-generated index (has generated: true in frontmatter).
+   *  Fast path: returns false immediately for non-index files. */
+  private isGeneratedPage(pagePath: string): boolean {
+    const normalized = pagePath.replace(/\\/g, "/");
+    if (!normalized.endsWith("/index.md")) return false;
+    const fullPath = join(this.config.wikiDir, pagePath);
+    if (!existsSync(fullPath)) return false;
+    try {
+      const parsed = matter(readFileSync(fullPath, "utf-8"));
+      return parsed.data.generated === true;
+    } catch { return false; }
   }
 
   // ── Init ──────────────────────────────────────────────────────
@@ -1249,7 +1259,7 @@ _Chronological view of all knowledge in this wiki._
       }
 
       // ── Orphan pages ──
-      if (this.config.lint.checkOrphans && !isSystemPage(pagePath)) {
+      if (this.config.lint.checkOrphans && !isSystemPage(pagePath) && page.frontmatter?.generated !== true) {
         const slug = basename(pagePath, extname(pagePath));
         // Full relative slug: "topic/page-name" (without .md)
         const fullSlug = pagePath.endsWith(".md") ? pagePath.slice(0, -3) : pagePath;
@@ -1290,7 +1300,7 @@ _Chronological view of all knowledge in this wiki._
       }
 
       // ── Missing sources (non-system pages) ──
-      if (this.config.lint.checkMissingSources && !isSystemPage(pagePath)) {
+      if (this.config.lint.checkMissingSources && !isSystemPage(pagePath) && page.frontmatter?.generated !== true) {
         if (page.sources.length === 0 && page.type && page.type !== "index" && page.type !== "log" && page.type !== "timeline") {
           report.issues.push({
             severity: "info",
@@ -1409,7 +1419,7 @@ _Chronological view of all knowledge in this wiki._
     const claims = new Map<string, Array<{ page: string; excerpt: string; value: string }>>();
 
     for (const [pagePath, page] of pageMap) {
-      if (isSystemPage(pagePath)) continue;
+      if (isSystemPage(pagePath) || page.frontmatter?.generated === true) continue;
 
       // Extract date claims: "published in YYYY", "released YYYY", "founded YYYY"
       const datePatterns = page.content.matchAll(
@@ -1718,7 +1728,7 @@ _Chronological view of all knowledge in this wiki._
    *  a top-level hub. Otherwise falls back to flat type-based grouping. */
   /** Build a page cache to avoid reading each page multiple times during rebuild. */
   buildPageCache(): Map<string, WikiPage> {
-    const pages = this.listAllPages().filter((p) => !isSystemPage(p));
+    const pages = this.listAllPages().filter((p) => !isSystemPage(p) && !this.isGeneratedPage(p));
     const cache = new Map<string, WikiPage>();
     for (const pagePath of pages) {
       const page = this.read(pagePath);
@@ -1730,7 +1740,7 @@ _Chronological view of all knowledge in this wiki._
   rebuildIndex(pageCache?: Map<string, WikiPage>): void {
     const pages = pageCache
       ? [...pageCache.keys()]
-      : this.listAllPages().filter((p) => !isSystemPage(p));
+      : this.listAllPages().filter((p) => !isSystemPage(p) && !this.isGeneratedPage(p));
     let rawCount = 0;
     try {
       rawCount = this.rawList().length;
@@ -1749,9 +1759,11 @@ _Chronological view of all knowledge in this wiki._
       }
     }
 
-    // Remove stale sub-indexes (and empty parent dirs)
+    // Remove stale GENERATED sub-indexes (and empty parent dirs); preserve user-authored ones
     for (const staleIndex of existingSubIndexes) {
       if (!expectedSubIndexes.has(staleIndex)) {
+        // Only remove if it's a generated index, not user-authored
+        if (!this.isGeneratedPage(staleIndex)) continue;
         const fullPath = join(this.config.wikiDir, staleIndex);
         if (existsSync(fullPath)) unlinkSync(fullPath);
         // Clean up empty parent directories up to wiki root
@@ -1907,20 +1919,26 @@ _Chronological view of all knowledge in this wiki._
       }
     }
 
-    // Recursively build sub-directory indexes
+    // Recursively build sub-directory indexes (always, even if this level is user-authored)
     for (const [subDir, subPages] of Object.entries(subDirPages)) {
       this.rebuildTopicIndex(`${dirPath}/${subDir}`, subPages, now, pageCache);
     }
 
-    const hasSubDirs = Object.keys(subDirPages).length > 0;
+    // Don't overwrite user-authored index pages
     const indexPath = `${dirPath}/index.md`;
     const existing = this.read(indexPath);
+    if (existing && existing.frontmatter?.generated !== true) {
+      return;
+    }
+
+    const hasSubDirs = Object.keys(subDirPages).length > 0;
     const label = dirPath.split("/").pop()!.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
     let lines = [
       "---",
       `title: "${label}"`,
       "type: index",
+      "generated: true",
       `created: "${existing?.created ?? now}"`,
       `updated: "${now}"`,
       "---",
@@ -1975,7 +1993,7 @@ _Chronological view of all knowledge in this wiki._
   rebuildTimeline(pageCache?: Map<string, WikiPage>): void {
     const pages = pageCache
       ? [...pageCache.keys()]
-      : this.listAllPages().filter((p) => !isSystemPage(p));
+      : this.listAllPages().filter((p) => !isSystemPage(p) && !this.isGeneratedPage(p));
     const entries: Array<{ date: string; page: string; title: string; type: string }> = [];
 
     for (const pagePath of pages) {

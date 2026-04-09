@@ -38,7 +38,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "raw_add",
         description:
-          "Add a raw source document to the knowledge base. Raw files are IMMUTABLE — once added, they cannot be modified or overwritten. Each file gets a .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Use this for downloaded articles, papers, web pages, data files. Supports both content string and local file path (physical copy). If source_path points to a DIRECTORY, all files in it are imported recursively (use pattern to filter, e.g. '*.html'). IMPORTANT: When adding an image file (PNG, JPEG, GIF, WEBP, etc.), the image will be returned in the response so you can see it. You MUST immediately call wiki_write to create a description page for the image capturing what it shows, any text visible in it, and its relevance to the knowledge base.",
+          "Add a raw source document to the knowledge base. Raw files are IMMUTABLE — once added, they cannot be modified or overwritten. Each file gets a .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Use this for downloaded articles, papers, web pages, data files. Supports both content string and local file path (physical copy). If source_path points to a DIRECTORY, all files in it are imported recursively (use pattern to filter, e.g. '*.html'). IMPORTANT: When adding a single image file (PNG, JPEG, GIF, WEBP, etc.) under 10 MB, the image will be returned inline in the response so you can see it. Directory imports and oversized images return metadata only. When an image IS returned, you MUST immediately call wiki_write to create a description page for the image capturing what it shows, any text visible in it, and its relevance to the knowledge base.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -126,7 +126,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "raw_fetch",
         description:
-          "Download a file from a URL and save it to raw/ as an immutable source document. Automatically generates .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Smart URL handling: arXiv abstract URLs (arxiv.org/abs/XXXX) are auto-converted to PDF download links. Supports any downloadable file: PDFs, HTML pages, images, data files, etc. IMPORTANT: When fetching an image file (PNG, JPEG, GIF, WEBP, etc.), the image will be returned in the response so you can see it. You MUST immediately call wiki_write to create a description page for the image capturing what it shows, any text visible in it, and its relevance to the knowledge base.",
+          "Download a file from a URL and save it to raw/ as an immutable source document. Automatically generates .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Smart URL handling: arXiv abstract URLs (arxiv.org/abs/XXXX) are auto-converted to PDF download links. Supports any downloadable file: PDFs, HTML pages, images, data files, etc. IMPORTANT: When fetching an image file (PNG, JPEG, GIF, WEBP, etc.) under 10 MB, the image will be returned inline in the response so you can see it. Oversized images return metadata only. When an image IS returned, you MUST immediately call wiki_write to create a description page for the image capturing what it shows, any text visible in it, and its relevance to the knowledge base.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -404,7 +404,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
   return server;
 }
 
-type ContentBlock =
+export type ContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: string };
 
@@ -415,7 +415,7 @@ const IMAGE_MIME_TYPES = new Set([
 const MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB
 
 /** If filePath is a displayable image under the size limit, return an image ContentBlock; else null. */
-function tryImageBlock(filePath: string, mimeType: string): ContentBlock | null {
+export function tryImageBlock(filePath: string, mimeType: string): ContentBlock | null {
   if (!IMAGE_MIME_TYPES.has(mimeType)) return null;
   if (!existsSync(filePath)) return null;
   const size = statSync(filePath).size;
@@ -424,7 +424,7 @@ function tryImageBlock(filePath: string, mimeType: string): ContentBlock | null 
   return { type: "image", data, mimeType };
 }
 
-async function handleTool(
+export async function handleTool(
   wiki: Wiki,
   name: string,
   args: Record<string, unknown>
@@ -469,10 +469,10 @@ async function handleTool(
       if (!result) return `Raw file not found: ${args.filename}`;
       if (result.binary) {
         if (result.imageData) {
-          // Return image as an MCP image content block so the agent can view it
+          // Return text first (consistent with raw_add/raw_fetch), then image block
           return [
-            { type: "image", data: result.imageData.data, mimeType: result.imageData.mimeType },
             { type: "text", text: JSON.stringify({ meta: result.meta, binary: true }, null, 2) },
+            { type: "image", data: result.imageData.data, mimeType: result.imageData.mimeType },
           ];
         }
         return JSON.stringify({

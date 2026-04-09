@@ -7,3 +7,5 @@ coverage/
 .npm-cache/
 .aceclaw/
 .lint-cache.json
+.agent-wiki.yaml
+.tmp-lint-bench/

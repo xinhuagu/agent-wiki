@@ -440,15 +440,34 @@ describe("rawRead", () => {
     expect(result!.content).toBe('{"x":1}');
   });
 
-  it("returns binary=true for image files", async () => {
+  it("returns binary=true with imageData for image files", async () => {
     const wiki = freshWiki();
     // Write a fake PNG (just bytes, not a real image)
     const rawPath = join(wiki.config.rawDir, "photo.png");
-    writeFileSync(rawPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    writeFileSync(rawPath, imageBytes);
     writeFileSync(rawPath + ".meta.yaml", `path: photo.png\ndownloadedAt: "2024-01-01"\nsha256: abcd\nsize: 4\nmimeType: image/png\n`);
     const result = await wiki.rawRead("photo.png");
     expect(result!.binary).toBe(true);
     expect(result!.content).toBeNull();
+    expect(result!.imageData).toBeDefined();
+    expect(result!.imageData!.mimeType).toBe("image/png");
+    expect(result!.imageData!.data).toBe(imageBytes.toString("base64"));
+  });
+
+  it("returns note for oversized image files", async () => {
+    const wiki = freshWiki();
+    const rawPath = join(wiki.config.rawDir, "big.jpg");
+    // Write a minimal file but fake the size in meta to exceed 10MB
+    writeFileSync(rawPath, Buffer.from([0xff, 0xd8]));
+    const bigSize = 11 * 1024 * 1024;
+    writeFileSync(rawPath + ".meta.yaml", `path: big.jpg\ndownloadedAt: "2024-01-01"\nsha256: abcd\nsize: ${bigSize}\nmimeType: image/jpeg\n`);
+    // Overwrite with actual large buffer to trigger size check
+    writeFileSync(rawPath, Buffer.alloc(bigSize));
+    const result = await wiki.rawRead("big.jpg");
+    expect(result!.binary).toBe(true);
+    expect(result!.imageData).toBeUndefined();
+    expect(result!.note).toMatch(/too large/i);
   });
 });
 

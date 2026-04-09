@@ -1364,7 +1364,7 @@ describe("wiki.rebuildIndex", () => {
     expect(pyIndex).toContain("[[lang/python/concept-decorators]]");
   });
 
-  it("recognizes multi-level index.md as system pages", () => {
+  it("generates multi-level index files with generated marker", () => {
     const wiki = freshWiki();
     wiki.write("a/b/c/page.md", "---\ntitle: Deep Page\ntype: note\n---\nDeep.");
     wiki.rebuildIndex();
@@ -1374,9 +1374,36 @@ describe("wiki.rebuildIndex", () => {
     expect(existsSync(join(wiki.config.wikiDir, "a/b/index.md"))).toBe(true);
     expect(existsSync(join(wiki.config.wikiDir, "a/b/c/index.md"))).toBe(true);
 
-    // System pages should not be deletable
-    expect(() => wiki.delete("a/b/index.md")).toThrow("Cannot delete system page");
-    expect(() => wiki.delete("a/b/c/index.md")).toThrow("Cannot delete system page");
+    // Generated indexes should have generated: true in frontmatter
+    const aIndex = readFileSync(join(wiki.config.wikiDir, "a/index.md"), "utf-8");
+    expect(aIndex).toContain("generated: true");
+    const abIndex = readFileSync(join(wiki.config.wikiDir, "a/b/index.md"), "utf-8");
+    expect(abIndex).toContain("generated: true");
+
+    // Generated indexes are deletable (they get regenerated on next rebuild)
+    expect(() => wiki.delete("a/b/index.md")).not.toThrow();
+  });
+
+  it("preserves user-authored nested index.md during rebuild", () => {
+    const wiki = freshWiki();
+    // User creates their own curated index page (no generated: true)
+    wiki.write("lang/js/index.md", "---\ntitle: JavaScript Guide\ntype: concept\n---\nMy curated JS guide.");
+    wiki.write("lang/js/concept-closures.md", "---\ntitle: Closures\ntype: concept\n---\nClosures.");
+    wiki.rebuildIndex();
+
+    // User-authored index should NOT be overwritten
+    const jsIndex = readFileSync(join(wiki.config.wikiDir, "lang/js/index.md"), "utf-8");
+    expect(jsIndex).toContain("My curated JS guide");
+    expect(jsIndex).not.toContain("generated: true");
+
+    // But the parent lang/index.md should still be generated
+    const langIndex = readFileSync(join(wiki.config.wikiDir, "lang/index.md"), "utf-8");
+    expect(langIndex).toContain("generated: true");
+    expect(langIndex).toContain("[[lang/js/index]]");
+
+    // User-authored index should be deletable
+    expect(() => wiki.delete("lang/js/index.md")).not.toThrow();
+    expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(false);
   });
 
   it("cleans up stale indexes after deleting last page in subtree", () => {

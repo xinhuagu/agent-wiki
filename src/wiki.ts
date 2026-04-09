@@ -1162,6 +1162,10 @@ _Chronological view of all knowledge in this wiki._
     if (isSystemPage(pagePath)) {
       throw new Error(`Cannot delete system page: ${pagePath}`);
     }
+    // Guard: never delete generated indexes (they are maintained by rebuildIndex)
+    if (this.isGeneratedPage(pagePath)) {
+      throw new Error(`Cannot delete generated page: ${pagePath}`);
+    }
     const fullPath = safePath(this.config.wikiDir, pagePath);
     if (!existsSync(fullPath)) return false;
     unlinkSync(fullPath);

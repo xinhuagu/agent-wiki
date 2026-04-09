@@ -1380,8 +1380,8 @@ describe("wiki.rebuildIndex", () => {
     const abIndex = readFileSync(join(wiki.config.wikiDir, "a/b/index.md"), "utf-8");
     expect(abIndex).toContain("generated: true");
 
-    // Generated indexes are deletable (they get regenerated on next rebuild)
-    expect(() => wiki.delete("a/b/index.md")).not.toThrow();
+    // Generated indexes are protected from deletion (maintained by rebuildIndex)
+    expect(() => wiki.delete("a/b/index.md")).toThrow("Cannot delete generated page");
   });
 
   it("preserves user-authored nested index.md during rebuild", () => {

@@ -95,6 +95,39 @@ describe("server tool: wiki_delete", () => {
     expect(wiki.delete("deleteme.md")).toBe(true);
     expect(wiki.read("deleteme.md")).toBeNull();
   });
+
+  it("does not resurrect user-authored nested index after delete via wiki_delete", async () => {
+    const wiki = freshWiki();
+    // Create user-authored index + sibling page
+    wiki.write("lang/js/index.md", "---\ntitle: My JS Guide\ntype: concept\n---\nCurated content.");
+    wiki.write("lang/js/concept-closures.md", "---\ntitle: Closures\ntype: concept\n---\nClosures.");
+    wiki.rebuildIndex();
+
+    // User-authored index should be preserved by rebuild
+    expect(readFileSync(join(wiki.config.wikiDir, "lang/js/index.md"), "utf-8")).toContain("Curated content");
+
+    // Delete via handleTool (the wiki_delete server path)
+    const result = await handleTool(wiki, "wiki_delete", { page: "lang/js/index.md" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+
+    // The file must stay deleted — not resurrected as a generated index
+    expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(false);
+  });
+
+  it("rejects deletion of generated index pages", async () => {
+    const wiki = freshWiki();
+    wiki.write("lang/js/concept-js.md", "---\ntitle: JS\ntype: concept\n---\nJS.");
+    wiki.rebuildIndex();
+
+    // Generated index should exist
+    expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(true);
+
+    // Deletion should be rejected
+    await expect(
+      handleTool(wiki, "wiki_delete", { page: "lang/js/index.md" })
+    ).rejects.toThrow("Cannot delete generated page");
+  });
 });
 
 describe("server tool: wiki_list", () => {

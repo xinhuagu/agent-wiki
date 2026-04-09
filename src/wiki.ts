@@ -1069,8 +1069,27 @@ _Chronological view of all knowledge in this wiki._
     const finalContent = matter.stringify(parsed.content, parsed.data);
     writeFileSync(fullPath, finalContent.trimEnd() + "\n");
 
+    // If writing an index page, remove any suppression marker
+    if (pagePath.endsWith("/index.md")) {
+      const markerPath = join(dirname(fullPath), ".no-index");
+      if (existsSync(markerPath)) unlinkSync(markerPath);
+    }
+
     this.searchEngine.invalidate();
     this.log("write", pagePath, `Wrote ${pagePath}${source ? ` (${source})` : ""}`);
+  }
+
+  /** Mark a directory as suppressed for auto-generated index creation.
+   *  Writes a .no-index marker file so rebuildIndex skips it. */
+  suppressIndex(indexPath: string): void {
+    const dir = dirname(join(this.config.wikiDir, indexPath));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, ".no-index"), "");
+  }
+
+  /** Check if a directory has index generation suppressed. */
+  isIndexSuppressed(dirPath: string): boolean {
+    return existsSync(join(this.config.wikiDir, dirPath, ".no-index"));
   }
 
   /** Resolve page path to the correct topic subdirectory.
@@ -1900,6 +1919,24 @@ _Chronological view of all knowledge in this wiki._
       writeFileSync(join(this.config.wikiDir, "index.md"), lines.join("\n"));
     }
 
+    // Clean up orphaned .no-index markers in directories that have no content pages
+    for (const dirPath of this.listAllDirPaths()) {
+      if (!this.isIndexSuppressed(dirPath)) continue;
+      const hasContentPages = pages.some((p) => {
+        const parts = p.split("/");
+        const dirParts = dirPath.split("/");
+        return parts.length === dirParts.length + 1 &&
+          parts.slice(0, dirParts.length).join("/") === dirPath;
+      });
+      if (!hasContentPages) {
+        const markerPath = join(this.config.wikiDir, dirPath, ".no-index");
+        if (existsSync(markerPath)) unlinkSync(markerPath);
+        // Clean up empty directory
+        const fullDir = join(this.config.wikiDir, dirPath);
+        try { rmdirSync(fullDir); } catch { /* not empty */ }
+      }
+    }
+
     this.searchEngine.invalidate();
     this.log("rebuild-index", "index.md", `Rebuilt index with ${pages.length} pages`);
   }
@@ -1934,6 +1971,11 @@ _Chronological view of all knowledge in this wiki._
       return;
     }
 
+    // Skip if index generation was suppressed (user previously deleted a curated index here)
+    if (this.isIndexSuppressed(dirPath)) {
+      return;
+    }
+
     // Don't overwrite user-authored index pages
     const existing = this.read(indexPath);
     if (existing && existing.frontmatter?.generated !== true) {
@@ -1961,7 +2003,7 @@ _Chronological view of all knowledge in this wiki._
     // List sub-directories first (exclude skipped sub-indexes)
     if (hasSubDirs) {
       const visibleSubDirs = Object.keys(subDirPages)
-        .filter((s) => !skipIndexPaths?.has(`${dirPath}/${s}/index.md`))
+        .filter((s) => !skipIndexPaths?.has(`${dirPath}/${s}/index.md`) && !this.isIndexSuppressed(`${dirPath}/${s}`))
         .sort();
       if (visibleSubDirs.length > 0) {
         lines.push("## Sub-topics", "");

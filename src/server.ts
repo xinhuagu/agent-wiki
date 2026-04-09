@@ -385,7 +385,10 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
     const run = async () => {
       try {
         const result = await handleTool(wiki, name, params);
-        return { content: [{ type: "text" as const, text: result }] };
+        if (typeof result === "string") {
+          return { content: [{ type: "text" as const, text: result }] };
+        }
+        return { content: result };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return {
@@ -401,11 +404,15 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
   return server;
 }
 
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 async function handleTool(
   wiki: Wiki,
   name: string,
   args: Record<string, unknown>
-): Promise<string> {
+): Promise<string | ContentBlock[]> {
   switch (name) {
     // ═══ RAW LAYER ═══
 
@@ -442,10 +449,17 @@ async function handleTool(
       });
       if (!result) return `Raw file not found: ${args.filename}`;
       if (result.binary) {
+        if (result.imageData) {
+          // Return image as an MCP image content block so the agent can view it
+          return [
+            { type: "image", data: result.imageData.data, mimeType: result.imageData.mimeType },
+            { type: "text", text: JSON.stringify({ meta: result.meta, binary: true }, null, 2) },
+          ];
+        }
         return JSON.stringify({
           meta: result.meta,
           binary: true,
-          note: `Binary file (${result.meta?.mimeType ?? "unknown type"}, ${result.meta?.size != null ? result.meta.size + " bytes" : "unknown size"}). Content cannot be read as text. Use the file path directly if you need to process it.`,
+          note: result.note ?? `Binary file (${result.meta?.mimeType ?? "unknown type"}, ${result.meta?.size != null ? result.meta.size + " bytes" : "unknown size"}). Content cannot be read as text. Use the file path directly if you need to process it.`,
         }, null, 2);
       }
       const content = result.content!;

@@ -678,8 +678,9 @@ _Chronological view of all knowledge in this wiki._
    *  Text/SVG/JSON/XML files return content as UTF-8 string.
    *  Document files (PDF, DOCX, XLSX, PPTX) are extracted via Node.js libraries.
    *  For PDFs, optional `pages` parameter limits extraction to specific pages (e.g. "1-5").
-   *  Other binary files (images, etc.) return metadata only. */
-  async rawRead(filename: string, opts?: { pages?: string }): Promise<{ content: string | null; meta: RawDocument | null; binary: boolean; note?: string } | null> {
+   *  Image files (PNG, JPEG, GIF, WEBP, etc.) return base64-encoded data for display.
+   *  Other binary files return metadata only. */
+  async rawRead(filename: string, opts?: { pages?: string }): Promise<{ content: string | null; meta: RawDocument | null; binary: boolean; note?: string; imageData?: { data: string; mimeType: string } } | null> {
     const fullPath = safePath(this.config.rawDir, filename);
     if (!existsSync(fullPath)) return null;
 
@@ -716,6 +717,21 @@ _Chronological view of all knowledge in this wiki._
           note: `Text extraction failed: ${e.message}. File size: ${formatBytes(stat.size)}.`,
         };
       }
+    }
+
+    // Image files — return base64-encoded data for display (max 10MB)
+    const isImage = mime.startsWith("image/") && mime !== "image/svg+xml";
+    if (isImage) {
+      const stat = statSync(fullPath);
+      const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+      if (stat.size <= MAX_IMAGE_BYTES) {
+        const data = readFileSync(fullPath).toString("base64");
+        return { content: null, meta, binary: true, imageData: { data, mimeType: mime } };
+      }
+      return {
+        content: null, meta, binary: true,
+        note: `Image too large to display (${formatBytes(stat.size)}). Maximum supported size is 10 MB.`,
+      };
     }
 
     // Other binary files — metadata only

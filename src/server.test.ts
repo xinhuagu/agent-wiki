@@ -303,7 +303,7 @@ describe("handleTool: raw_read image ContentBlock[]", () => {
   beforeEach(cleanUp);
   afterEach(cleanUp);
 
-  it("returns [image, text] blocks for displayable image", async () => {
+  it("returns [text, image] blocks for displayable image", async () => {
     const wiki = freshWiki();
     const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
     const rawPath = join(wiki.config.rawDir, "photo.png");

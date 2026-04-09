@@ -15,7 +15,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { Wiki } from "./wiki.js";
 import { VERSION } from "./version.js";
@@ -38,7 +38,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "raw_add",
         description:
-          "Add a raw source document to the knowledge base. Raw files are IMMUTABLE — once added, they cannot be modified or overwritten. Each file gets a .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Use this for downloaded articles, papers, web pages, data files. Supports both content string and local file path (physical copy). If source_path points to a DIRECTORY, all files in it are imported recursively (use pattern to filter, e.g. '*.html').",
+          "Add a raw source document to the knowledge base. Raw files are IMMUTABLE — once added, they cannot be modified or overwritten. Each file gets a .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Use this for downloaded articles, papers, web pages, data files. Supports both content string and local file path (physical copy). If source_path points to a DIRECTORY, all files in it are imported recursively (use pattern to filter, e.g. '*.html'). IMPORTANT: When adding a single image file (PNG, JPEG, GIF, WEBP, etc.) under 10 MB, the image will be returned inline in the response so you can see it. Directory imports and oversized images return metadata only. When an image IS returned, you MUST immediately call wiki_write to create a description page for the image capturing what it shows, any text visible in it, and its relevance to the knowledge base.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -126,7 +126,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "raw_fetch",
         description:
-          "Download a file from a URL and save it to raw/ as an immutable source document. Automatically generates .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Smart URL handling: arXiv abstract URLs (arxiv.org/abs/XXXX) are auto-converted to PDF download links. Supports any downloadable file: PDFs, HTML pages, images, data files, etc.",
+          "Download a file from a URL and save it to raw/ as an immutable source document. Automatically generates .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Smart URL handling: arXiv abstract URLs (arxiv.org/abs/XXXX) are auto-converted to PDF download links. Supports any downloadable file: PDFs, HTML pages, images, data files, etc. IMPORTANT: When fetching an image file (PNG, JPEG, GIF, WEBP, etc.) under 10 MB, the image will be returned inline in the response so you can see it. Oversized images return metadata only. When an image IS returned, you MUST immediately call wiki_write to create a description page for the image capturing what it shows, any text visible in it, and its relevance to the knowledge base.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -385,7 +385,10 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
     const run = async () => {
       try {
         const result = await handleTool(wiki, name, params);
-        return { content: [{ type: "text" as const, text: result }] };
+        if (typeof result === "string") {
+          return { content: [{ type: "text" as const, text: result }] };
+        }
+        return { content: result };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return {
@@ -401,11 +404,31 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
   return server;
 }
 
-async function handleTool(
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
+const IMAGE_MIME_TYPES = new Set([
+  "image/png", "image/jpeg", "image/gif", "image/webp",
+  "image/avif", "image/bmp", "image/tiff",
+]);
+const MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+/** If filePath is a displayable image under the size limit, return an image ContentBlock; else null. */
+export function tryImageBlock(filePath: string, mimeType: string): ContentBlock | null {
+  if (!IMAGE_MIME_TYPES.has(mimeType)) return null;
+  if (!existsSync(filePath)) return null;
+  const size = statSync(filePath).size;
+  if (size > MAX_INLINE_IMAGE_BYTES) return null;
+  const data = readFileSync(filePath).toString("base64");
+  return { type: "image", data, mimeType };
+}
+
+export async function handleTool(
   wiki: Wiki,
   name: string,
   args: Record<string, unknown>
-): Promise<string> {
+): Promise<string | ContentBlock[]> {
   switch (name) {
     // ═══ RAW LAYER ═══
 
@@ -419,11 +442,14 @@ async function handleTool(
         autoVersion: args.auto_version as boolean | undefined,
         pattern: args.pattern as string | undefined,
       });
-      // Directory import returns array, single file returns single doc
+      // Directory import returns array — no inline image for batch imports
       if (Array.isArray(result)) {
         return JSON.stringify({ ok: true, imported: result.length, documents: result }, null, 2);
       }
-      return JSON.stringify({ ok: true, document: result }, null, 2);
+      const text = JSON.stringify({ ok: true, document: result }, null, 2);
+      // For single image files, include image content block so agent can describe it
+      const imgBlock = tryImageBlock(join(wiki.config.rawDir, result.path), result.mimeType ?? "");
+      return imgBlock ? [{ type: "text", text }, imgBlock] : text;
     }
 
     case "raw_list": {
@@ -442,10 +468,17 @@ async function handleTool(
       });
       if (!result) return `Raw file not found: ${args.filename}`;
       if (result.binary) {
+        if (result.imageData) {
+          // Return text first (consistent with raw_add/raw_fetch), then image block
+          return [
+            { type: "text", text: JSON.stringify({ meta: result.meta, binary: true }, null, 2) },
+            { type: "image", data: result.imageData.data, mimeType: result.imageData.mimeType },
+          ];
+        }
         return JSON.stringify({
           meta: result.meta,
           binary: true,
-          note: `Binary file (${result.meta?.mimeType ?? "unknown type"}, ${result.meta?.size != null ? result.meta.size + " bytes" : "unknown size"}). Content cannot be read as text. Use the file path directly if you need to process it.`,
+          note: result.note ?? `Binary file (${result.meta?.mimeType ?? "unknown type"}, ${result.meta?.size != null ? result.meta.size + " bytes" : "unknown size"}). Content cannot be read as text. Use the file path directly if you need to process it.`,
         }, null, 2);
       }
       const content = result.content!;
@@ -466,7 +499,10 @@ async function handleTool(
         description: args.description as string | undefined,
         tags: args.tags as string[] | undefined,
       });
-      return JSON.stringify({ ok: true, document: doc }, null, 2);
+      const text = JSON.stringify({ ok: true, document: doc }, null, 2);
+      // For image files, include image content block so agent can describe it
+      const imgBlock = tryImageBlock(join(wiki.config.rawDir, doc.path), doc.mimeType ?? "");
+      return imgBlock ? [{ type: "text", text }, imgBlock] : text;
     }
 
     // ═══ ATLASSIAN ═══

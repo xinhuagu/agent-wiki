@@ -121,6 +121,22 @@ describe("server tool: wiki_delete", () => {
     expect(langIndex).not.toContain("[[lang/js/index]]");
     // But the python sub-topic should still be there
     expect(langIndex).toContain("[[lang/python/index]]");
+
+    // Deletion is durable — subsequent rebuild/write must NOT recreate the index
+    wiki.rebuildIndex();
+    expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(false);
+
+    // Writing a new page in that dir also must not recreate it
+    wiki.write("lang/js/concept-promises.md", "---\ntitle: Promises\ntype: concept\n---\nPromises.");
+    wiki.rebuildIndex();
+    expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(false);
+
+    // But writing a new user-authored index restores the path and clears suppression
+    wiki.write("lang/js/index.md", "---\ntitle: New JS Guide\ntype: concept\n---\nNew guide.");
+    wiki.rebuildIndex();
+    const newIndex = readFileSync(join(wiki.config.wikiDir, "lang/js/index.md"), "utf-8");
+    expect(newIndex).toContain("New guide");
+    expect(newIndex).not.toContain("generated: true");
   });
 
   it("rejects deletion of generated index pages", async () => {

@@ -1430,6 +1430,26 @@ describe("wiki.rebuildIndex", () => {
     expect(langIndex).toContain("[[lang/js/index]]");
     expect(langIndex).not.toContain("python");
   });
+
+  it("cleans up orphaned .no-index markers when directory becomes empty", () => {
+    const wiki = freshWiki();
+    wiki.write("topic/index.md", "---\ntitle: Curated\ntype: concept\n---\nMy page.");
+    wiki.write("topic/page.md", "---\ntitle: Page\ntype: note\n---\nContent.");
+    wiki.rebuildIndex();
+
+    // Suppress index generation (simulates what wiki_delete does)
+    wiki.delete("topic/index.md");
+    wiki.suppressIndex("topic/index.md");
+    expect(wiki.isIndexSuppressed("topic")).toBe(true);
+
+    // Now delete the last content page
+    wiki.delete("topic/page.md");
+    wiki.rebuildIndex();
+
+    // .no-index should be cleaned up along with the empty directory
+    expect(wiki.isIndexSuppressed("topic")).toBe(false);
+    expect(existsSync(join(wiki.config.wikiDir, "topic"))).toBe(false);
+  });
 });
 
 describe("wiki.rebuildTimeline", () => {

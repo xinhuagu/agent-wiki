@@ -1323,6 +1323,61 @@ describe("wiki.rebuildIndex", () => {
     expect(index).toContain("[[cobol/index]]");
     expect(index).toContain("[[note-misc]]");
   });
+
+  it("generates multi-level nested indexes", () => {
+    const wiki = freshWiki();
+    wiki.write("lang/js/concept-closures.md", "---\ntitle: JS Closures\ntype: concept\n---\nClosures.");
+    wiki.write("lang/js/frameworks/concept-react.md", "---\ntitle: React Overview\ntype: concept\n---\nReact.");
+    wiki.write("lang/python/concept-decorators.md", "---\ntitle: Python Decorators\ntype: concept\n---\nDecorators.");
+    wiki.rebuildIndex();
+
+    // Top-level index should list "lang" topic
+    const index = readFileSync(join(wiki.config.wikiDir, "index.md"), "utf-8");
+    expect(index).toContain("3 pages");
+    expect(index).toContain("[[lang/index]]");
+    expect(index).toContain("lang (3 pages)");
+
+    // lang/index.md should list sub-topics js and python
+    const langIndex = readFileSync(join(wiki.config.wikiDir, "lang/index.md"), "utf-8");
+    expect(langIndex).toContain("3 pages");
+    expect(langIndex).toContain("## Sub-topics");
+    expect(langIndex).toContain("[[lang/js/index]]");
+    expect(langIndex).toContain("[[lang/python/index]]");
+
+    // lang/js/index.md should list sub-topic frameworks + direct page
+    const jsIndex = readFileSync(join(wiki.config.wikiDir, "lang/js/index.md"), "utf-8");
+    expect(jsIndex).toContain("2 pages");
+    expect(jsIndex).toContain("## Sub-topics");
+    expect(jsIndex).toContain("[[lang/js/frameworks/index]]");
+    expect(jsIndex).toContain("[[lang/js/concept-closures]]");
+    expect(jsIndex).toContain("JS Closures");
+
+    // lang/js/frameworks/index.md should list the React page
+    const fwIndex = readFileSync(join(wiki.config.wikiDir, "lang/js/frameworks/index.md"), "utf-8");
+    expect(fwIndex).toContain("1 pages");
+    expect(fwIndex).toContain("[[lang/js/frameworks/concept-react]]");
+    expect(fwIndex).toContain("React Overview");
+
+    // lang/python/index.md should list the decorators page
+    const pyIndex = readFileSync(join(wiki.config.wikiDir, "lang/python/index.md"), "utf-8");
+    expect(pyIndex).toContain("1 pages");
+    expect(pyIndex).toContain("[[lang/python/concept-decorators]]");
+  });
+
+  it("recognizes multi-level index.md as system pages", () => {
+    const wiki = freshWiki();
+    wiki.write("a/b/c/page.md", "---\ntitle: Deep Page\ntype: note\n---\nDeep.");
+    wiki.rebuildIndex();
+
+    // All intermediate index files should exist
+    expect(existsSync(join(wiki.config.wikiDir, "a/index.md"))).toBe(true);
+    expect(existsSync(join(wiki.config.wikiDir, "a/b/index.md"))).toBe(true);
+    expect(existsSync(join(wiki.config.wikiDir, "a/b/c/index.md"))).toBe(true);
+
+    // System pages should not be deletable
+    expect(() => wiki.delete("a/b/index.md")).toThrow("Cannot delete system page");
+    expect(() => wiki.delete("a/b/c/index.md")).toThrow("Cannot delete system page");
+  });
 });
 
 describe("wiki.rebuildTimeline", () => {

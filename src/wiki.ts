@@ -137,13 +137,13 @@ export interface WikiConfig {
 // System pages that lint should treat specially
 const SYSTEM_PAGES = new Set(["index.md", "log.md", "timeline.md"]);
 
-/** Check if a page path is a system page (top-level or topic sub-index). */
+/** Check if a page path is a system page (top-level or any sub-index). */
 function isSystemPage(pagePath: string): boolean {
   // Normalize to forward slashes for cross-platform consistency
   const normalized = pagePath.replace(/\\/g, "/");
   if (SYSTEM_PAGES.has(normalized)) return true;
-  // Topic sub-indexes: e.g. "cobol/index.md"
-  return /^[^/]+\/index\.md$/.test(normalized);
+  // Sub-indexes at any depth: e.g. "cobol/index.md", "cobol/sub/index.md"
+  return normalized.endsWith("/index.md");
 }
 
 /**
@@ -1822,22 +1822,34 @@ _Chronological view of all knowledge in this wiki._
     this.log("rebuild-index", "index.md", `Rebuilt index with ${pages.length} pages`);
   }
 
-  /** Rebuild a topic sub-index at {topic}/index.md. */
-  private rebuildTopicIndex(topic: string, topicPages: string[], now: string, pageCache?: Map<string, WikiPage>): void {
-    const categories: Record<string, string[]> = {};
-    for (const pagePath of topicPages) {
-      const page = pageCache?.get(pagePath) ?? this.read(pagePath);
-      if (!page) continue;
-      const type = page.type ?? "uncategorized";
-      if (!categories[type]) categories[type] = [];
-      const slug = basename(pagePath, extname(pagePath));
-      const updated = page.updated ? ` _(${page.updated.slice(0, 10)})_` : "";
-      categories[type]!.push(`- [[${topic}/${slug}]] — ${page.title}${updated}`);
+  /** Rebuild a directory sub-index at {dirPath}/index.md.
+   *  Recursively creates indexes for nested sub-directories. */
+  private rebuildTopicIndex(dirPath: string, allPages: string[], now: string, pageCache?: Map<string, WikiPage>): void {
+    // Separate into direct pages vs sub-directory pages
+    const directPages: string[] = [];
+    const subDirPages: Record<string, string[]> = {};
+    const depth = dirPath.split("/").length;
+
+    for (const pagePath of allPages) {
+      const parts = pagePath.split("/");
+      if (parts.length === depth + 1) {
+        directPages.push(pagePath);
+      } else if (parts.length > depth + 1) {
+        const subDir = parts[depth]!;
+        if (!subDirPages[subDir]) subDirPages[subDir] = [];
+        subDirPages[subDir]!.push(pagePath);
+      }
     }
 
-    const topicIndexPath = `${topic}/index.md`;
-    const existing = this.read(topicIndexPath);
-    const label = topic.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+    // Recursively build sub-directory indexes
+    for (const [subDir, subPages] of Object.entries(subDirPages)) {
+      this.rebuildTopicIndex(`${dirPath}/${subDir}`, subPages, now, pageCache);
+    }
+
+    const hasSubDirs = Object.keys(subDirPages).length > 0;
+    const indexPath = `${dirPath}/index.md`;
+    const existing = this.read(indexPath);
+    const label = dirPath.split("/").pop()!.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
     let lines = [
       "---",
@@ -1849,19 +1861,44 @@ _Chronological view of all knowledge in this wiki._
       "",
       `# ${label}`,
       "",
-      `_${topicPages.length} pages_`,
+      `_${allPages.length} pages_`,
       "",
     ];
 
-    for (const type of Object.keys(categories).sort()) {
-      const typeLabel = type.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-      lines.push(`## ${typeLabel} (${categories[type]!.length})`, "");
-      lines.push(...categories[type]!, "");
+    // List sub-directories first
+    if (hasSubDirs) {
+      lines.push("## Sub-topics", "");
+      const sortedSubDirs = Object.keys(subDirPages).sort();
+      for (const subDir of sortedSubDirs) {
+        const count = subDirPages[subDir]!.length;
+        const subLabel = subDir.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+        lines.push(`- [[${dirPath}/${subDir}/index]] — ${subLabel} (${count} pages)`);
+      }
+      lines.push("");
+    }
+
+    // List direct pages by type
+    if (directPages.length > 0) {
+      const categories: Record<string, string[]> = {};
+      for (const pagePath of directPages) {
+        const page = pageCache?.get(pagePath) ?? this.read(pagePath);
+        if (!page) continue;
+        const type = page.type ?? "uncategorized";
+        if (!categories[type]) categories[type] = [];
+        const slug = basename(pagePath, extname(pagePath));
+        const updated = page.updated ? ` _(${page.updated.slice(0, 10)})_` : "";
+        categories[type]!.push(`- [[${dirPath}/${slug}]] — ${page.title}${updated}`);
+      }
+      for (const type of Object.keys(categories).sort()) {
+        const typeLabel = type.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+        lines.push(`## ${typeLabel} (${categories[type]!.length})`, "");
+        lines.push(...categories[type]!, "");
+      }
     }
 
     lines.push("---", "", `_Last rebuilt: ${now.replace("T", " ").slice(0, 16)} UTC_`, "");
 
-    const fullPath = join(this.config.wikiDir, topicIndexPath);
+    const fullPath = join(this.config.wikiDir, indexPath);
     mkdirSync(dirname(fullPath), { recursive: true });
     writeFileSync(fullPath, lines.join("\n"));
   }

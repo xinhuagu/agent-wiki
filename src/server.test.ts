@@ -5,10 +5,12 @@
  * without starting a real MCP transport.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { Readable } from "node:stream";
 import { join } from "node:path";
 import { Wiki } from "./wiki.js";
+import { handleTool, tryImageBlock, type ContentBlock } from "./server.js";
 
 const TEST_ROOT = join(import.meta.dirname ?? ".", "__test_server__");
 
@@ -219,5 +221,232 @@ describe("server tool: wiki_config", () => {
     expect(cfg.configRoot).toBe(TEST_ROOT);
     expect(cfg.wikiDir).toContain("wiki");
     expect(cfg.rawDir).toContain("raw");
+  });
+});
+
+// ═══ Image ContentBlock tests (server layer) ═══════════════════
+
+describe("tryImageBlock", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("returns image block for supported image file", () => {
+    const wiki = freshWiki();
+    const filePath = join(wiki.config.rawDir, "test.png");
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    writeFileSync(filePath, bytes);
+    const block = tryImageBlock(filePath, "image/png");
+    expect(block).not.toBeNull();
+    expect(block!.type).toBe("image");
+    expect((block as any).data).toBe(bytes.toString("base64"));
+    expect((block as any).mimeType).toBe("image/png");
+  });
+
+  it("returns null for non-image mime types", () => {
+    const wiki = freshWiki();
+    const filePath = join(wiki.config.rawDir, "doc.pdf");
+    writeFileSync(filePath, "fake pdf");
+    expect(tryImageBlock(filePath, "application/pdf")).toBeNull();
+  });
+
+  it("returns null for non-existent file", () => {
+    expect(tryImageBlock("/does/not/exist.png", "image/png")).toBeNull();
+  });
+
+  it("returns null for oversized image", () => {
+    const wiki = freshWiki();
+    const filePath = join(wiki.config.rawDir, "huge.png");
+    writeFileSync(filePath, Buffer.alloc(11 * 1024 * 1024));
+    expect(tryImageBlock(filePath, "image/png")).toBeNull();
+  });
+});
+
+describe("handleTool: raw_add image ContentBlock[]", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("returns mixed [text, image] blocks for a single image file", async () => {
+    const wiki = freshWiki();
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const srcPath = join(TEST_ROOT, "input.png");
+    writeFileSync(srcPath, pngBytes);
+
+    const result = await handleTool(wiki, "raw_add", {
+      filename: "diagram.png",
+      source_path: srcPath,
+    });
+
+    expect(Array.isArray(result)).toBe(true);
+    const blocks = result as ContentBlock[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]!.type).toBe("text");
+    expect(blocks[1]!.type).toBe("image");
+    const imgBlock = blocks[1] as { type: "image"; data: string; mimeType: string };
+    expect(imgBlock.mimeType).toBe("image/png");
+    expect(imgBlock.data).toBe(pngBytes.toString("base64"));
+  });
+
+  it("returns plain text string for non-image files", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "raw_add", {
+      filename: "notes.md",
+      content: "# Notes\nSome text.",
+    });
+    expect(typeof result).toBe("string");
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.document.path).toBe("notes.md");
+  });
+});
+
+describe("handleTool: raw_read image ContentBlock[]", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("returns [text, image] blocks for displayable image", async () => {
+    const wiki = freshWiki();
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const rawPath = join(wiki.config.rawDir, "photo.png");
+    writeFileSync(rawPath, pngBytes);
+    writeFileSync(
+      rawPath + ".meta.yaml",
+      'path: photo.png\ndownloadedAt: "2024-01-01"\nsha256: abcd\nsize: 4\nmimeType: image/png\n'
+    );
+
+    const result = await handleTool(wiki, "raw_read", { filename: "photo.png" });
+
+    expect(Array.isArray(result)).toBe(true);
+    const blocks = result as ContentBlock[];
+    expect(blocks).toHaveLength(2);
+    // text first, image second — consistent with raw_add/raw_fetch
+    expect(blocks[0]!.type).toBe("text");
+    expect(blocks[1]!.type).toBe("image");
+    const textBlock = blocks[0] as { type: "text"; text: string };
+    const parsed = JSON.parse(textBlock.text);
+    expect(parsed.binary).toBe(true);
+    expect(parsed.meta.mimeType).toBe("image/png");
+    const imgBlock = blocks[1] as { type: "image"; data: string; mimeType: string };
+    expect(imgBlock.mimeType).toBe("image/png");
+    expect(imgBlock.data).toBe(pngBytes.toString("base64"));
+  });
+
+  it("returns text-only JSON for oversized image", async () => {
+    const wiki = freshWiki();
+    const bigSize = 11 * 1024 * 1024;
+    const rawPath = join(wiki.config.rawDir, "big.jpg");
+    writeFileSync(rawPath, Buffer.alloc(bigSize));
+    writeFileSync(
+      rawPath + ".meta.yaml",
+      `path: big.jpg\ndownloadedAt: "2024-01-01"\nsha256: abcd\nsize: ${bigSize}\nmimeType: image/jpeg\n`
+    );
+
+    const result = await handleTool(wiki, "raw_read", { filename: "big.jpg" });
+
+    expect(typeof result).toBe("string");
+    const parsed = JSON.parse(result as string);
+    expect(parsed.binary).toBe(true);
+    expect(parsed.note).toMatch(/too large/i);
+  });
+
+  it("returns text content for non-image raw files", async () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("readme.txt", { content: "Hello world" });
+
+    const result = await handleTool(wiki, "raw_read", { filename: "readme.txt" });
+
+    expect(typeof result).toBe("string");
+    const parsed = JSON.parse(result as string);
+    expect(parsed.binary).toBe(false);
+    expect(parsed.content).toBe("Hello world");
+  });
+
+  it("returns error string for missing file", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "raw_read", { filename: "nope.txt" });
+    expect(typeof result).toBe("string");
+    expect(result).toMatch(/not found/i);
+  });
+});
+
+describe("handleTool: raw_fetch image ContentBlock[] (mocked network)", () => {
+  beforeEach(cleanUp);
+  afterEach(() => {
+    cleanUp();
+    vi.restoreAllMocks();
+  });
+
+  function mockFetch(body: Buffer, contentType: string, status = 200) {
+    const readable = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(body));
+        controller.close();
+      },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(readable, {
+        status,
+        headers: { "content-type": contentType },
+      })
+    );
+  }
+
+  it("returns [text, image] blocks when fetching an image", async () => {
+    const wiki = freshWiki();
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    mockFetch(pngBytes, "image/png");
+
+    const result = await handleTool(wiki, "raw_fetch", {
+      url: "https://example.com/photo.png",
+      filename: "fetched.png",
+    });
+
+    expect(Array.isArray(result)).toBe(true);
+    const blocks = result as ContentBlock[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]!.type).toBe("text");
+    expect(blocks[1]!.type).toBe("image");
+    // text block has document metadata
+    const textBlock = blocks[0] as { type: "text"; text: string };
+    const parsed = JSON.parse(textBlock.text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.document.path).toBe("fetched.png");
+    expect(parsed.document.mimeType).toBe("image/png");
+    // image block has correct base64 data
+    const imgBlock = blocks[1] as { type: "image"; data: string; mimeType: string };
+    expect(imgBlock.mimeType).toBe("image/png");
+    expect(imgBlock.data).toBe(pngBytes.toString("base64"));
+  });
+
+  it("returns plain text string when fetching a non-image file", async () => {
+    const wiki = freshWiki();
+    const htmlBytes = Buffer.from("<html><body>Hello</body></html>");
+    mockFetch(htmlBytes, "text/html");
+
+    const result = await handleTool(wiki, "raw_fetch", {
+      url: "https://example.com/page.html",
+      filename: "page.html",
+    });
+
+    expect(typeof result).toBe("string");
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.document.mimeType).toBe("text/html");
+  });
+
+  it("returns plain text string when fetched image exceeds 10 MB", async () => {
+    const wiki = freshWiki();
+    const bigImage = Buffer.alloc(11 * 1024 * 1024);
+    mockFetch(bigImage, "image/jpeg");
+
+    const result = await handleTool(wiki, "raw_fetch", {
+      url: "https://example.com/huge.jpg",
+      filename: "huge.jpg",
+    });
+
+    // tryImageBlock returns null for oversized → plain string, no image block
+    expect(typeof result).toBe("string");
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.document.mimeType).toBe("image/jpeg");
   });
 });

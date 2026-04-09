@@ -17,6 +17,7 @@ import {
   readFileSync,
   writeFileSync,
   createWriteStream,
+  statSync,
 } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
@@ -192,6 +193,58 @@ export async function confluenceImport(
     };
   }
 
+  async function getAttachments(
+    pid: string
+  ): Promise<Array<{ title: string; downloadLink: string; mediaType: string; fileSize: number }>> {
+    const results: Array<{ title: string; downloadLink: string; mediaType: string; fileSize: number }> = [];
+    let cursor: string | null = null;
+    do {
+      const qs = cursor ? `?limit=50&cursor=${cursor}` : "?limit=50";
+      const data = await api(`/pages/${pid}/attachments${qs}`);
+      for (const r of data.results ?? []) {
+        results.push({
+          title: r.title ?? r.id,
+          downloadLink: r._links?.download ? `https://${host}/wiki${r._links.download}` : "",
+          mediaType: r.mediaType ?? "application/octet-stream",
+          fileSize: r.fileSize ?? 0,
+        });
+      }
+      const nextLink: string | undefined = data._links?.next;
+      cursor = nextLink
+        ? new URL(nextLink, baseApi).searchParams.get("cursor")
+        : null;
+    } while (cursor);
+    return results;
+  }
+
+  async function downloadAttachment(
+    attUrl: string,
+    filename: string,
+    destDir: string
+  ): Promise<string | null> {
+    try {
+      const resp = await fetch(attUrl, {
+        headers: {
+          Authorization: authHeader,
+          "User-Agent": `agent-wiki/${VERSION}`,
+        },
+        redirect: "follow",
+      });
+      if (!resp.ok || !resp.body) return null;
+
+      const dest = join(destDir, filename);
+      if (existsSync(dest)) return dest;
+
+      mkdirSync(dirname(dest), { recursive: true });
+      const nodeStream = Readable.fromWeb(resp.body as any);
+      const ws = createWriteStream(dest);
+      await pipeline(nodeStream, ws);
+      return dest;
+    } catch {
+      return null;
+    }
+  }
+
   async function getChildren(pid: string): Promise<Array<{ id: string; title: string }>> {
     const results: Array<{ id: string; title: string }> = [];
     let cursor: string | null = null;
@@ -246,6 +299,32 @@ export async function confluenceImport(
         tags: ["confluence", space],
       });
       files.push(relPath);
+    }
+
+    // Download attachments (images, PDFs, etc.)
+    const attachments = await getAttachments(pid).catch(() => []);
+    const attDir = join(rawDir, `confluence/${space}/attachments`);
+    for (const att of attachments) {
+      if (!att.downloadLink) continue;
+      if (att.fileSize > config.maxAttachmentSize) continue;
+      const dlPath = await downloadAttachment(att.downloadLink, att.title, attDir);
+      if (dlPath) {
+        const buf = readFileSync(dlPath);
+        const attRel = `confluence/${space}/attachments/${att.title}`;
+        if (!existsSync(dlPath + ".meta.yaml")) {
+          writeMeta(dlPath, {
+            path: attRel,
+            sourceUrl: att.downloadLink,
+            downloadedAt: new Date().toISOString(),
+            sha256: hash(buf),
+            size: statSync(dlPath).size,
+            mimeType: att.mediaType,
+            description: `Confluence attachment from "${page.title}": ${att.title}`,
+            tags: ["confluence", space, "attachment"],
+          });
+          files.push(attRel);
+        }
+      }
     }
 
     // Recurse children

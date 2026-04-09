@@ -158,7 +158,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
         name: "raw_import_confluence",
         description:
           "Import a Confluence page (and optionally all child pages recursively) into raw/. " +
-          "Saves each page as HTML with metadata sidecar. Generates _tree.yaml preserving page hierarchy. " +
+          "Saves each page as HTML with metadata sidecar, and downloads all page attachments (images, PDFs, etc.) up to max_attachment_size. Generates _tree.yaml preserving page hierarchy. " +
           "Requires CONFLUENCE_API_TOKEN env var set to 'email:api-token'.",
         inputSchema: {
           type: "object" as const,

@@ -5,8 +5,9 @@
  * without starting a real MCP transport.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { Readable } from "node:stream";
 import { join } from "node:path";
 import { Wiki } from "./wiki.js";
 import { handleTool, tryImageBlock, type ContentBlock } from "./server.js";
@@ -364,5 +365,88 @@ describe("handleTool: raw_read image ContentBlock[]", () => {
     const result = await handleTool(wiki, "raw_read", { filename: "nope.txt" });
     expect(typeof result).toBe("string");
     expect(result).toMatch(/not found/i);
+  });
+});
+
+describe("handleTool: raw_fetch image ContentBlock[] (mocked network)", () => {
+  beforeEach(cleanUp);
+  afterEach(() => {
+    cleanUp();
+    vi.restoreAllMocks();
+  });
+
+  function mockFetch(body: Buffer, contentType: string, status = 200) {
+    const readable = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(body));
+        controller.close();
+      },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(readable, {
+        status,
+        headers: { "content-type": contentType },
+      })
+    );
+  }
+
+  it("returns [text, image] blocks when fetching an image", async () => {
+    const wiki = freshWiki();
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    mockFetch(pngBytes, "image/png");
+
+    const result = await handleTool(wiki, "raw_fetch", {
+      url: "https://example.com/photo.png",
+      filename: "fetched.png",
+    });
+
+    expect(Array.isArray(result)).toBe(true);
+    const blocks = result as ContentBlock[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]!.type).toBe("text");
+    expect(blocks[1]!.type).toBe("image");
+    // text block has document metadata
+    const textBlock = blocks[0] as { type: "text"; text: string };
+    const parsed = JSON.parse(textBlock.text);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.document.path).toBe("fetched.png");
+    expect(parsed.document.mimeType).toBe("image/png");
+    // image block has correct base64 data
+    const imgBlock = blocks[1] as { type: "image"; data: string; mimeType: string };
+    expect(imgBlock.mimeType).toBe("image/png");
+    expect(imgBlock.data).toBe(pngBytes.toString("base64"));
+  });
+
+  it("returns plain text string when fetching a non-image file", async () => {
+    const wiki = freshWiki();
+    const htmlBytes = Buffer.from("<html><body>Hello</body></html>");
+    mockFetch(htmlBytes, "text/html");
+
+    const result = await handleTool(wiki, "raw_fetch", {
+      url: "https://example.com/page.html",
+      filename: "page.html",
+    });
+
+    expect(typeof result).toBe("string");
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.document.mimeType).toBe("text/html");
+  });
+
+  it("returns plain text string when fetched image exceeds 10 MB", async () => {
+    const wiki = freshWiki();
+    const bigImage = Buffer.alloc(11 * 1024 * 1024);
+    mockFetch(bigImage, "image/jpeg");
+
+    const result = await handleTool(wiki, "raw_fetch", {
+      url: "https://example.com/huge.jpg",
+      filename: "huge.jpg",
+    });
+
+    // tryImageBlock returns null for oversized → plain string, no image block
+    expect(typeof result).toBe("string");
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.document.mimeType).toBe("image/jpeg");
   });
 });

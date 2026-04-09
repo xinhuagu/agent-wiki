@@ -1741,7 +1741,7 @@ _Chronological view of all knowledge in this wiki._
     return cache;
   }
 
-  rebuildIndex(pageCache?: Map<string, WikiPage>): void {
+  rebuildIndex(pageCache?: Map<string, WikiPage>, skipIndexPaths?: Set<string>): void {
     const pages = pageCache
       ? [...pageCache.keys()]
       : this.listAllPages().filter((p) => !isSystemPage(p) && !this.isGeneratedPage(p));
@@ -1805,7 +1805,7 @@ _Chronological view of all knowledge in this wiki._
     if (hasTopics) {
       // ── Build per-topic sub-indexes ──
       for (const [topic, tPages] of Object.entries(topicPages)) {
-        this.rebuildTopicIndex(topic, tPages, now, pageCache);
+        this.rebuildTopicIndex(topic, tPages, now, pageCache, skipIndexPaths);
       }
 
       // ── Build top-level hub index ──
@@ -1906,7 +1906,7 @@ _Chronological view of all knowledge in this wiki._
 
   /** Rebuild a directory sub-index at {dirPath}/index.md.
    *  Recursively creates indexes for nested sub-directories. */
-  private rebuildTopicIndex(dirPath: string, allPages: string[], now: string, pageCache?: Map<string, WikiPage>): void {
+  private rebuildTopicIndex(dirPath: string, allPages: string[], now: string, pageCache?: Map<string, WikiPage>, skipIndexPaths?: Set<string>): void {
     // Separate into direct pages vs sub-directory pages
     const directPages: string[] = [];
     const subDirPages: Record<string, string[]> = {};
@@ -1925,11 +1925,16 @@ _Chronological view of all knowledge in this wiki._
 
     // Recursively build sub-directory indexes (always, even if this level is user-authored)
     for (const [subDir, subPages] of Object.entries(subDirPages)) {
-      this.rebuildTopicIndex(`${dirPath}/${subDir}`, subPages, now, pageCache);
+      this.rebuildTopicIndex(`${dirPath}/${subDir}`, subPages, now, pageCache, skipIndexPaths);
+    }
+
+    // Skip if this index was explicitly excluded (e.g. user just deleted it)
+    const indexPath = `${dirPath}/index.md`;
+    if (skipIndexPaths?.has(indexPath)) {
+      return;
     }
 
     // Don't overwrite user-authored index pages
-    const indexPath = `${dirPath}/index.md`;
     const existing = this.read(indexPath);
     if (existing && existing.frontmatter?.generated !== true) {
       return;
@@ -1953,16 +1958,20 @@ _Chronological view of all knowledge in this wiki._
       "",
     ];
 
-    // List sub-directories first
+    // List sub-directories first (exclude skipped sub-indexes)
     if (hasSubDirs) {
-      lines.push("## Sub-topics", "");
-      const sortedSubDirs = Object.keys(subDirPages).sort();
-      for (const subDir of sortedSubDirs) {
-        const count = subDirPages[subDir]!.length;
-        const subLabel = subDir.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-        lines.push(`- [[${dirPath}/${subDir}/index]] — ${subLabel} (${count} pages)`);
+      const visibleSubDirs = Object.keys(subDirPages)
+        .filter((s) => !skipIndexPaths?.has(`${dirPath}/${s}/index.md`))
+        .sort();
+      if (visibleSubDirs.length > 0) {
+        lines.push("## Sub-topics", "");
+        for (const subDir of visibleSubDirs) {
+          const count = subDirPages[subDir]!.length;
+          const subLabel = subDir.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+          lines.push(`- [[${dirPath}/${subDir}/index]] — ${subLabel} (${count} pages)`);
+        }
+        lines.push("");
       }
-      lines.push("");
     }
 
     // List direct pages by type

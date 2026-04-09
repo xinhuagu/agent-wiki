@@ -576,16 +576,9 @@ export async function handleTool(
     }
 
     case "wiki_delete": {
-      const pagePath = args.page as string;
-      const existed = wiki.delete(pagePath);
-      if (existed) {
-        // Suppress auto-generation for deleted user-authored index pages
-        if (pagePath.endsWith("/index.md")) {
-          wiki.suppressIndex(pagePath);
-        }
-        wiki.rebuildIndex();
-      }
-      return JSON.stringify({ ok: existed, page: pagePath });
+      const existed = wiki.delete(args.page as string);
+      if (existed) wiki.rebuildIndex();
+      return JSON.stringify({ ok: existed, page: args.page });
     }
 
     case "wiki_list": {

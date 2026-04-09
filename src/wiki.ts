@@ -20,7 +20,7 @@
  *   - Knowledge compounds: every write improves the whole
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, statSync, copyFileSync, createWriteStream } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, rmdirSync, statSync, copyFileSync, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { join, relative, resolve, basename, extname, dirname } from "node:path";
@@ -1066,14 +1066,14 @@ _Chronological view of all knowledge in this wiki._
   /** Resolve page path to the correct topic subdirectory.
    *  If the path already has a subdirectory, returns as-is.
    *  Otherwise, routes based on: (1) explicit `topic` frontmatter field,
-   *  (2) tag/title matching against existing topic directories. */
+   *  (2) tag/title matching against existing nested directories (deepest match wins). */
   resolvePagePath(pagePath: string, content: string): string {
     // Already in a subdirectory? Use as-is.
     if (pagePath.includes("/")) return pagePath;
 
-    // No existing topic dirs → nothing to route to
-    const topics = this.listTopicDirs();
-    if (topics.length === 0) return pagePath;
+    // No existing dirs → nothing to route to
+    const allDirs = this.listAllDirPaths();
+    if (allDirs.length === 0) return pagePath;
 
     const parsed = matter(content);
 
@@ -1081,10 +1081,22 @@ _Chronological view of all knowledge in this wiki._
     const explicitTopic = parsed.data.topic as string | undefined;
     if (explicitTopic && typeof explicitTopic === "string") {
       const normalized = explicitTopic.toLowerCase().replace(/\s+/g, "-");
+      // Exact path match first (e.g. topic: "lang/js")
+      if (allDirs.includes(normalized)) {
+        return `${normalized}/${pagePath}`;
+      }
+      // Match against last segment of each dir, prefer deepest
+      const match = allDirs
+        .filter((d) => d.split("/").pop()!.toLowerCase() === normalized)
+        .sort((a, b) => b.split("/").length - a.split("/").length)[0];
+      if (match) {
+        return `${match}/${pagePath}`;
+      }
+      // Fallback: create new directory at root
       return `${normalized}/${pagePath}`;
     }
 
-    // 2. Match tags/title against existing topic directory names
+    // 2. Match tags/title against directory names (deepest match wins)
     const classification = this.classify(content);
     const title = ((parsed.data.title as string) ?? "").toLowerCase();
     const signals = [
@@ -1092,17 +1104,22 @@ _Chronological view of all knowledge in this wiki._
       ...title.split(/[\s\-_]+/).filter(Boolean),
     ];
 
-    for (const topic of topics) {
-      const topicLower = topic.toLowerCase();
-      if (signals.some((s) => s === topicLower || s.includes(topicLower) || topicLower.includes(s))) {
-        return `${topic}/${pagePath}`;
+    // Sort dirs by depth (deepest first) so we prefer more specific matches
+    const sortedDirs = [...allDirs].sort(
+      (a, b) => b.split("/").length - a.split("/").length
+    );
+
+    for (const dirPath of sortedDirs) {
+      const dirName = dirPath.split("/").pop()!.toLowerCase();
+      if (signals.some((s) => s === dirName || s.includes(dirName) || dirName.includes(s))) {
+        return `${dirPath}/${pagePath}`;
       }
     }
 
     return pagePath;
   }
 
-  /** List existing topic subdirectories under wiki/. */
+  /** List existing topic subdirectories under wiki/ (first-level only). */
   listTopicDirs(): string[] {
     const dir = this.config.wikiDir;
     if (!existsSync(dir)) return [];
@@ -1110,6 +1127,23 @@ _Chronological view of all knowledge in this wiki._
       .filter((e) => e.isDirectory() && !e.name.startsWith("."))
       .map((e) => e.name)
       .sort();
+  }
+
+  /** List all directory paths recursively under wiki/ (relative, e.g. "lang", "lang/js"). */
+  listAllDirPaths(): string[] {
+    const result: string[] = [];
+    const walk = (dir: string, prefix: string) => {
+      if (!existsSync(dir)) return;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory() && !entry.name.startsWith(".")) {
+          const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+          result.push(relPath);
+          walk(join(dir, entry.name), relPath);
+        }
+      }
+    };
+    walk(this.config.wikiDir, "");
+    return result.sort();
   }
 
   /** Delete a wiki page. Returns true if it existed. */
@@ -1701,6 +1735,38 @@ _Chronological view of all knowledge in this wiki._
     try {
       rawCount = this.rawList().length;
     } catch { /* no raw dir */ }
+
+    // Collect existing sub-indexes before rebuild so we can remove stale ones
+    const existingSubIndexes = this.listAllPages()
+      .filter((p) => p !== "index.md" && p.endsWith("/index.md"));
+
+    // Compute the set of sub-indexes that should exist based on current pages
+    const expectedSubIndexes = new Set<string>();
+    for (const pagePath of pages) {
+      const parts = pagePath.split("/");
+      for (let i = 1; i < parts.length; i++) {
+        expectedSubIndexes.add(parts.slice(0, i).join("/") + "/index.md");
+      }
+    }
+
+    // Remove stale sub-indexes (and empty parent dirs)
+    for (const staleIndex of existingSubIndexes) {
+      if (!expectedSubIndexes.has(staleIndex)) {
+        const fullPath = join(this.config.wikiDir, staleIndex);
+        if (existsSync(fullPath)) unlinkSync(fullPath);
+        // Clean up empty parent directories up to wiki root
+        let dir = dirname(fullPath);
+        const wikiRoot = resolve(this.config.wikiDir);
+        while (dir !== wikiRoot && dir.startsWith(wikiRoot)) {
+          try {
+            rmdirSync(dir); // only succeeds if empty
+            dir = dirname(dir);
+          } catch {
+            break; // not empty, stop
+          }
+        }
+      }
+    }
 
     // Partition pages into topic dirs vs root-level
     const topicPages: Record<string, string[]> = {};  // topic -> page paths

@@ -96,61 +96,24 @@ describe("server tool: wiki_delete", () => {
     expect(wiki.read("deleteme.md")).toBeNull();
   });
 
-  it("does not resurrect user-authored nested index after delete via wiki_delete", async () => {
-    const wiki = freshWiki();
-    // Create user-authored index + sibling page under lang/js/
-    // Also add a sibling topic so lang/index.md has multiple sub-topics
-    wiki.write("lang/js/index.md", "---\ntitle: My JS Guide\ntype: concept\n---\nCurated content.");
-    wiki.write("lang/js/concept-closures.md", "---\ntitle: Closures\ntype: concept\n---\nClosures.");
-    wiki.write("lang/python/concept-py.md", "---\ntitle: Python\ntype: concept\n---\nPython.");
-    wiki.rebuildIndex();
-
-    // User-authored index should be preserved by rebuild
-    expect(readFileSync(join(wiki.config.wikiDir, "lang/js/index.md"), "utf-8")).toContain("Curated content");
-
-    // Delete via handleTool (the wiki_delete server path)
-    const result = await handleTool(wiki, "wiki_delete", { page: "lang/js/index.md" });
-    const parsed = JSON.parse(result as string);
-    expect(parsed.ok).toBe(true);
-
-    // The file must stay deleted — not resurrected as a generated index
-    expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(false);
-
-    // Parent generated index should be refreshed and no longer link to deleted index
-    const langIndex = readFileSync(join(wiki.config.wikiDir, "lang/index.md"), "utf-8");
-    expect(langIndex).not.toContain("[[lang/js/index]]");
-    // But the python sub-topic should still be there
-    expect(langIndex).toContain("[[lang/python/index]]");
-
-    // Deletion is durable — subsequent rebuild/write must NOT recreate the index
-    wiki.rebuildIndex();
-    expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(false);
-
-    // Writing a new page in that dir also must not recreate it
-    wiki.write("lang/js/concept-promises.md", "---\ntitle: Promises\ntype: concept\n---\nPromises.");
-    wiki.rebuildIndex();
-    expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(false);
-
-    // But writing a new user-authored index restores the path and clears suppression
-    wiki.write("lang/js/index.md", "---\ntitle: New JS Guide\ntype: concept\n---\nNew guide.");
-    wiki.rebuildIndex();
-    const newIndex = readFileSync(join(wiki.config.wikiDir, "lang/js/index.md"), "utf-8");
-    expect(newIndex).toContain("New guide");
-    expect(newIndex).not.toContain("generated: true");
-  });
-
-  it("rejects deletion of generated index pages", async () => {
+  it("rejects deletion of nested index.md system pages", async () => {
     const wiki = freshWiki();
     wiki.write("lang/js/concept-js.md", "---\ntitle: JS\ntype: concept\n---\nJS.");
     wiki.rebuildIndex();
 
-    // Generated index should exist
     expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(true);
 
-    // Deletion should be rejected
+    // Nested index.md is a system page — deletion should be rejected
     await expect(
       handleTool(wiki, "wiki_delete", { page: "lang/js/index.md" })
-    ).rejects.toThrow("Cannot delete generated page");
+    ).rejects.toThrow("Cannot delete system page");
+  });
+
+  it("rejects writing to nested index.md paths", () => {
+    const wiki = freshWiki();
+    expect(() =>
+      wiki.write("lang/js/index.md", "---\ntitle: Custom\n---\nContent")
+    ).toThrow("Cannot write to reserved path");
   });
 });
 

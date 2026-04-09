@@ -1364,7 +1364,7 @@ describe("wiki.rebuildIndex", () => {
     expect(pyIndex).toContain("[[lang/python/concept-decorators]]");
   });
 
-  it("generates multi-level index files with generated marker", () => {
+  it("treats nested */index.md as system pages", () => {
     const wiki = freshWiki();
     wiki.write("a/b/c/page.md", "---\ntitle: Deep Page\ntype: note\n---\nDeep.");
     wiki.rebuildIndex();
@@ -1374,36 +1374,9 @@ describe("wiki.rebuildIndex", () => {
     expect(existsSync(join(wiki.config.wikiDir, "a/b/index.md"))).toBe(true);
     expect(existsSync(join(wiki.config.wikiDir, "a/b/c/index.md"))).toBe(true);
 
-    // Generated indexes should have generated: true in frontmatter
-    const aIndex = readFileSync(join(wiki.config.wikiDir, "a/index.md"), "utf-8");
-    expect(aIndex).toContain("generated: true");
-    const abIndex = readFileSync(join(wiki.config.wikiDir, "a/b/index.md"), "utf-8");
-    expect(abIndex).toContain("generated: true");
-
-    // Generated indexes are protected from deletion (maintained by rebuildIndex)
-    expect(() => wiki.delete("a/b/index.md")).toThrow("Cannot delete generated page");
-  });
-
-  it("preserves user-authored nested index.md during rebuild", () => {
-    const wiki = freshWiki();
-    // User creates their own curated index page (no generated: true)
-    wiki.write("lang/js/index.md", "---\ntitle: JavaScript Guide\ntype: concept\n---\nMy curated JS guide.");
-    wiki.write("lang/js/concept-closures.md", "---\ntitle: Closures\ntype: concept\n---\nClosures.");
-    wiki.rebuildIndex();
-
-    // User-authored index should NOT be overwritten
-    const jsIndex = readFileSync(join(wiki.config.wikiDir, "lang/js/index.md"), "utf-8");
-    expect(jsIndex).toContain("My curated JS guide");
-    expect(jsIndex).not.toContain("generated: true");
-
-    // But the parent lang/index.md should still be generated
-    const langIndex = readFileSync(join(wiki.config.wikiDir, "lang/index.md"), "utf-8");
-    expect(langIndex).toContain("generated: true");
-    expect(langIndex).toContain("[[lang/js/index]]");
-
-    // User-authored index should be deletable
-    expect(() => wiki.delete("lang/js/index.md")).not.toThrow();
-    expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(false);
+    // Nested indexes are system pages — cannot be deleted or written to
+    expect(() => wiki.delete("a/b/index.md")).toThrow("Cannot delete system page");
+    expect(() => wiki.write("a/b/index.md", "---\ntitle: X\n---\nX")).toThrow("Cannot write to reserved path");
   });
 
   it("cleans up stale indexes after deleting last page in subtree", () => {
@@ -1429,26 +1402,6 @@ describe("wiki.rebuildIndex", () => {
     const langIndex = readFileSync(join(wiki.config.wikiDir, "lang/index.md"), "utf-8");
     expect(langIndex).toContain("[[lang/js/index]]");
     expect(langIndex).not.toContain("python");
-  });
-
-  it("cleans up orphaned .no-index markers when directory becomes empty", () => {
-    const wiki = freshWiki();
-    wiki.write("topic/index.md", "---\ntitle: Curated\ntype: concept\n---\nMy page.");
-    wiki.write("topic/page.md", "---\ntitle: Page\ntype: note\n---\nContent.");
-    wiki.rebuildIndex();
-
-    // Suppress index generation (simulates what wiki_delete does)
-    wiki.delete("topic/index.md");
-    wiki.suppressIndex("topic/index.md");
-    expect(wiki.isIndexSuppressed("topic")).toBe(true);
-
-    // Now delete the last content page
-    wiki.delete("topic/page.md");
-    wiki.rebuildIndex();
-
-    // .no-index should be cleaned up along with the empty directory
-    expect(wiki.isIndexSuppressed("topic")).toBe(false);
-    expect(existsSync(join(wiki.config.wikiDir, "topic"))).toBe(false);
   });
 });
 

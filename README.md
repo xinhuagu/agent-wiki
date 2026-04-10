@@ -52,6 +52,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **Knowledge Compilation** | Agent builds structured wiki pages from raw sources — not retrieve-and-forget |
 | **BM25 Search** | Field-weighted scoring, synonym expansion, fuzzy matching, CJK tokenization — zero LLM |
 | **Auto-Classification** | Zero-LLM heuristic assigns entity types and tags across 10 categories |
+| **Multi-Level Indexes** | Auto-generated `index.md` at every directory level — nested topic hierarchies with sub-topic navigation |
 | **Self-Checking Lint** | Catches contradictions, broken links, orphan pages, stale content |
 | **Atlassian Import** | One-command Confluence pages and Jira issues with full hierarchy |
 | **File Versioning** | Auto-version same-name files, query latest, list all versions |

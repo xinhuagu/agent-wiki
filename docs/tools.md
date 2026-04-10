@@ -24,14 +24,14 @@ agent-wiki exposes 16 tools through the Model Context Protocol.
 | Tool | Description |
 |------|-------------|
 | `wiki_read` | Read a page (frontmatter + Markdown) |
-| `wiki_write` | Create or update a page (auto-timestamps, auto-classify) |
-| `wiki_delete` | Delete a page (guards system pages) |
+| `wiki_write` | Create or update a page (auto-timestamps, auto-classify, auto-route to nested dirs). Triggers index rebuild. |
+| `wiki_delete` | Delete a page (guards system pages). Triggers index rebuild — stale indexes and empty dirs are cleaned up. |
 | `wiki_list` | List pages, filter by entity type or tag |
 | `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support |
 | `wiki_lint` | Health checks: contradictions, orphans, broken links, SHA-256 integrity |
 | `wiki_init` | Initialize a new knowledge base (creates wiki/, raw/, schemas/) |
 | `wiki_config` | Show current workspace configuration, paths, and available entity templates |
-| `wiki_rebuild` | Rebuild index.md (organized by type) and timeline.md (chronological view) |
+| `wiki_rebuild` | Rebuild all `index.md` files (multi-level directory indexes) and `timeline.md` (chronological view) |
 
 ### Removed Tools
 
@@ -45,6 +45,43 @@ These tools were consolidated into other tools in v0.6.0:
 | `wiki_synthesize` | Agent calls `wiki_read` on multiple pages directly |
 | `wiki_schemas` | `wiki_config` — returns entity templates alongside configuration |
 | `wiki_rebuild_index` / `wiki_rebuild_timeline` | `wiki_rebuild` — single tool rebuilds both |
+
+## Directory Structure & Auto-Generated Indexes
+
+Pages can be organized into nested directories. `wiki_rebuild` (and every `wiki_write`/`wiki_delete`) automatically generates `index.md` at each directory level.
+
+```
+wiki/
+  index.md              ← top-level hub (auto-generated)
+  log.md                ← operation log (auto-generated)
+  timeline.md           ← chronological view (auto-generated)
+  note-misc.md
+  lang/
+    index.md            ← lists js/, python/ sub-topics (auto-generated)
+    js/
+      index.md          ← lists JS pages by type (auto-generated)
+      concept-closures.md
+      concept-promises.md
+    python/
+      index.md          ← lists Python pages by type (auto-generated)
+      concept-decorators.md
+```
+
+### Reserved paths
+
+All `*/index.md` paths are **system-reserved** for auto-generated directory indexes. They cannot be created or deleted through `wiki_write` / `wiki_delete`. They are fully managed by the rebuild process.
+
+### Auto-routing
+
+`wiki_write` automatically routes root-level pages to matching nested directories:
+
+1. **Explicit `topic` field** — `topic: "js"` in frontmatter matches `lang/js/` (deepest match wins)
+2. **Tag/title matching** — title words and tags are matched against existing directory names
+3. **Deepest match wins** — `lang/js/` is preferred over `lang/` for a JS-related page
+
+### Stale cleanup
+
+When the last page in a subtree is deleted, `wiki_rebuild` removes the stale `index.md` and cleans up empty parent directories automatically.
 
 ## Entity Types
 

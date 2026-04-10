@@ -2277,6 +2277,11 @@ function guessMime(filename: string): string {
     ".rb": "text/x-ruby",
     ".sql": "application/sql",
     ".r": "text/plain",
+    ".cbl": "text/x-cobol",
+    ".cob": "text/x-cobol",
+    ".cpy": "text/x-cobol",
+    ".jcl": "text/plain",
+    ".pli": "text/plain",
     // Documents
     ".pdf": "application/pdf",
     ".rtf": "application/rtf",

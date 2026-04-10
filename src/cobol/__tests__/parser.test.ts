@@ -125,17 +125,46 @@ describe("COBOL parser", () => {
   });
 
   describe("DATE-UTILS.cpy (copybook)", () => {
-    it("parses standalone data items without divisions", () => {
-      const ast = parse(fixture("DATE-UTILS.cpy"), "DATE-UTILS.cpy");
-      // Copybook has no PROGRAM-ID
+    const ast = parse(fixture("DATE-UTILS.cpy"), "DATE-UTILS.cpy");
+
+    it("has no PROGRAM-ID", () => {
       expect(ast.programId).toBe("");
-      // Should have data items parsed from the flat structure
-      const allDataItems = ast.divisions.flatMap((d) =>
-        d.sections.flatMap((s) => s.dataItems)
-      );
-      // Even without proper DIVISION headers, we should find the items
-      // At minimum the top-level item
-      expect(allDataItems.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it("creates a synthetic DATA division for standalone data items", () => {
+      expect(ast.divisions.length).toBe(1);
+      expect(ast.divisions[0].name).toBe("DATA");
+    });
+
+    it("parses the top-level 01 group item", () => {
+      const items = ast.divisions[0].sections[0].dataItems;
+      expect(items.length).toBe(1);
+      expect(items[0].name).toBe("WS-DATE-FIELDS");
+      expect(items[0].level).toBe(1);
+    });
+
+    it("parses nested data items within the copybook", () => {
+      const root = ast.divisions[0].sections[0].dataItems[0];
+      // 05-level children: WS-CURRENT-DATE, WS-FORMATTED-DATE, WS-DATE-VALID
+      expect(root.children.length).toBe(3);
+      expect(root.children[0].name).toBe("WS-CURRENT-DATE");
+    });
+
+    it("parses deeply nested items (10-level)", () => {
+      const currentDate = ast.divisions[0].sections[0].dataItems[0].children[0];
+      // 10-level: WS-YEAR, WS-MONTH, WS-DAY
+      expect(currentDate.children.length).toBe(3);
+      expect(currentDate.children[0].name).toBe("WS-YEAR");
+      expect(currentDate.children[0].picture).toMatch(/9\(4\)/i);
+    });
+
+    it("parses 88-level conditions in copybook", () => {
+      const dateValid = ast.divisions[0].sections[0].dataItems[0].children[2]; // WS-DATE-VALID
+      expect(dateValid.name).toBe("WS-DATE-VALID");
+      const conditions = dateValid.children.filter((d) => d.level === 88);
+      expect(conditions.length).toBe(2);
+      expect(conditions[0].name).toBe("DATE-IS-VALID");
+      expect(conditions[1].name).toBe("DATE-INVALID");
     });
   });
 });

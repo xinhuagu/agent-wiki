@@ -61,6 +61,12 @@ describe("COBOL wiki page generation", () => {
       expect(page.content).toContain('title: "DATE-UTILS"');
       expect(page.content).toContain("tags: [cobol, copybook]");
     });
+
+    it("includes data structure table (not empty)", () => {
+      expect(page.content).toContain("## Data Structure");
+      expect(page.content).toContain("WS-DATE-FIELDS");
+      expect(page.content).not.toContain("No data items found");
+    });
   });
 
   describe("call graph page", () => {

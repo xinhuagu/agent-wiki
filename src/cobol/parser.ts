@@ -88,15 +88,41 @@ class Parser {
     const divisions: DivisionNode[] = [];
     let programId = "";
 
-    while (!this.atEnd()) {
-      if (this.peek().type === "DIVISION") {
-        const div = this.parseDivision();
-        divisions.push(div);
-        if (div.name === "IDENTIFICATION") {
-          programId = this.extractProgramId(div);
+    // Check if the source has any DIVISION tokens at all.
+    // Standalone copybooks (.cpy) are typically just data item declarations
+    // with no DIVISION headers — handle them with a synthetic DATA DIVISION.
+    const hasDivisions = this.tokens.some((t) => t.type === "DIVISION");
+
+    if (!hasDivisions) {
+      // Treat entire token stream as data items in a synthetic DATA DIVISION
+      const dataItems = this.parseDataItems();
+      if (dataItems.length > 0) {
+        const section: SectionNode = {
+          type: "Section",
+          name: "WORKING-STORAGE",
+          paragraphs: [],
+          dataItems,
+          fileDefinitions: [],
+          loc: dataItems[0].loc,
+        };
+        divisions.push({
+          type: "Division",
+          name: "DATA",
+          sections: [section],
+          loc: dataItems[0].loc,
+        });
+      }
+    } else {
+      while (!this.atEnd()) {
+        if (this.peek().type === "DIVISION") {
+          const div = this.parseDivision();
+          divisions.push(div);
+          if (div.name === "IDENTIFICATION") {
+            programId = this.extractProgramId(div);
+          }
+        } else {
+          this.advance();
         }
-      } else {
-        this.advance();
       }
     }
 

@@ -1,5 +1,6 @@
 ---
 name: agent-wiki
+version: "${VERSION}"
 description: Manage project wiki - read/write wiki pages, search knowledge base, import from Confluence/Jira, add raw files, parse COBOL code. Use for project documentation, knowledge lookup, and code analysis. Invoke as /agent-wiki [query or action].
 argument-hint: <action> e.g. "search GEOS deployment" or "read page overview" or "import confluence page"
 context: inline

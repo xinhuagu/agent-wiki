@@ -275,8 +275,36 @@ program
     // Skill sources live next to dist/ in the package root
     const pkgRoot = join(__dirname, "..");
 
+    /** Read version from an installed SKILL.md frontmatter. Returns null if not found. */
+    function readInstalledVersion(skillPath: string): string | null {
+      if (!existsSync(skillPath)) return null;
+      const content = readFileSync(skillPath, "utf-8");
+      const m = content.match(/^version:\s*"?([^"\n]+)"?\s*$/m);
+      return m ? m[1] : null;
+    }
+
+    /** Stamp VERSION placeholder in SKILL.md content and write to dest. */
+    function installSkill(src: string, dest: string): void {
+      let content = readFileSync(src, "utf-8");
+      content = content.replace("${VERSION}", VERSION);
+      writeFileSync(dest, content);
+    }
+
+    /** Print install/upgrade status line. */
+    function printStatus(destSkill: string, label: string): void {
+      const oldVersion = readInstalledVersion(destSkill);
+      if (oldVersion && oldVersion !== VERSION) {
+        console.log(`${label} upgraded: ${oldVersion} -> ${VERSION}`);
+      } else if (oldVersion === VERSION) {
+        console.log(`${label} already at v${VERSION} (reinstalled)`);
+      } else {
+        console.log(`${label} installed: v${VERSION}`);
+      }
+    }
+
     if (target === "aceclaw") {
       const skillDir = join(homedir(), ".aceclaw", "skills", "agent-wiki");
+      const destSkill = join(skillDir, "SKILL.md");
       const srcSkill = join(pkgRoot, "skills", "aceclaw", "SKILL.md");
 
       if (!existsSync(srcSkill)) {
@@ -284,10 +312,13 @@ program
         process.exit(1);
       }
 
-      // Copy SKILL.md
+      // Detect existing version before overwriting
+      printStatus(destSkill, "Skill");
+
+      // Copy SKILL.md with version stamp
       mkdirSync(skillDir, { recursive: true });
-      cpSync(srcSkill, join(skillDir, "SKILL.md"));
-      console.log(`Skill installed: ${skillDir}/SKILL.md`);
+      installSkill(srcSkill, destSkill);
+      console.log(`  ${destSkill}`);
 
       // Add MCP server config to ~/.aceclaw/mcp-servers.json
       const mcpPath = join(homedir(), ".aceclaw", "mcp-servers.json");
@@ -312,11 +343,12 @@ program
         console.log(`MCP server already configured in ${mcpPath}`);
       }
 
-      console.log("\nDone! Restart AceClaw daemon to activate:");
+      console.log("\nRestart AceClaw daemon to activate:");
       console.log("  aceclaw daemon restart");
 
     } else if (target === "claude-code") {
       const pluginDir = join(homedir(), ".claude", "plugins", "agent-wiki");
+      const destSkill = join(pluginDir, "skills", "agent-wiki", "SKILL.md");
       const srcPlugin = join(pkgRoot, ".claude-plugin");
       const srcSkills = join(pkgRoot, "skills", "agent-wiki");
 
@@ -325,18 +357,21 @@ program
         process.exit(1);
       }
 
-      // Copy plugin structure
+      // Detect existing version before overwriting
+      printStatus(destSkill, "Plugin");
+
+      // Copy plugin structure with version stamp
       mkdirSync(join(pluginDir, ".claude-plugin"), { recursive: true });
       mkdirSync(join(pluginDir, "skills", "agent-wiki", "references"), { recursive: true });
       cpSync(join(srcPlugin, "plugin.json"), join(pluginDir, ".claude-plugin", "plugin.json"));
-      cpSync(join(srcSkills, "SKILL.md"), join(pluginDir, "skills", "agent-wiki", "SKILL.md"));
+      installSkill(join(srcSkills, "SKILL.md"), destSkill);
       const refsDir = join(srcSkills, "references");
       if (existsSync(join(refsDir, "tools-reference.md"))) {
         cpSync(join(refsDir, "tools-reference.md"), join(pluginDir, "skills", "agent-wiki", "references", "tools-reference.md"));
       }
 
-      console.log(`Plugin installed: ${pluginDir}/`);
-      console.log("\nDone! Enable in Claude Code:");
+      console.log(`  ${pluginDir}/`);
+      console.log("\nEnable in Claude Code:");
       console.log("  /plugins install " + pluginDir);
 
     } else {

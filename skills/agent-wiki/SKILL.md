@@ -1,5 +1,6 @@
 ---
 name: agent-wiki
+version: "${VERSION}"
 description: >
   Manage a structured knowledge base with immutable raw sources and a mutable wiki layer.
   Use this skill whenever the user mentions knowledge base, wiki, raw documents, importing

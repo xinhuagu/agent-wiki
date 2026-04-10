@@ -15,14 +15,13 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { Wiki } from "./wiki.js";
 import { VERSION } from "./version.js";
 import { RequestQueue } from "./queue.js";
 import { registerPlugin, getPluginForFile, listPlugins, summarizeModel } from "./code-analysis.js";
-import { cobolPlugin, extractCobolModel } from "./cobol/plugin.js";
-import { generateCallGraphPage } from "./cobol/wiki-gen.js";
+import { cobolPlugin } from "./cobol/plugin.js";
 
 // Register built-in plugins
 registerPlugin(cobolPlugin);
@@ -728,9 +727,9 @@ export async function handleTool(
       wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.summary.json`, JSON.stringify(summary, null, 2));
 
       // Language-specific model (richer than normalized — e.g. COBOL PIC clauses)
-      if (plugin.id === "cobol") {
-        const cobolModel = extractCobolModel(ast);
-        wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.model.json`, JSON.stringify(cobolModel, null, 2));
+      if (plugin.extractLanguageModel) {
+        const langModel = plugin.extractLanguageModel(ast);
+        wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.model.json`, JSON.stringify(langModel, null, 2));
       }
 
       // Write wiki pages
@@ -740,12 +739,13 @@ export async function handleTool(
         writtenPages.push(page.path);
       }
 
-      // COBOL-specific: rebuild cross-program call graph
-      if (plugin.id === "cobol") {
-        const callGraphPage = rebuildCallGraph(wiki);
-        if (callGraphPage) {
-          wiki.write(callGraphPage.path, callGraphPage.content);
-          writtenPages.push(callGraphPage.path);
+      // Rebuild aggregate pages (e.g. call graph) from all parsed models
+      if (plugin.rebuildAggregatePages) {
+        const parsedDir = join(wiki.config.rawDir, "parsed", lang);
+        const aggPages = plugin.rebuildAggregatePages(parsedDir);
+        for (const page of aggPages) {
+          wiki.write(page.path, page.content);
+          writtenPages.push(page.path);
         }
       }
 
@@ -761,7 +761,7 @@ export async function handleTool(
         `raw/parsed/${lang}/${stem}.normalized.json`,
         `raw/parsed/${lang}/${stem}.summary.json`,
       ];
-      if (plugin.id === "cobol") {
+      if (plugin.extractLanguageModel) {
         artifacts.push(`raw/parsed/${lang}/${stem}.model.json`);
       }
 
@@ -805,31 +805,6 @@ export async function handleTool(
     default:
       return `Unknown tool: ${name}`;
   }
-}
-
-// ── Call graph aggregation ────────────────────────────────────
-
-/**
- * Rebuild the COBOL call graph page from all parsed model.json files.
- * Returns null if there are no parsed COBOL models.
- */
-function rebuildCallGraph(wiki: Wiki): { path: string; content: string } | null {
-  const rawDir = wiki.config.rawDir;
-  const parsedDir = join(rawDir, "parsed", "cobol");
-  if (!existsSync(parsedDir)) return null;
-
-  const models: import("./cobol/extractors.js").CobolCodeModel[] = [];
-  const files = readdirSync(parsedDir).filter((f) => f.endsWith(".model.json"));
-  for (const file of files) {
-    try {
-      const content = readFileSync(join(parsedDir, file), "utf-8");
-      models.push(JSON.parse(content));
-    } catch {
-      // Skip malformed files
-    }
-  }
-  if (models.length === 0) return null;
-  return generateCallGraphPage(models);
 }
 
 // ── Entry point for stdio transport ───────────────────────────

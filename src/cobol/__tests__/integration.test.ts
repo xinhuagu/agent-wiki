@@ -72,4 +72,14 @@ describe("COBOL MCP tools integration", () => {
     const result = await handleTool(wiki, "code_parse", { path: "readme.md" });
     expect(result).toContain("Unsupported file type");
   });
+
+  it("parsed artifacts pass lint integrity checks (no missing-meta)", async () => {
+    const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+    wiki.rawAdd("PAYROLL.cbl", { content: source });
+    await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" });
+
+    const verifyResults = wiki.rawVerify();
+    const missingMeta = verifyResults.filter((r) => r.status === "missing-meta");
+    expect(missingMeta).toEqual([]);
+  });
 });

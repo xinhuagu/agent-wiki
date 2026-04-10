@@ -78,13 +78,51 @@ This creates:
 ## CLI Reference
 
 ```bash
-npx @agent-wiki/mcp-server serve                     # start MCP server (stdio)
-npx @agent-wiki/mcp-server serve --workspace ./data   # separate data directory
-npx @agent-wiki/mcp-server init ./my-kb               # initialize new knowledge base
-npx @agent-wiki/mcp-server search "yolo"              # search wiki
-npx @agent-wiki/mcp-server list                       # list all pages
-npx @agent-wiki/mcp-server list --type concept        # filter by type
-npx @agent-wiki/mcp-server raw-list                   # list raw sources
-npx @agent-wiki/mcp-server raw-verify                 # verify raw file integrity
-npx @agent-wiki/mcp-server lint                       # run health checks
+# MCP Server
+agent-wiki serve                              # start MCP server (stdio)
+agent-wiki serve --workspace ./data           # separate data directory
+
+# Knowledge base management
+agent-wiki init ./my-kb                       # initialize new knowledge base
+agent-wiki search "yolo"                      # search wiki
+agent-wiki list                               # list all pages
+agent-wiki list --type concept                # filter by type
+agent-wiki raw-list                           # list raw sources
+agent-wiki raw-verify                         # verify raw file integrity
+agent-wiki lint                               # run health checks
+
+# Direct tool call (all 18 tools)
+agent-wiki call wiki_search '{"query":"yolo"}'
+agent-wiki call raw_add '{"filename":"doc.pdf","source_path":"/path/to/file"}'
+agent-wiki call code_parse '{"path":"PAYROLL.cbl"}'
+agent-wiki call wiki_list                     # no args needed
+
+# Skill installation
+agent-wiki install aceclaw                    # install as AceClaw skill
+agent-wiki install aceclaw --wiki-path ./kb   # with custom wiki path
+agent-wiki install claude-code                # install as Claude Code plugin
+
+# JSON output (all subcommands)
+agent-wiki list --json                        # structured JSON output
+agent-wiki search "yolo" --json
+agent-wiki lint --json
 ```
+
+### `call` command
+
+The `call` command provides direct access to all 18 MCP tools without running the server. Arguments are passed as a JSON string:
+
+```bash
+agent-wiki call <tool_name> '<json_args>' [-w <wiki-path>] [--workspace <path>]
+```
+
+This is the primary interface used by Claude Code and AceClaw skills.
+
+### `install` command
+
+One-command installation as a native skill for supported agent harnesses:
+
+| Target | What it does |
+|--------|-------------|
+| `aceclaw` | Copies SKILL.md to `~/.aceclaw/skills/agent-wiki/`, adds MCP server to `~/.aceclaw/mcp-servers.json` |
+| `claude-code` | Copies plugin to `~/.claude/plugins/agent-wiki/` (run `/plugins install` in Claude Code to enable) |

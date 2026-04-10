@@ -20,6 +20,9 @@ import { join } from "node:path";
 import { Wiki } from "./wiki.js";
 import { VERSION } from "./version.js";
 import { RequestQueue } from "./queue.js";
+import { isCobolFile, parseCobol } from "./cobol/plugin.js";
+import { traceVariable } from "./cobol/variable-tracer.js";
+import { parse } from "./cobol/parser.js";
 
 export function createServer(wikiPath?: string, workspace?: string): Server {
   const wiki = new Wiki(wikiPath, workspace);
@@ -363,6 +366,48 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       },
       // wiki_classify removed — wiki_write auto-classifies internally
       // wiki_synthesize removed — agent can call wiki_read on multiple pages directly
+
+      // ═══════════════════════════════════════════════════════
+      //  CODE ANALYSIS — Parse source files into structured knowledge
+      // ═══════════════════════════════════════════════════════
+      {
+        name: "code_parse",
+        description:
+          "Parse a source file from raw/ into structured code knowledge (AST, normalized model, summary). Currently supports COBOL (.cbl, .cob, .cpy). Persists artifacts under raw/parsed/cobol/. Optionally traces all references to a variable.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            path: {
+              type: "string",
+              description: "Path to source file in raw/ (e.g. 'PAYROLL.cbl')",
+            },
+            trace_variable: {
+              type: "string",
+              description: "Optional: variable name to trace (e.g. 'WS-TOTAL-SALARY')",
+            },
+          },
+          required: ["path"],
+        },
+      },
+      {
+        name: "code_trace_variable",
+        description:
+          "Trace all references to a variable across a parsed COBOL program. Shows where it is read, written, or passed, grouped by section/paragraph.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            path: {
+              type: "string",
+              description: "Path to source file in raw/ (e.g. 'PAYROLL.cbl')",
+            },
+            variable: {
+              type: "string",
+              description: "Variable name to trace (e.g. 'WS-TOTAL-SALARY')",
+            },
+          },
+          required: ["path", "variable"],
+        },
+      },
     ],
   }));
 
@@ -375,6 +420,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
     "raw_add", "raw_fetch", "raw_import_confluence", "raw_import_jira",
     "wiki_write", "wiki_delete", "wiki_init", "wiki_rebuild",
     "wiki_lint", // writes .lint-cache.json + log.md
+    "code_parse", // writes parsed artifacts under raw/parsed/
   ]);
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -652,6 +698,55 @@ export async function handleTool(
 
     // wiki_classify removed — wiki_write auto-classifies
     // wiki_synthesize removed — agent can wiki_read multiple pages
+
+    case "code_parse": {
+      const filePath = args.path as string;
+      if (!isCobolFile(filePath)) {
+        return `Unsupported file type: ${filePath}. Currently supports .cbl, .cob, .cpy`;
+      }
+      const rawResult = await wiki.rawRead(filePath);
+      if (!rawResult || rawResult.content === null) {
+        return `Cannot read raw/${filePath}`;
+      }
+      const source = rawResult.content;
+      const traceVar = args.trace_variable as string | undefined;
+      const result = parseCobol(source, filePath, traceVar);
+
+      // Persist artifacts
+      const stem = filePath.replace(/\.[^.]+$/, "");
+      wiki.rawAddParsedArtifact(`parsed/cobol/${stem}.ast.json`, JSON.stringify(result.ast, null, 2));
+      wiki.rawAddParsedArtifact(`parsed/cobol/${stem}.model.json`, JSON.stringify(result.model, null, 2));
+      wiki.rawAddParsedArtifact(`parsed/cobol/${stem}.summary.json`, JSON.stringify(result.summary, null, 2));
+
+      const output: Record<string, unknown> = {
+        summary: result.summary,
+        artifacts: [
+          `raw/parsed/cobol/${stem}.ast.json`,
+          `raw/parsed/cobol/${stem}.model.json`,
+          `raw/parsed/cobol/${stem}.summary.json`,
+        ],
+        wikiPages: result.wikiPages.map((p) => p.path),
+      };
+      if (result.variableTrace) {
+        output.variableTrace = result.variableTrace;
+      }
+      return JSON.stringify(output, null, 2);
+    }
+
+    case "code_trace_variable": {
+      const filePath = args.path as string;
+      const variable = args.variable as string;
+      if (!isCobolFile(filePath)) {
+        return `Unsupported file type: ${filePath}. Currently supports .cbl, .cob, .cpy`;
+      }
+      const rawResult = await wiki.rawRead(filePath);
+      if (!rawResult || rawResult.content === null) {
+        return `Cannot read raw/${filePath}`;
+      }
+      const ast = parse(rawResult.content, filePath);
+      const refs = traceVariable(ast, variable);
+      return JSON.stringify({ variable, file: filePath, references: refs }, null, 2);
+    }
 
     default:
       return `Unknown tool: ${name}`;

@@ -95,6 +95,26 @@ describe("server tool: wiki_delete", () => {
     expect(wiki.delete("deleteme.md")).toBe(true);
     expect(wiki.read("deleteme.md")).toBeNull();
   });
+
+  it("rejects deletion of nested index.md system pages", async () => {
+    const wiki = freshWiki();
+    wiki.write("lang/js/concept-js.md", "---\ntitle: JS\ntype: concept\n---\nJS.");
+    wiki.rebuildIndex();
+
+    expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(true);
+
+    // Nested index.md is a system page — deletion should be rejected
+    await expect(
+      handleTool(wiki, "wiki_delete", { page: "lang/js/index.md" })
+    ).rejects.toThrow("Cannot delete system page");
+  });
+
+  it("rejects writing to nested index.md paths", () => {
+    const wiki = freshWiki();
+    expect(() =>
+      wiki.write("lang/js/index.md", "---\ntitle: Custom\n---\nContent")
+    ).toThrow("Cannot write to reserved path");
+  });
 });
 
 describe("server tool: wiki_list", () => {

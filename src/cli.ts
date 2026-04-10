@@ -10,9 +10,15 @@
  */
 
 import { Command } from "commander";
+import { existsSync, mkdirSync, cpSync, readFileSync, writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import { Wiki } from "./wiki.js";
 import { runServer, handleTool } from "./server.js";
 import { VERSION } from "./version.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const program = new Command();
 
@@ -251,6 +257,91 @@ program
       }
     } catch (err) {
       console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+// ── Install as skill for various agent harnesses ─────────
+program
+  .command("install <target>")
+  .description(
+    "Install agent-wiki as a skill for an agent harness.\n" +
+    "Targets:\n" +
+    "  aceclaw      — Copy skill to ~/.aceclaw/skills/agent-wiki/\n" +
+    "  claude-code  — Copy plugin to ~/.claude/plugins/agent-wiki/"
+  )
+  .option("--wiki-path <path>", "Wiki path to embed in MCP config (default: current directory)")
+  .action((target: string, opts: { wikiPath?: string }) => {
+    // Skill sources live next to dist/ in the package root
+    const pkgRoot = join(__dirname, "..");
+
+    if (target === "aceclaw") {
+      const skillDir = join(homedir(), ".aceclaw", "skills", "agent-wiki");
+      const srcSkill = join(pkgRoot, "skills", "aceclaw", "SKILL.md");
+
+      if (!existsSync(srcSkill)) {
+        console.error(`Error: skill source not found at ${srcSkill}`);
+        process.exit(1);
+      }
+
+      // Copy SKILL.md
+      mkdirSync(skillDir, { recursive: true });
+      cpSync(srcSkill, join(skillDir, "SKILL.md"));
+      console.log(`Skill installed: ${skillDir}/SKILL.md`);
+
+      // Add MCP server config to ~/.aceclaw/mcp-servers.json
+      const mcpPath = join(homedir(), ".aceclaw", "mcp-servers.json");
+      let mcpConfig: Record<string, unknown> = {};
+      if (existsSync(mcpPath)) {
+        try { mcpConfig = JSON.parse(readFileSync(mcpPath, "utf-8")); } catch { /* ignore */ }
+      }
+
+      const servers = (mcpConfig.mcpServers ?? mcpConfig) as Record<string, unknown>;
+      if (!servers["agent-wiki"]) {
+        const wikiPath = opts.wikiPath ?? ".";
+        servers["agent-wiki"] = {
+          command: "npx",
+          args: ["-y", "@agent-wiki/mcp-server", "serve", "--wiki-path", wikiPath],
+        };
+        // Write back — use mcpServers key if it was already used, else top-level
+        const output = mcpConfig.mcpServers ? mcpConfig : { mcpServers: servers };
+        mkdirSync(dirname(mcpPath), { recursive: true });
+        writeFileSync(mcpPath, JSON.stringify(output, null, 2) + "\n");
+        console.log(`MCP server added: ${mcpPath}`);
+      } else {
+        console.log(`MCP server already configured in ${mcpPath}`);
+      }
+
+      console.log("\nDone! Restart AceClaw daemon to activate:");
+      console.log("  aceclaw daemon restart");
+
+    } else if (target === "claude-code") {
+      const pluginDir = join(homedir(), ".claude", "plugins", "agent-wiki");
+      const srcPlugin = join(pkgRoot, ".claude-plugin");
+      const srcSkills = join(pkgRoot, "skills", "agent-wiki");
+
+      if (!existsSync(srcPlugin) || !existsSync(srcSkills)) {
+        console.error(`Error: plugin source not found in ${pkgRoot}`);
+        process.exit(1);
+      }
+
+      // Copy plugin structure
+      mkdirSync(join(pluginDir, ".claude-plugin"), { recursive: true });
+      mkdirSync(join(pluginDir, "skills", "agent-wiki", "references"), { recursive: true });
+      cpSync(join(srcPlugin, "plugin.json"), join(pluginDir, ".claude-plugin", "plugin.json"));
+      cpSync(join(srcSkills, "SKILL.md"), join(pluginDir, "skills", "agent-wiki", "SKILL.md"));
+      const refsDir = join(srcSkills, "references");
+      if (existsSync(join(refsDir, "tools-reference.md"))) {
+        cpSync(join(refsDir, "tools-reference.md"), join(pluginDir, "skills", "agent-wiki", "references", "tools-reference.md"));
+      }
+
+      console.log(`Plugin installed: ${pluginDir}/`);
+      console.log("\nDone! Enable in Claude Code:");
+      console.log("  /plugins install " + pluginDir);
+
+    } else {
+      console.error(`Unknown target: ${target}`);
+      console.error("Available targets: aceclaw, claude-code");
       process.exit(1);
     }
   });

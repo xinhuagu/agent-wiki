@@ -11,7 +11,7 @@
 
 import { Command } from "commander";
 import { Wiki } from "./wiki.js";
-import { runServer } from "./server.js";
+import { runServer, handleTool } from "./server.js";
 import { VERSION } from "./version.js";
 
 const program = new Command();
@@ -22,7 +22,8 @@ program
     "Agent-driven knowledge base — structured Markdown wiki with MCP server.\n" +
     "raw/ = immutable sources | wiki/ = mutable knowledge | schemas/ = templates"
   )
-  .version(VERSION);
+  .version(VERSION)
+  .option("--json", "Output JSON instead of human-readable text");
 
 // Default command: start MCP server
 program
@@ -43,14 +44,18 @@ program
     const target = path ?? ".";
     const ws = opts.workspace;
     Wiki.init(target, ws);
-    console.error(`Knowledge base initialized:`);
-    console.error(`  Config:    ${target}/.agent-wiki.yaml`);
-    if (ws) {
-      console.error(`  Workspace: ${ws}/`);
+    if (program.opts().json) {
+      console.log(JSON.stringify({ ok: true, configRoot: target, workspace: ws ?? target }));
+    } else {
+      console.error(`Knowledge base initialized:`);
+      console.error(`  Config:    ${target}/.agent-wiki.yaml`);
+      if (ws) {
+        console.error(`  Workspace: ${ws}/`);
+      }
+      console.error("  wiki/     — Mutable Markdown pages (agent-managed)");
+      console.error("  raw/      — Immutable source documents (write-once)");
+      console.error("  schemas/  — Entity templates (person, concept, event, ...)");
     }
-    console.error("  wiki/     — Mutable Markdown pages (agent-managed)");
-    console.error("  raw/      — Immutable source documents (write-once)");
-    console.error("  schemas/  — Entity templates (person, concept, event, ...)");
   });
 
 // Search
@@ -63,6 +68,10 @@ program
   .action((query: string, opts: { wikiPath: string; workspace?: string; limit: string }) => {
     const wiki = new Wiki(opts.wikiPath, opts.workspace);
     const results = wiki.search(query, parseInt(opts.limit));
+    if (program.opts().json) {
+      console.log(JSON.stringify({ results, count: results.length }, null, 2));
+      return;
+    }
     if (results.length === 0) {
       console.log("No matches.");
       return;
@@ -84,6 +93,10 @@ program
   .action((opts: { wikiPath: string; workspace?: string; type?: string; tag?: string }) => {
     const wiki = new Wiki(opts.wikiPath, opts.workspace);
     const pages = wiki.list(opts.type, opts.tag);
+    if (program.opts().json) {
+      console.log(JSON.stringify({ pages, count: pages.length }, null, 2));
+      return;
+    }
     if (pages.length === 0) {
       console.log("No pages.");
       return;
@@ -103,6 +116,10 @@ program
   .action((opts: { wikiPath: string; workspace?: string }) => {
     const wiki = new Wiki(opts.wikiPath, opts.workspace);
     const docs = wiki.rawList();
+    if (program.opts().json) {
+      console.log(JSON.stringify({ documents: docs, count: docs.length }, null, 2));
+      return;
+    }
     if (docs.length === 0) {
       console.log("No raw documents.");
       return;
@@ -123,6 +140,13 @@ program
   .action((opts: { wikiPath: string; workspace?: string }) => {
     const wiki = new Wiki(opts.wikiPath, opts.workspace);
     const results = wiki.rawVerify();
+    if (program.opts().json) {
+      const ok = results.filter(r => r.status === "ok").length;
+      const corrupted = results.filter(r => r.status === "corrupted").length;
+      const missingMeta = results.filter(r => r.status === "missing-meta").length;
+      console.log(JSON.stringify({ results, ok, corrupted, missingMeta }, null, 2));
+      return;
+    }
     if (results.length === 0) {
       console.log("No raw documents to verify.");
       return;
@@ -150,6 +174,10 @@ program
   .action((opts: { wikiPath: string; workspace?: string }) => {
     const wiki = new Wiki(opts.wikiPath, opts.workspace);
     const report = wiki.lint();
+    if (program.opts().json) {
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
     if (report.issues.length === 0) {
       console.log(`All ${report.pagesChecked} pages + ${report.rawChecked} raw files healthy.`);
       return;
@@ -179,6 +207,51 @@ program
         if (issue.suggestion) console.log(`         -> ${issue.suggestion}`);
       }
       console.log();
+    }
+  });
+
+// ── Generic tool call — direct handleTool() bypass ──────────
+program
+  .command("call <tool> [json]")
+  .description(
+    "Call any tool directly (bypasses MCP). Args as JSON string or key:=value pairs.\n" +
+    "Examples:\n" +
+    "  call wiki_search '{\"query\":\"BKDK\"}'\n" +
+    "  call wiki_write '{\"page\":\"my-page\",\"content\":\"# Hello\"}'\n" +
+    "  call wiki_read '{\"page\":\"overview\"}'\n" +
+    "  call raw_add '{\"filename\":\"doc.cbl\",\"source_path\":\"/path/to/file\"}'\n" +
+    "  call code_parse '{\"path\":\"GS0KBC.cbl\"}'\n" +
+    "  call wiki_list\n" +
+    "  call raw_list"
+  )
+  .option("-w, --wiki-path <path>", "Path to config root", ".")
+  .option("--workspace <path>", "Workspace directory override")
+  .action(async (tool: string, json: string | undefined, opts: { wikiPath: string; workspace?: string }) => {
+    // Register code-analysis plugins (needed for code_parse / code_trace_variable)
+    const { registerPlugin } = await import("./code-analysis.js");
+    const { cobolPlugin } = await import("./cobol/plugin.js");
+    registerPlugin(cobolPlugin);
+
+    const wiki = new Wiki(opts.wikiPath, opts.workspace);
+    const args: Record<string, unknown> = json ? JSON.parse(json) : {};
+
+    try {
+      const result = await handleTool(wiki, tool, args);
+      if (typeof result === "string") {
+        console.log(result);
+      } else {
+        // ContentBlock[] — print text blocks, skip image blocks
+        for (const block of result) {
+          if (block.type === "text") {
+            console.log(block.text);
+          } else if (block.type === "image") {
+            console.error(`[image: ${block.mimeType}, ${block.data.length} bytes base64]`);
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
     }
   });
 

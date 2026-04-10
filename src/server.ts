@@ -756,6 +756,15 @@ export async function handleTool(
         variableTrace = plugin.traceVariable(ast, traceVar);
       }
 
+      const artifacts = [
+        `raw/parsed/${lang}/${stem}.ast.json`,
+        `raw/parsed/${lang}/${stem}.normalized.json`,
+        `raw/parsed/${lang}/${stem}.summary.json`,
+      ];
+      if (plugin.id === "cobol") {
+        artifacts.push(`raw/parsed/${lang}/${stem}.model.json`);
+      }
+
       const output: Record<string, unknown> = {
         summary,
         normalizedModel: {
@@ -764,11 +773,7 @@ export async function handleTool(
           symbols: normalized.symbols.length,
           relations: normalized.relations.length,
         },
-        artifacts: [
-          `raw/parsed/${lang}/${stem}.ast.json`,
-          `raw/parsed/${lang}/${stem}.normalized.json`,
-          `raw/parsed/${lang}/${stem}.summary.json`,
-        ],
+        artifacts,
         wikiPages: writtenPages,
       };
       if (variableTrace) {

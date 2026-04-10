@@ -28,7 +28,8 @@ describe("COBOL MCP tools integration", () => {
     expect(typeof result).toBe("string");
     const parsed = JSON.parse(result as string);
     expect(parsed.summary.unitName).toBe("PAYROLL");
-    expect(parsed.artifacts.length).toBe(3);
+    expect(parsed.artifacts.length).toBe(4);
+    expect(parsed.artifacts).toContain("raw/parsed/cobol/PAYROLL.model.json");
     expect(parsed.wikiPages).toContain("cobol/programs/payroll.md");
 
     // Verify wiki page was actually written to disk

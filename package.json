@@ -1,6 +1,6 @@
 {
   "name": "@agent-wiki/mcp-server",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "description": "Agent-driven knowledge base — immutable raw sources + mutable wiki + self-checking lint. MCP server, no LLM needed.",
   "type": "module",
   "bin": {

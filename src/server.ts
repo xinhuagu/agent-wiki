@@ -15,14 +15,20 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { Wiki } from "./wiki.js";
 import { VERSION } from "./version.js";
 import { RequestQueue } from "./queue.js";
-import { isCobolFile, parseCobol } from "./cobol/plugin.js";
+import { registerPlugin, getPluginForFile, listPlugins } from "./code-analysis.js";
+import { cobolPlugin, isCobolFile, parseCobol } from "./cobol/plugin.js";
 import { traceVariable } from "./cobol/variable-tracer.js";
 import { parse } from "./cobol/parser.js";
+import { generateCallGraphPage } from "./cobol/wiki-gen.js";
+import { extractModel } from "./cobol/extractors.js";
+
+// Register built-in plugins
+registerPlugin(cobolPlugin);
 
 export function createServer(wikiPath?: string, workspace?: string): Server {
   const wiki = new Wiki(wikiPath, workspace);
@@ -701,8 +707,10 @@ export async function handleTool(
 
     case "code_parse": {
       const filePath = args.path as string;
-      if (!isCobolFile(filePath)) {
-        return `Unsupported file type: ${filePath}. Currently supports .cbl, .cob, .cpy`;
+      const plugin = getPluginForFile(filePath);
+      if (!plugin) {
+        const supported = listPlugins().flatMap((p) => p.extensions).join(", ");
+        return `Unsupported file type: ${filePath}. Supported extensions: ${supported}`;
       }
       const rawResult = await wiki.rawRead(filePath);
       if (!rawResult || rawResult.content === null) {
@@ -712,20 +720,43 @@ export async function handleTool(
       const traceVar = args.trace_variable as string | undefined;
       const result = parseCobol(source, filePath, traceVar);
 
-      // Persist artifacts
+      // Persist parsed artifacts
       const stem = filePath.replace(/\.[^.]+$/, "");
-      wiki.rawAddParsedArtifact(`parsed/cobol/${stem}.ast.json`, JSON.stringify(result.ast, null, 2));
-      wiki.rawAddParsedArtifact(`parsed/cobol/${stem}.model.json`, JSON.stringify(result.model, null, 2));
-      wiki.rawAddParsedArtifact(`parsed/cobol/${stem}.summary.json`, JSON.stringify(result.summary, null, 2));
+      const lang = plugin.id;
+      wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.ast.json`, JSON.stringify(result.ast, null, 2));
+      wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.model.json`, JSON.stringify(result.cobolModel, null, 2));
+      wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.normalized.json`, JSON.stringify(result.model, null, 2));
+      wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.summary.json`, JSON.stringify(result.summary, null, 2));
+
+      // Write wiki pages
+      const writtenPages: string[] = [];
+      for (const page of result.wikiPages) {
+        wiki.write(page.path, page.content, `raw/${filePath}`);
+        writtenPages.push(page.path);
+      }
+
+      // Rebuild call graph from all parsed COBOL programs
+      const callGraphPage = rebuildCallGraph(wiki);
+      if (callGraphPage) {
+        wiki.write(callGraphPage.path, callGraphPage.content);
+        writtenPages.push(callGraphPage.path);
+      }
 
       const output: Record<string, unknown> = {
         summary: result.summary,
+        normalizedModel: {
+          units: result.model.units.length,
+          procedures: result.model.procedures.length,
+          symbols: result.model.symbols.length,
+          relations: result.model.relations.length,
+        },
         artifacts: [
-          `raw/parsed/cobol/${stem}.ast.json`,
-          `raw/parsed/cobol/${stem}.model.json`,
-          `raw/parsed/cobol/${stem}.summary.json`,
+          `raw/parsed/${lang}/${stem}.ast.json`,
+          `raw/parsed/${lang}/${stem}.model.json`,
+          `raw/parsed/${lang}/${stem}.normalized.json`,
+          `raw/parsed/${lang}/${stem}.summary.json`,
         ],
-        wikiPages: result.wikiPages.map((p) => p.path),
+        wikiPages: writtenPages,
       };
       if (result.variableTrace) {
         output.variableTrace = result.variableTrace;
@@ -735,22 +766,49 @@ export async function handleTool(
 
     case "code_trace_variable": {
       const filePath = args.path as string;
-      const variable = args.variable as string;
-      if (!isCobolFile(filePath)) {
-        return `Unsupported file type: ${filePath}. Currently supports .cbl, .cob, .cpy`;
+      const varName = args.variable as string;
+      const plugin = getPluginForFile(filePath);
+      if (!plugin) {
+        const supported = listPlugins().flatMap((p) => p.extensions).join(", ");
+        return `Unsupported file type: ${filePath}. Supported extensions: ${supported}`;
       }
       const rawResult = await wiki.rawRead(filePath);
       if (!rawResult || rawResult.content === null) {
         return `Cannot read raw/${filePath}`;
       }
       const ast = parse(rawResult.content, filePath);
-      const refs = traceVariable(ast, variable);
-      return JSON.stringify({ variable, file: filePath, references: refs }, null, 2);
+      const refs = traceVariable(ast, varName);
+      return JSON.stringify({ variable: varName, file: filePath, references: refs }, null, 2);
     }
 
     default:
       return `Unknown tool: ${name}`;
   }
+}
+
+// ── Call graph aggregation ────────────────────────────────────
+
+/**
+ * Rebuild the COBOL call graph page from all parsed model.json files.
+ * Returns null if there are no parsed COBOL models.
+ */
+function rebuildCallGraph(wiki: Wiki): { path: string; content: string } | null {
+  const rawDir = wiki.config.rawDir;
+  const parsedDir = join(rawDir, "parsed", "cobol");
+  if (!existsSync(parsedDir)) return null;
+
+  const models: import("./cobol/extractors.js").CobolCodeModel[] = [];
+  const files = readdirSync(parsedDir).filter((f) => f.endsWith(".model.json"));
+  for (const file of files) {
+    try {
+      const content = readFileSync(join(parsedDir, file), "utf-8");
+      models.push(JSON.parse(content));
+    } catch {
+      // Skip malformed files
+    }
+  }
+  if (models.length === 0) return null;
+  return generateCallGraphPage(models);
 }
 
 // ── Entry point for stdio transport ───────────────────────────

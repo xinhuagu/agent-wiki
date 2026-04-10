@@ -5,10 +5,12 @@
  * and normalizes COBOL-specific structures into the language-agnostic model.
  */
 
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { parse } from "./parser.js";
 import { extractModel, generateSummary } from "./extractors.js";
 import { traceVariable as cobolTraceVariable } from "./variable-tracer.js";
-import { generateProgramPage, generateCopybookPage } from "./wiki-gen.js";
+import { generateProgramPage, generateCopybookPage, generateCallGraphPage } from "./wiki-gen.js";
 import type { CobolAST, DataItemNode } from "./types.js";
 import type { CobolCodeModel } from "./extractors.js";
 import type {
@@ -137,15 +139,6 @@ function adaptVariableRefs(
 // Plugin implementation
 // ---------------------------------------------------------------------------
 
-/**
- * Extract the COBOL-specific model from an AST.
- * Exposed so the server can persist the richer COBOL model alongside the
- * normalized one, without duplicating the extraction logic.
- */
-export function extractCobolModel(ast: unknown): CobolCodeModel {
-  return extractModel(ast as CobolAST);
-}
-
 export const cobolPlugin: CodeAnalysisPlugin = {
   id: "cobol",
   languages: ["COBOL"],
@@ -180,5 +173,24 @@ export const cobolPlugin: CodeAnalysisPlugin = {
 
   traceVariable(ast: unknown, variable: string): VariableReference[] {
     return adaptVariableRefs(cobolTraceVariable(ast as CobolAST, variable));
+  },
+
+  extractLanguageModel(ast: unknown): CobolCodeModel {
+    return extractModel(ast as CobolAST);
+  },
+
+  rebuildAggregatePages(parsedDir: string): Array<{ path: string; content: string }> {
+    if (!existsSync(parsedDir)) return [];
+    const models: CobolCodeModel[] = [];
+    for (const file of readdirSync(parsedDir)) {
+      if (!file.endsWith(".model.json")) continue;
+      try {
+        models.push(JSON.parse(readFileSync(join(parsedDir, file), "utf-8")));
+      } catch {
+        // Skip malformed files
+      }
+    }
+    if (models.length === 0) return [];
+    return [generateCallGraphPage(models)];
   },
 };

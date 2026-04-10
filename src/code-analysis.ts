@@ -149,6 +149,20 @@ export interface CodeAnalysisPlugin {
   generateWikiPages(model: NormalizedCodeModel, sourceFile: string, ast?: unknown): Array<{ path: string; content: string }>;
   /** Optional: trace variable references. */
   traceVariable?(ast: unknown, variable: string): VariableReference[];
+  /**
+   * Optional: extract a language-specific model richer than NormalizedCodeModel.
+   * Returned object is persisted as <stem>.model.json alongside the normalized
+   * artifacts. Plugins that need language-specific detail (e.g. COBOL PIC
+   * clauses, Java annotations) should implement this.
+   */
+  extractLanguageModel?(ast: unknown): unknown;
+  /**
+   * Optional: rebuild an aggregated page from all previously parsed models
+   * of this language (e.g. call graph, dependency map).
+   * Called after each code_parse with the raw/parsed/<lang>/ directory path.
+   * Return null to skip.
+   */
+  rebuildAggregatePages?(parsedDir: string): Array<{ path: string; content: string }>;
 }
 
 // ---------------------------------------------------------------------------

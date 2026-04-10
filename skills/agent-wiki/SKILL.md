@@ -157,6 +157,7 @@ ENDJSON
 
 ## Important Notes
 
+- **COBOL auto-parse**: When adding ANY COBOL file (.cbl, .cob, .cpy) via `raw_add`, you MUST ALWAYS immediately run `code_parse` on it. This is mandatory — never add a COBOL file without parsing it. The parse generates AST, normalized model, and auto-creates wiki pages.
 - **Raw files are immutable** — once added, they cannot be modified. Use `raw_versions` + `auto_version` for updates.
 - **Wiki pages are mutable** — they represent compiled knowledge that improves over time.
 - **Auto-classification**: `wiki_write` automatically infers `type` and `tags` if missing from frontmatter.

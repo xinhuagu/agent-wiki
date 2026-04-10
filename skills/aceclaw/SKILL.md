@@ -77,6 +77,12 @@ agent-wiki call raw_add '{"filename": "doc.txt", "content": "file content here"}
 agent-wiki call raw_add '{"filename": "code.cbl", "source_path": "/path/to/file.cbl"}'
 ```
 
+**IMPORTANT:** When adding COBOL files (.cbl, .cob, .cpy), ALWAYS follow up with `code_parse` immediately to auto-generate AST, normalized model, and wiki pages:
+```bash
+agent-wiki call raw_add '{"filename": "PAYROLL.cbl", "source_path": "/path/to/PAYROLL.cbl"}'
+agent-wiki call code_parse '{"path": "PAYROLL.cbl"}'
+```
+
 ### Fetch from URL
 ```bash
 agent-wiki call raw_fetch '{"url": "https://example.com/doc.pdf", "description": "Research paper"}'
@@ -130,7 +136,7 @@ Based on $ARGUMENTS:
 3. If user asks to write or update: use `wiki_write`
 4. If user asks to list pages or files: use `wiki_list` or `raw_list`
 5. If user asks to import from Confluence/Jira: use `raw_import_confluence` or `raw_import_jira`
-6. If user asks to import COBOL files: use `raw_add` then `code_parse`
+6. **When adding ANY COBOL file (.cbl, .cob, .cpy) via `raw_add`: ALWAYS run `code_parse` immediately after.** This is mandatory — never add a COBOL file without parsing it.
 7. If user asks about code analysis or variables: use `code_parse` or `code_trace_variable`
 8. If user asks to check health: use `wiki_lint`
 9. Present results in clear, structured format

@@ -272,12 +272,19 @@ class Parser {
   private parseDataSection(name: string, loc: SourceLocation): SectionNode {
     const dataItems: DataItemNode[] = [];
     const fileDefinitions: FileDefinitionNode[] = [];
+    const copyStatements: StatementNode[] = [];
 
     while (!this.atEnd() && this.peek().type !== "DIVISION") {
       const t = this.peek();
 
       // Another section starting?
       if ((t.type === "IDENTIFIER") && this.lookAheadSection()) break;
+
+      // COPY statement in data division (e.g. COPY DATE-UTILS.)
+      if (t.type === "COPY") {
+        copyStatements.push(this.parseStatement());
+        continue;
+      }
 
       // FD / SD
       if (t.type === "FD" || t.type === "SD") {
@@ -294,7 +301,18 @@ class Parser {
       this.advance();
     }
 
-    return { type: "Section", name, paragraphs: [], dataItems, fileDefinitions, loc };
+    // Wrap COPY statements in a synthetic paragraph so extractors find them
+    const paragraphs: ParagraphNode[] = [];
+    if (copyStatements.length > 0) {
+      paragraphs.push({
+        type: "Paragraph",
+        name: `(${name}-COPY)`,
+        statements: copyStatements,
+        loc: copyStatements[0].loc,
+      });
+    }
+
+    return { type: "Section", name, paragraphs, dataItems, fileDefinitions, loc };
   }
 
   // ---- File definitions (FD/SD) ------------------------------------------

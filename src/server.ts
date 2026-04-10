@@ -564,6 +564,8 @@ export async function handleTool(
         enrichedContent,
         args.source as string | undefined
       );
+      // Auto-rebuild indexes so directory index chain stays in sync
+      wiki.rebuildIndex();
       const classification = wiki.classify(enrichedContent);
       return JSON.stringify({
         ok: true,
@@ -575,6 +577,7 @@ export async function handleTool(
 
     case "wiki_delete": {
       const existed = wiki.delete(args.page as string);
+      if (existed) wiki.rebuildIndex();
       return JSON.stringify({ ok: existed, page: args.page });
     }
 

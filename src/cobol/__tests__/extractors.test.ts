@@ -80,4 +80,38 @@ describe("COBOL extractors", () => {
       expect(summary.dataItemCount).toBeGreaterThan(0);
     });
   });
+
+  describe("INVOICE.cbl — COPY in DATA DIVISION", () => {
+    const ast = parse(fixture("INVOICE.cbl"), "INVOICE.cbl");
+    const model = extractModel(ast);
+    const summary = generateSummary(model);
+
+    it("extracts COPY dependencies from WORKING-STORAGE", () => {
+      const copybooks = model.copies.map((c) => c.copybook);
+      expect(copybooks).toContain("DATE-UTILS");
+      expect(copybooks).toContain("CUSTOMER-REC");
+    });
+
+    it("extracts COPY dependencies from LINKAGE SECTION", () => {
+      const copybooks = model.copies.map((c) => c.copybook);
+      expect(copybooks).toContain("LINK-PARAMS");
+    });
+
+    it("includes all copybooks in summary", () => {
+      expect(summary.copybooks).toContain("DATE-UTILS");
+      expect(summary.copybooks).toContain("CUSTOMER-REC");
+      expect(summary.copybooks).toContain("LINK-PARAMS");
+      expect(summary.copybooks.length).toBe(3);
+    });
+
+    it("still extracts CALL from PROCEDURE DIVISION", () => {
+      expect(summary.callTargets).toContain("CALC-TOTAL");
+    });
+
+    it("still extracts data items alongside COPY", () => {
+      expect(model.dataItems.length).toBeGreaterThan(0);
+      const invoice = model.dataItems.find((d) => d.name === "WS-INVOICE-NUM");
+      expect(invoice).toBeDefined();
+    });
+  });
 });

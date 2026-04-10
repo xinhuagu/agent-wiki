@@ -1379,6 +1379,32 @@ describe("wiki.rebuildIndex", () => {
     expect(() => wiki.write("a/b/index.md", "---\ntitle: X\n---\nX")).toThrow("Cannot write to reserved path");
   });
 
+  it("overwrites pre-existing user-authored nested index.md on rebuild", () => {
+    const wiki = freshWiki();
+    // Simulate a repo that already has a hand-written lang/js/index.md
+    // (e.g. created before upgrading to the multi-level index feature)
+    const jsDir = join(wiki.config.wikiDir, "lang/js");
+    mkdirSync(jsDir, { recursive: true });
+    writeFileSync(join(jsDir, "index.md"),
+      "---\ntitle: My Hand-Written JS Guide\ntype: concept\n---\n\nCurated content that predates the feature.\n");
+    writeFileSync(join(jsDir, "concept-closures.md"),
+      "---\ntitle: Closures\ntype: concept\n---\nClosures.\n");
+
+    // First rebuild should overwrite the legacy user-authored index
+    wiki.rebuildIndex();
+
+    const jsIndex = readFileSync(join(jsDir, "index.md"), "utf-8");
+    expect(jsIndex).not.toContain("My Hand-Written JS Guide");
+    expect(jsIndex).not.toContain("Curated content");
+    expect(jsIndex).toContain("[[lang/js/concept-closures]]");
+    expect(jsIndex).toContain("type: index");
+
+    // Subsequent rebuilds keep it consistent
+    wiki.rebuildIndex();
+    const jsIndex2 = readFileSync(join(jsDir, "index.md"), "utf-8");
+    expect(jsIndex2).toContain("[[lang/js/concept-closures]]");
+  });
+
   it("cleans up stale indexes after deleting last page in subtree", () => {
     const wiki = freshWiki();
     wiki.write("lang/js/concept-js.md", "---\ntitle: JS Basics\ntype: concept\n---\nJS.");

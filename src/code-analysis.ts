@@ -142,8 +142,11 @@ export interface CodeAnalysisPlugin {
   parse(source: string, filename: string): unknown;
   /** Normalize the AST into the shared model. */
   normalize(ast: unknown): NormalizedCodeModel;
-  /** Generate wiki page content from the normalized model. */
-  generateWikiPages(model: NormalizedCodeModel, sourceFile: string): Array<{ path: string; content: string }>;
+  /** Generate wiki page content from the normalized model.
+   *  The AST is passed so language plugins can use richer structures for
+   *  full-fidelity pages (e.g. PIC clauses, level numbers) that the
+   *  normalized model intentionally does not carry. */
+  generateWikiPages(model: NormalizedCodeModel, sourceFile: string, ast?: unknown): Array<{ path: string; content: string }>;
   /** Optional: trace variable references. */
   traceVariable?(ast: unknown, variable: string): VariableReference[];
 }

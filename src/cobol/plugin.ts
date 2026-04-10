@@ -10,7 +10,7 @@ import { extractModel, generateSummary } from "./extractors.js";
 import { traceVariable as cobolTraceVariable } from "./variable-tracer.js";
 import { generateProgramPage, generateCopybookPage } from "./wiki-gen.js";
 import type { CobolAST, DataItemNode } from "./types.js";
-import type { CobolCodeModel, CodeSummary } from "./extractors.js";
+import type { CobolCodeModel } from "./extractors.js";
 import type {
   CodeAnalysisPlugin,
   NormalizedCodeModel,
@@ -137,6 +137,15 @@ function adaptVariableRefs(
 // Plugin implementation
 // ---------------------------------------------------------------------------
 
+/**
+ * Extract the COBOL-specific model from an AST.
+ * Exposed so the server can persist the richer COBOL model alongside the
+ * normalized one, without duplicating the extraction logic.
+ */
+export function extractCobolModel(ast: unknown): CobolCodeModel {
+  return extractModel(ast as CobolAST);
+}
+
 export const cobolPlugin: CodeAnalysisPlugin = {
   id: "cobol",
   languages: ["COBOL"],
@@ -147,70 +156,29 @@ export const cobolPlugin: CodeAnalysisPlugin = {
   },
 
   normalize(ast: unknown): NormalizedCodeModel {
-    const cobolAst = ast as CobolAST;
-    const cobolModel = extractModel(cobolAst);
+    const cobolModel = extractModel(ast as CobolAST);
     return cobolToNormalized(cobolModel);
   },
 
-  generateWikiPages(model: NormalizedCodeModel, sourceFile: string): Array<{ path: string; content: string }> {
-    // Re-extract the COBOL-specific model for wiki generation
-    // (wiki-gen needs the richer COBOL structures for detailed pages)
-    const ast = parse("", sourceFile); // dummy — we'll use the model directly
-    // Actually, we need the original AST for full-fidelity wiki pages.
-    // This is a known trade-off: wiki-gen uses COBOL-specific types.
-    // For now, return empty — the real wiki pages are generated in parseCobol().
-    return [];
+  generateWikiPages(
+    _model: NormalizedCodeModel,
+    sourceFile: string,
+    ast?: unknown,
+  ): Array<{ path: string; content: string }> {
+    // Wiki generation uses the richer COBOL-specific model for full-fidelity
+    // pages (data item tables, PIC clauses, etc.) that the normalized model
+    // intentionally does not carry.
+    const cobolAst = ast as CobolAST;
+    const cobolModel = extractModel(cobolAst);
+    const summary = generateSummary(cobolModel);
+
+    if (isCopybook(sourceFile)) {
+      return [generateCopybookPage(cobolModel)];
+    }
+    return [generateProgramPage(cobolModel, summary)];
   },
 
   traceVariable(ast: unknown, variable: string): VariableReference[] {
     return adaptVariableRefs(cobolTraceVariable(ast as CobolAST, variable));
   },
 };
-
-// ---------------------------------------------------------------------------
-// Legacy public API (used by server.ts code_parse handler)
-// ---------------------------------------------------------------------------
-
-export interface CodeParseResult {
-  ast: CobolAST;
-  model: NormalizedCodeModel;
-  cobolModel: CobolCodeModel;
-  summary: CodeSummary;
-  wikiPages: { path: string; content: string }[];
-  variableTrace?: VariableReference[];
-}
-
-export function isCobolFile(filename: string): boolean {
-  const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
-  return cobolPlugin.extensions.includes(ext);
-}
-
-/**
- * Parse a COBOL source file and produce all artifacts.
- */
-export function parseCobol(
-  source: string,
-  filename: string,
-  traceVar?: string,
-): CodeParseResult {
-  const ast = parse(source, filename);
-  const cobolModel = extractModel(ast);
-  const summary = generateSummary(cobolModel);
-  const model = cobolToNormalized(cobolModel);
-
-  // Generate wiki pages (uses COBOL-specific types for full-fidelity output)
-  const wikiPages: { path: string; content: string }[] = [];
-  if (isCopybook(filename)) {
-    wikiPages.push(generateCopybookPage(cobolModel));
-  } else {
-    wikiPages.push(generateProgramPage(cobolModel, summary));
-  }
-
-  // Optional variable trace
-  let variableTrace: VariableReference[] | undefined;
-  if (traceVar) {
-    variableTrace = adaptVariableRefs(cobolTraceVariable(ast, traceVar));
-  }
-
-  return { ast, model, cobolModel, summary, wikiPages, variableTrace };
-}

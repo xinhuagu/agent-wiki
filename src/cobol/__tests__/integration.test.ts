@@ -27,8 +27,8 @@ describe("COBOL MCP tools integration", () => {
     const result = await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" });
     expect(typeof result).toBe("string");
     const parsed = JSON.parse(result as string);
-    expect(parsed.summary.programId).toBe("PAYROLL");
-    expect(parsed.artifacts.length).toBe(4);
+    expect(parsed.summary.unitName).toBe("PAYROLL");
+    expect(parsed.artifacts.length).toBe(3);
     expect(parsed.wikiPages).toContain("cobol/programs/payroll.md");
 
     // Verify wiki page was actually written to disk
@@ -77,7 +77,7 @@ describe("COBOL MCP tools integration", () => {
 
     const result = await handleTool(wiki, "code_parse", { path: "DATE-UTILS.cpy" });
     const parsed = JSON.parse(result as string);
-    expect(parsed.summary.dataItemCount).toBeGreaterThan(0);
+    expect(parsed.summary.symbolCount).toBeGreaterThan(0);
     expect(parsed.wikiPages).toContain("cobol/copybooks/date-utils.md");
   });
 

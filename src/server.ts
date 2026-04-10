@@ -20,12 +20,9 @@ import { join } from "node:path";
 import { Wiki } from "./wiki.js";
 import { VERSION } from "./version.js";
 import { RequestQueue } from "./queue.js";
-import { registerPlugin, getPluginForFile, listPlugins } from "./code-analysis.js";
-import { cobolPlugin, isCobolFile, parseCobol } from "./cobol/plugin.js";
-import { traceVariable } from "./cobol/variable-tracer.js";
-import { parse } from "./cobol/parser.js";
+import { registerPlugin, getPluginForFile, listPlugins, summarizeModel } from "./code-analysis.js";
+import { cobolPlugin, extractCobolModel } from "./cobol/plugin.js";
 import { generateCallGraphPage } from "./cobol/wiki-gen.js";
-import { extractModel } from "./cobol/extractors.js";
 
 // Register built-in plugins
 registerPlugin(cobolPlugin);
@@ -716,50 +713,66 @@ export async function handleTool(
       if (!rawResult || rawResult.content === null) {
         return `Cannot read raw/${filePath}`;
       }
-      const source = rawResult.content;
-      const traceVar = args.trace_variable as string | undefined;
-      const result = parseCobol(source, filePath, traceVar);
+
+      // All dispatch goes through the plugin interface
+      const ast = plugin.parse(rawResult.content, filePath);
+      const normalized = plugin.normalize(ast);
+      const summary = summarizeModel(normalized);
+      const wikiPages = plugin.generateWikiPages(normalized, filePath, ast);
 
       // Persist parsed artifacts
       const stem = filePath.replace(/\.[^.]+$/, "");
       const lang = plugin.id;
-      wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.ast.json`, JSON.stringify(result.ast, null, 2));
-      wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.model.json`, JSON.stringify(result.cobolModel, null, 2));
-      wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.normalized.json`, JSON.stringify(result.model, null, 2));
-      wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.summary.json`, JSON.stringify(result.summary, null, 2));
+      wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.ast.json`, JSON.stringify(ast, null, 2));
+      wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.normalized.json`, JSON.stringify(normalized, null, 2));
+      wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.summary.json`, JSON.stringify(summary, null, 2));
+
+      // Language-specific model (richer than normalized — e.g. COBOL PIC clauses)
+      if (plugin.id === "cobol") {
+        const cobolModel = extractCobolModel(ast);
+        wiki.rawAddParsedArtifact(`parsed/${lang}/${stem}.model.json`, JSON.stringify(cobolModel, null, 2));
+      }
 
       // Write wiki pages
       const writtenPages: string[] = [];
-      for (const page of result.wikiPages) {
+      for (const page of wikiPages) {
         wiki.write(page.path, page.content, `raw/${filePath}`);
         writtenPages.push(page.path);
       }
 
-      // Rebuild call graph from all parsed COBOL programs
-      const callGraphPage = rebuildCallGraph(wiki);
-      if (callGraphPage) {
-        wiki.write(callGraphPage.path, callGraphPage.content);
-        writtenPages.push(callGraphPage.path);
+      // COBOL-specific: rebuild cross-program call graph
+      if (plugin.id === "cobol") {
+        const callGraphPage = rebuildCallGraph(wiki);
+        if (callGraphPage) {
+          wiki.write(callGraphPage.path, callGraphPage.content);
+          writtenPages.push(callGraphPage.path);
+        }
+      }
+
+      // Optional variable trace
+      const traceVar = args.trace_variable as string | undefined;
+      let variableTrace;
+      if (traceVar && plugin.traceVariable) {
+        variableTrace = plugin.traceVariable(ast, traceVar);
       }
 
       const output: Record<string, unknown> = {
-        summary: result.summary,
+        summary,
         normalizedModel: {
-          units: result.model.units.length,
-          procedures: result.model.procedures.length,
-          symbols: result.model.symbols.length,
-          relations: result.model.relations.length,
+          units: normalized.units.length,
+          procedures: normalized.procedures.length,
+          symbols: normalized.symbols.length,
+          relations: normalized.relations.length,
         },
         artifacts: [
           `raw/parsed/${lang}/${stem}.ast.json`,
-          `raw/parsed/${lang}/${stem}.model.json`,
           `raw/parsed/${lang}/${stem}.normalized.json`,
           `raw/parsed/${lang}/${stem}.summary.json`,
         ],
         wikiPages: writtenPages,
       };
-      if (result.variableTrace) {
-        output.variableTrace = result.variableTrace;
+      if (variableTrace) {
+        output.variableTrace = variableTrace;
       }
       return JSON.stringify(output, null, 2);
     }
@@ -772,12 +785,15 @@ export async function handleTool(
         const supported = listPlugins().flatMap((p) => p.extensions).join(", ");
         return `Unsupported file type: ${filePath}. Supported extensions: ${supported}`;
       }
+      if (!plugin.traceVariable) {
+        return `Plugin "${plugin.id}" does not support variable tracing`;
+      }
       const rawResult = await wiki.rawRead(filePath);
       if (!rawResult || rawResult.content === null) {
         return `Cannot read raw/${filePath}`;
       }
-      const ast = parse(rawResult.content, filePath);
-      const refs = traceVariable(ast, varName);
+      const ast = plugin.parse(rawResult.content, filePath);
+      const refs = plugin.traceVariable(ast, varName);
       return JSON.stringify({ variable: varName, file: filePath, references: refs }, null, 2);
     }
 

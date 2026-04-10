@@ -596,6 +596,16 @@ _Chronological view of all knowledge in this wiki._
   }
 
   /**
+   * Write a parsed artifact under raw/parsed/. Unlike rawAdd, these are
+   * idempotent — re-parsing the same source overwrites the previous output.
+   */
+  rawAddParsedArtifact(relativePath: string, content: string): void {
+    const fullPath = join(this.config.rawDir, relativePath);
+    mkdirSync(dirname(fullPath), { recursive: true });
+    writeFileSync(fullPath, content, "utf-8");
+  }
+
+  /**
    * List all versions of a raw file, sorted by version number, with the latest marked.
    * rawVersions("report.xlsx") → { versions: [...], latest: "report_v3.xlsx" }
    */

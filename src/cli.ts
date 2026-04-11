@@ -220,7 +220,7 @@ program
 program
   .command("call <tool> [json]")
   .description(
-    "Call any tool directly (bypasses MCP). Args as JSON string or key:=value pairs.\n" +
+    "Call any tool directly (bypasses MCP). Args as JSON string.\n" +
     "Examples:\n" +
     "  call wiki_search '{\"query\":\"BKDK\"}'\n" +
     "  call wiki_write '{\"page\":\"my-page\",\"content\":\"# Hello\"}'\n" +
@@ -241,17 +241,9 @@ program
     const wiki = new Wiki(opts.wikiPath, opts.workspace);
     const args: Record<string, unknown> = json ? JSON.parse(json) : {};
 
-    // Known error prefixes returned by handleTool as strings (not thrown)
-    const ERROR_PREFIXES = ["Unknown tool:", "Page not found:", "Raw file not found:", "Unsupported file type:", "Cannot read raw/", "Plugin "];
-
     try {
       const result = await handleTool(wiki, tool, args);
       if (typeof result === "string") {
-        const isError = ERROR_PREFIXES.some(p => result.startsWith(p));
-        if (isError) {
-          console.error(result);
-          process.exit(1);
-        }
         console.log(result);
       } else {
         // ContentBlock[] — print text blocks, skip image blocks

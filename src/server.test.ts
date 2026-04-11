@@ -167,6 +167,364 @@ describe("server tool: wiki_write + wiki_read", () => {
   });
 });
 
+describe("server tool: batch", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  // ── Batch reads ──────────────────────────────────────────────
+
+  it("reads multiple wiki pages in one call", async () => {
+    const wiki = freshWiki();
+    wiki.write("note-a.md", "---\ntitle: A\ntype: note\n---\nContent A.");
+    wiki.write("note-b.md", "---\ntitle: B\ntype: note\n---\nContent B.");
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_read", args: { page: "note-a.md" } },
+        { tool: "wiki_read", args: { page: "note-b.md" } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(2);
+    expect(JSON.stringify(parsed.results[0].result)).toContain("Content A");
+    expect(JSON.stringify(parsed.results[1].result)).toContain("Content B");
+  });
+
+  it("returns per-op error without failing the batch", async () => {
+    const wiki = freshWiki();
+    wiki.write("note-ok.md", "---\ntitle: OK\ntype: note\n---\nGood.");
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_read", args: { page: "note-ok.md" } },
+        { tool: "wiki_read", args: { page: "nonexistent.md" } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(2);
+    expect(JSON.stringify(parsed.results[0].result)).toContain("Good");
+    expect(parsed.results[1].error).toMatch(/not found/i);
+  });
+
+  // ── Batch writes ─────────────────────────────────────────────
+
+  it("writes multiple wiki pages in one call", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_write", args: { page: "note-x.md", content: "---\ntitle: X\ntype: note\n---\nBody X." } },
+        { tool: "wiki_write", args: { page: "note-y.md", content: "---\ntitle: Y\ntype: note\n---\nBody Y." } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(2);
+    expect(parsed.results[0].result.ok).toBe(true);
+    expect(parsed.results[1].result.ok).toBe(true);
+    expect(wiki.read("note-x.md")!.title).toBe("X");
+    expect(wiki.read("note-y.md")!.title).toBe("Y");
+  });
+
+  it("continues on individual write errors", async () => {
+    const wiki = freshWiki();
+    wiki.write("lang/js/concept-js.md", "---\ntitle: JS\ntype: concept\n---\nJS.");
+    wiki.rebuildIndex();
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_write", args: { page: "note-ok.md", content: "---\ntitle: OK\ntype: note\n---\nFine." } },
+        { tool: "wiki_write", args: { page: "lang/js/index.md", content: "---\ntitle: Bad\n---\nReserved." } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].result.ok).toBe(true);
+    expect(parsed.results[1].error).toMatch(/reserved/i);
+  });
+
+  it("auto-classifies content in batch writes", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_write", args: { page: "guide.md", content: "---\ntitle: Step by Step Guide\n---\nStep 1: Install. Step 2: Configure. Step 3: Run." } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].result.autoClassified.type).toBe("how-to");
+  });
+
+  // ── Mixed operations ─────────────────────────────────────────
+
+  it("mixes reads, writes, searches, and raw_add in one call", async () => {
+    const wiki = freshWiki();
+    wiki.write("existing.md", "---\ntitle: Existing\ntype: note\n---\nAlready here.");
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_read", args: { page: "existing.md" } },
+        { tool: "wiki_write", args: { page: "new-page.md", content: "---\ntitle: New\ntype: note\n---\nFresh." } },
+        { tool: "wiki_search", args: { query: "Existing" } },
+        { tool: "raw_add", args: { filename: "source.txt", content: "raw data here" } },
+        { tool: "wiki_list", args: {} },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(5);
+    // wiki_read result
+    expect(JSON.stringify(parsed.results[0].result)).toContain("Already here");
+    // wiki_write result
+    expect(parsed.results[1].result.ok).toBe(true);
+    // wiki_search result
+    expect(parsed.results[2].result.count).toBeGreaterThan(0);
+    // raw_add result
+    expect(parsed.results[3].result.ok).toBe(true);
+    // wiki_list result
+    expect(parsed.results[4].result.count).toBeGreaterThan(0);
+  });
+
+  it("batch reads multiple raw files", async () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("doc-a.txt", { content: "Alpha doc" });
+    wiki.rawAdd("doc-b.txt", { content: "Beta doc" });
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "raw_read", args: { filename: "doc-a.txt" } },
+        { tool: "raw_read", args: { filename: "doc-b.txt" } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(2);
+    expect(parsed.results[0].result.content).toBe("Alpha doc");
+    expect(parsed.results[1].result.content).toBe("Beta doc");
+  });
+
+  it("batch adds multiple raw files", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "raw_add", args: { filename: "file1.txt", content: "content 1" } },
+        { tool: "raw_add", args: { filename: "file2.txt", content: "content 2" } },
+        { tool: "raw_add", args: { filename: "file3.txt", content: "content 3" } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(3);
+    expect(parsed.results.every((r: any) => r.result.ok)).toBe(true);
+    expect(wiki.rawList()).toHaveLength(3);
+  });
+
+  it("batch deletes multiple wiki pages", async () => {
+    const wiki = freshWiki();
+    wiki.write("del-a.md", "---\ntitle: A\n---\nA");
+    wiki.write("del-b.md", "---\ntitle: B\n---\nB");
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_delete", args: { page: "del-a.md" } },
+        { tool: "wiki_delete", args: { page: "del-b.md" } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].result.ok).toBe(true);
+    expect(parsed.results[1].result.ok).toBe(true);
+    expect(wiki.read("del-a.md")).toBeNull();
+    expect(wiki.read("del-b.md")).toBeNull();
+  });
+
+  // ── Edge cases ───────────────────────────────────────────────
+
+  it("rejects empty operations array", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "batch", { operations: [] })
+    ).rejects.toThrow(/non-empty/);
+  });
+
+  it("rejects nested batch calls", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "batch", args: { operations: [{ tool: "wiki_list" }] } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].error).toMatch(/nest/i);
+  });
+
+  it("preserves inline image data in batch responses", async () => {
+    const wiki = freshWiki();
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const srcPath = join(TEST_ROOT, "batch-img.png");
+    writeFileSync(srcPath, pngBytes);
+
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "raw_add", args: { filename: "img.png", source_path: srcPath } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    // Result should be the full ContentBlock[] with image data preserved
+    const blocks = parsed.results[0].result as any[];
+    expect(Array.isArray(blocks)).toBe(true);
+    const imgBlock = blocks.find((b: any) => b.type === "image");
+    expect(imgBlock).toBeDefined();
+    expect(imgBlock.data).toBe(pngBytes.toString("base64"));
+    expect(imgBlock.mimeType).toBe("image/png");
+  });
+
+  it("does not allow external callers to skip rebuild via args", async () => {
+    const wiki = freshWiki();
+    // Even if a caller passes _skipRebuild in args, it should be ignored
+    await handleTool(wiki, "wiki_write", {
+      page: "sneaky.md",
+      content: "---\ntitle: Sneaky\ntype: note\n---\nBody.",
+      _skipRebuild: true,
+    });
+    // Index should still have been rebuilt (rebuildIndex checks opts, not args)
+    const idx = readFileSync(join(wiki.config.wikiDir, "index.md"), "utf-8");
+    expect(idx).toContain("sneaky");
+  });
+
+  it("rejects batch exceeding max operations limit", async () => {
+    const wiki = freshWiki();
+    const ops = Array.from({ length: 51 }, (_, i) => ({
+      tool: "wiki_list",
+    }));
+    await expect(
+      handleTool(wiki, "batch", { operations: ops })
+    ).rejects.toThrow(/limit/i);
+  });
+
+  it("deduplicates wiki_rebuild within batch", async () => {
+    const wiki = freshWiki();
+    wiki.write("page-a.md", "---\ntitle: A\ntype: note\n---\nA.");
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_write", args: { page: "page-b.md", content: "---\ntitle: B\ntype: note\n---\nB." } },
+        { tool: "wiki_rebuild" },
+        { tool: "wiki_write", args: { page: "page-c.md", content: "---\ntitle: C\ntype: note\n---\nC." } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    // wiki_rebuild should be deferred, not executed inline
+    expect(parsed.results[1].result.deferred).toBeTruthy();
+    // All pages should be in the index (rebuilt once at end)
+    const idx = readFileSync(join(wiki.config.wikiDir, "index.md"), "utf-8");
+    expect(idx).toContain("page-b");
+    expect(idx).toContain("page-c");
+    // Timeline should also be rebuilt since wiki_rebuild was in the batch
+    expect(existsSync(join(wiki.config.wikiDir, "timeline.md"))).toBe(true);
+  });
+
+  it("handles ops with no args", async () => {
+    const wiki = freshWiki();
+    wiki.write("p.md", "---\ntitle: P\ntype: note\n---\nP.");
+    const result = await handleTool(wiki, "batch", {
+      operations: [{ tool: "wiki_list" }],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].result.count).toBeGreaterThan(0);
+  });
+});
+
+describe("batch vs individual: request count comparison", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("batch uses 1 handleTool call instead of N for reads", async () => {
+    const wiki = freshWiki();
+    const N = 5;
+    for (let i = 0; i < N; i++) {
+      wiki.write(`note-${i}.md`, `---\ntitle: Note ${i}\ntype: note\n---\nContent ${i}.`);
+    }
+
+    // Approach A: N individual calls
+    let individualCalls = 0;
+    for (let i = 0; i < N; i++) {
+      await handleTool(wiki, "wiki_read", { page: `note-${i}.md` });
+      individualCalls++;
+    }
+
+    // Approach B: 1 batch call
+    let batchCalls = 0;
+    const result = await handleTool(wiki, "batch", {
+      operations: Array.from({ length: N }, (_, i) => ({ tool: "wiki_read", args: { page: `note-${i}.md` } })),
+    });
+    batchCalls++;
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(N);
+
+    // N individual → 1 batch = saves N-1 requests
+    expect(individualCalls - batchCalls).toBe(N - 1);
+  });
+
+  it("batch uses 1 handleTool call instead of N for writes", async () => {
+    const wiki = freshWiki();
+    const N = 5;
+
+    let individualCalls = 0;
+    for (let i = 0; i < N; i++) {
+      await handleTool(wiki, "wiki_write", {
+        page: `ind-${i}.md`,
+        content: `---\ntitle: Ind ${i}\ntype: note\n---\nBody ${i}.`,
+      });
+      individualCalls++;
+    }
+
+    let batchCalls = 0;
+    const result = await handleTool(wiki, "batch", {
+      operations: Array.from({ length: N }, (_, i) => ({
+        tool: "wiki_write",
+        args: { page: `bat-${i}.md`, content: `---\ntitle: Bat ${i}\ntype: note\n---\nBody ${i}.` },
+      })),
+    });
+    batchCalls++;
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results.filter((r: any) => r.result?.ok).length).toBe(N);
+
+    expect(individualCalls - batchCalls).toBe(N - 1);
+  });
+
+  it("batch returns same content as individual reads", async () => {
+    const wiki = freshWiki();
+    wiki.write("cmp-a.md", "---\ntitle: A\ntype: note\n---\nAlpha content.");
+    wiki.write("cmp-b.md", "---\ntitle: B\ntype: note\n---\nBeta content.");
+
+    const readA = await handleTool(wiki, "wiki_read", { page: "cmp-a.md" });
+    const readB = await handleTool(wiki, "wiki_read", { page: "cmp-b.md" });
+
+    const batchResult = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_read", args: { page: "cmp-a.md" } },
+        { tool: "wiki_read", args: { page: "cmp-b.md" } },
+      ],
+    });
+    const parsed = JSON.parse(batchResult as string);
+
+    expect(JSON.stringify(parsed.results[0].result)).toContain("Alpha content");
+    expect(JSON.stringify(parsed.results[1].result)).toContain("Beta content");
+    expect((readA as string)).toContain("Alpha content");
+    expect((readB as string)).toContain("Beta content");
+  });
+
+  it("batch mixes raw_read + raw_add: saves N-1 requests", async () => {
+    const wiki = freshWiki();
+    const N = 4;
+
+    // Individual: N calls
+    let individualCalls = 0;
+    for (let i = 0; i < N; i++) {
+      await handleTool(wiki, "raw_add", { filename: `ind-${i}.txt`, content: `data ${i}` });
+      individualCalls++;
+    }
+
+    // Batch: 1 call
+    let batchCalls = 0;
+    const result = await handleTool(wiki, "batch", {
+      operations: Array.from({ length: N }, (_, i) => ({
+        tool: "raw_add",
+        args: { filename: `bat-${i}.txt`, content: `data ${i}` },
+      })),
+    });
+    batchCalls++;
+    expect(JSON.parse(result as string).count).toBe(N);
+    expect(individualCalls - batchCalls).toBe(N - 1);
+  });
+});
+
 describe("splitSections", () => {
   it("splits by headings", () => {
     const md = "---\ntitle: X\n---\n## Intro\nHello.\n## Details\nMore info.";
@@ -269,6 +627,269 @@ describe("server tool: wiki_search", () => {
     expect(results.length).toBeGreaterThan(0);
     expect(results[0]!.path).toBe("search-target.md");
   });
+
+  it("returns snippets only when include_content is false", async () => {
+    const wiki = freshWiki();
+    wiki.write("page.md", "---\ntitle: Test\ntype: note\n---\n## Overview\nDetailed content here about algorithms.");
+    const result = await handleTool(wiki, "wiki_search", { query: "algorithms" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].snippet).toBeDefined();
+    expect(parsed.results[0].content).toBeUndefined();
+  });
+
+  it("includes page content when include_content is true", async () => {
+    const wiki = freshWiki();
+    wiki.write("page.md", "---\ntitle: Test\ntype: note\n---\n## Overview\nDetailed content here about algorithms.");
+    const result = await handleTool(wiki, "wiki_search", { query: "algorithms", include_content: true });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].content).toContain("Detailed content here about algorithms");
+  });
+
+  it("returns matched section content when include_content is true", async () => {
+    const wiki = freshWiki();
+    const content = [
+      "---", "title: Guide", "type: how-to", "---",
+      "## Setup", "Install the package.",
+      "## Configuration", "Set the API key for algorithms.",
+      "## Usage", "Import and call the function.",
+    ].join("\n");
+    wiki.write("guide.md", content);
+    const result = await handleTool(wiki, "wiki_search", { query: "algorithms", include_content: true });
+    const parsed = JSON.parse(result as string);
+    const hit = parsed.results.find((r: any) => r.path === "guide.md");
+    expect(hit).toBeDefined();
+    // Should return section content, not the whole page
+    expect(hit.content).toContain("API key");
+    expect(hit.content).not.toContain("Import and call");
+  });
+
+  it("truncates large sections at 200 lines with metadata", async () => {
+    const wiki = freshWiki();
+    const longSection = Array.from({ length: 300 }, (_, i) => `Algorithm line ${i + 1}`).join("\n");
+    const content = `---\ntitle: Big\ntype: note\n---\n## Algorithms\n${longSection}\n## Other\nEnd.`;
+    wiki.write("big-section.md", content);
+    const result = await handleTool(wiki, "wiki_search", { query: "Algorithm", include_content: true });
+    const parsed = JSON.parse(result as string);
+    const hit = parsed.results.find((r: any) => r.path === "big-section.md");
+    expect(hit).toBeDefined();
+    expect(hit.truncated).toBe(true);
+    expect(hit.total_lines).toBeGreaterThan(200);
+    expect(hit.content.split("\n").length).toBe(200);
+    expect(hit.content).not.toContain("End.");
+  });
+
+  it("eliminates the need for follow-up wiki_read (1 request instead of 2)", async () => {
+    const wiki = freshWiki();
+    wiki.write("doc-a.md", "---\ntitle: Alpha\ntype: note\n---\nAlpha details about neural networks.");
+    wiki.write("doc-b.md", "---\ntitle: Beta\ntype: note\n---\nBeta details about neural networks.");
+
+    // Without include_content: need search + batch read = 2 requests
+    let calls = 0;
+    await handleTool(wiki, "wiki_search", { query: "neural networks" });
+    calls++;
+    await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_read", args: { page: "doc-a.md" } },
+        { tool: "wiki_read", args: { page: "doc-b.md" } },
+      ],
+    });
+    calls++;
+    expect(calls).toBe(2);
+
+    // With include_content: 1 request
+    let optimizedCalls = 0;
+    const result = await handleTool(wiki, "wiki_search", { query: "neural networks", include_content: true });
+    optimizedCalls++;
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results.length).toBe(2);
+    expect(parsed.results.every((r: any) => r.content !== null)).toBe(true);
+    expect(optimizedCalls).toBe(1);
+
+    // Saved 1 request
+    expect(calls - optimizedCalls).toBe(1);
+  });
+});
+
+describe("server tool: wiki_search_read", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("returns search results and page content for top results", async () => {
+    const wiki = freshWiki();
+    wiki.write("page-a.md", "---\ntitle: A\ntype: note\n---\nAlpha algorithms.");
+    wiki.write("page-b.md", "---\ntitle: B\ntype: note\n---\nBeta algorithms.");
+    wiki.write("page-c.md", "---\ntitle: C\ntype: note\n---\nGamma algorithms.");
+    const result = await handleTool(wiki, "wiki_search_read", { query: "algorithms", readTopN: 2 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(3);
+    expect(parsed.pages.length).toBe(2);
+    expect(parsed.pagesRead).toBe(2);
+    expect(parsed.nextReads.length).toBe(1);
+    expect(parsed.pages.every((p: any) => p.content !== null)).toBe(true);
+  });
+
+  it("deduplicates multiple hits on same page", async () => {
+    const wiki = freshWiki();
+    wiki.write("multi.md", "---\ntitle: Multi\ntype: note\n---\n## Intro\nalgorithm overview\n## Details\nalgorithm details\n## Summary\nalgorithm summary");
+    const result = await handleTool(wiki, "wiki_search_read", { query: "algorithm", readTopN: 5 });
+    const parsed = JSON.parse(result as string);
+    // Multiple search hits but only 1 unique page → pages should have 1 entry
+    expect(parsed.pages.length).toBe(1);
+    expect(parsed.pages[0].path).toBe("multi.md");
+  });
+
+  it("readTopN defaults to 3", async () => {
+    const wiki = freshWiki();
+    for (let i = 0; i < 5; i++) {
+      wiki.write(`note-${i}.md`, `---\ntitle: Note ${i}\ntype: note\n---\nKeyword${i} searchable.`);
+    }
+    const result = await handleTool(wiki, "wiki_search_read", { query: "searchable" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages.length).toBe(3);
+    expect(parsed.nextReads.length).toBe(2);
+  });
+
+  it("section filter reads only matched section", async () => {
+    const wiki = freshWiki();
+    wiki.write("guide-a.md", "---\ntitle: Guide A\ntype: how-to\n---\n## Setup\nInstall step A.\n## Usage\nRun it A.");
+    wiki.write("guide-b.md", "---\ntitle: Guide B\ntype: how-to\n---\n## Setup\nInstall step B.\n## Usage\nRun it B.");
+    const result = await handleTool(wiki, "wiki_search_read", {
+      query: "Install",
+      readTopN: 2,
+      section: "Setup",
+    });
+    const parsed = JSON.parse(result as string);
+    for (const page of parsed.pages) {
+      if (page.content) {
+        expect(page.content).toContain("Install");
+        expect(page.content).not.toContain("Run it");
+      }
+    }
+  });
+
+  it("section not found returns null content with toc", async () => {
+    const wiki = freshWiki();
+    wiki.write("has-it.md", "---\ntitle: Has\ntype: note\n---\n## API\nEndpoint details.\n## Other\nStuff.");
+    wiki.write("missing-it.md", "---\ntitle: Missing\ntype: note\n---\n## Overview\nGeneral info about API.");
+    const result = await handleTool(wiki, "wiki_search_read", {
+      query: "API",
+      readTopN: 2,
+      section: "API",
+    });
+    const parsed = JSON.parse(result as string);
+    const hasIt = parsed.pages.find((p: any) => p.path === "has-it.md");
+    const missingIt = parsed.pages.find((p: any) => p.path === "missing-it.md");
+    expect(hasIt.content).toContain("Endpoint");
+    expect(missingIt.content).toBeNull();
+    expect(missingIt.error).toMatch(/not found/i);
+    expect(missingIt.toc).toBeTruthy();
+  });
+
+  it("truncates pages at perPageLimit lines", async () => {
+    const wiki = freshWiki();
+    const body = Array.from({ length: 300 }, (_, i) => `Searchable line ${i}`).join("\n");
+    wiki.write("big.md", `---\ntitle: Big\ntype: note\n---\n${body}`);
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Searchable", perPageLimit: 100 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages[0].truncated).toBe(true);
+    expect(parsed.pages[0].total_lines).toBeGreaterThan(100);
+    expect(parsed.pages[0].content.split("\n").length).toBe(100);
+  });
+
+  it("includeToc adds TOC to truncated pages", async () => {
+    const wiki = freshWiki();
+    const body = Array.from({ length: 300 }, (_, i) => `Searchable line ${i}`).join("\n");
+    wiki.write("toc-page.md", `---\ntitle: Toc\ntype: note\n---\n## First\n${body}\n## Second\nMore.`);
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Searchable", includeToc: true });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages[0].truncated).toBe(true);
+    expect(parsed.pages[0].toc).toContain("## First");
+    expect(parsed.pages[0].toc).toContain("## Second");
+  });
+
+  it("includeToc=false omits TOC even when truncated", async () => {
+    const wiki = freshWiki();
+    const body = Array.from({ length: 300 }, (_, i) => `Searchable line ${i}`).join("\n");
+    wiki.write("no-toc.md", `---\ntitle: NoToc\ntype: note\n---\n## Heading\n${body}`);
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Searchable" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages[0].truncated).toBe(true);
+    expect(parsed.pages[0].toc).toBeUndefined();
+  });
+
+  it("handles deleted page gracefully", async () => {
+    const wiki = freshWiki();
+    wiki.write("alive.md", "---\ntitle: Alive\ntype: note\n---\nKeyword here.");
+    wiki.write("doomed.md", "---\ntitle: Doomed\ntype: note\n---\nKeyword there.");
+    // Search first to index both, then delete one
+    wiki.search("Keyword");
+    rmSync(join(wiki.config.wikiDir, "doomed.md"));
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Keyword", readTopN: 5 });
+    const parsed = JSON.parse(result as string);
+    const alive = parsed.pages.find((p: any) => p.path === "alive.md");
+    const doomed = parsed.pages.find((p: any) => p.path === "doomed.md");
+    expect(alive.content).toContain("Keyword");
+    expect(doomed.content).toBeNull();
+    expect(doomed.error).toBeTruthy();
+  });
+
+  it("no results returns empty arrays", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_search_read", { query: "zzzznonexistent" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results).toEqual([]);
+    expect(parsed.pages).toEqual([]);
+    expect(parsed.nextReads).toEqual([]);
+    expect(parsed.count).toBe(0);
+    expect(parsed.pagesRead).toBe(0);
+  });
+
+  it("readTopN capped at 10", async () => {
+    const wiki = freshWiki();
+    for (let i = 0; i < 12; i++) {
+      wiki.write(`p-${i}.md`, `---\ntitle: P${i}\ntype: note\n---\nFindable content.`);
+    }
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Findable", readTopN: 99, limit: 12 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages.length).toBeLessThanOrEqual(10);
+  });
+
+  it("perPageLimit capped at 500", async () => {
+    const wiki = freshWiki();
+    const body = Array.from({ length: 600 }, (_, i) => `Searchable line ${i}`).join("\n");
+    wiki.write("huge.md", `---\ntitle: Huge\ntype: note\n---\n${body}`);
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Searchable", perPageLimit: 9999 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages[0].content.split("\n").length).toBeLessThanOrEqual(500);
+  });
+
+  it("eliminates 2-request search+batch workflow", async () => {
+    const wiki = freshWiki();
+    wiki.write("doc-x.md", "---\ntitle: X\ntype: note\n---\nNeural network details.");
+    wiki.write("doc-y.md", "---\ntitle: Y\ntype: note\n---\nNeural network training.");
+
+    // Old: 2 requests
+    let oldCalls = 0;
+    await handleTool(wiki, "wiki_search", { query: "neural network" });
+    oldCalls++;
+    await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_read", args: { page: "doc-x.md" } },
+        { tool: "wiki_read", args: { page: "doc-y.md" } },
+      ],
+    });
+    oldCalls++;
+
+    // New: 1 request
+    let newCalls = 0;
+    const result = await handleTool(wiki, "wiki_search_read", { query: "neural network", readTopN: 5 });
+    newCalls++;
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pagesRead).toBe(2);
+    expect(parsed.pages.every((p: any) => p.content !== null)).toBe(true);
+
+    expect(oldCalls - newCalls).toBe(1);
+  });
 });
 
 describe("server tool: wiki_lint", () => {
@@ -355,6 +976,404 @@ describe("server tool: wiki_rebuild_index + wiki_rebuild_timeline", () => {
     wiki.write("p1.md", "---\ntitle: P1\ntype: concept\n---\nX");
     expect(() => wiki.rebuildIndex()).not.toThrow();
     expect(() => wiki.rebuildTimeline()).not.toThrow();
+  });
+});
+
+describe("server tool: knowledge_ingest_batch", () => {
+  const SOURCE_DIR = join(TEST_ROOT, "__ingest_source__");
+
+  beforeEach(() => {
+    cleanUp();
+    mkdirSync(SOURCE_DIR, { recursive: true });
+  });
+  afterEach(cleanUp);
+
+  it("ingests a single text file", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "readme.txt"), "Hello world\nLine two\nLine three");
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "test-topic",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.matched).toBe(1);
+    expect(parsed.imported).toBe(1);
+    expect(parsed.extracted).toBe(1);
+    expect(parsed.packs).toBeGreaterThan(0);
+    expect(parsed.packPaths[0]).toContain("digest-packs/test-topic/pack-001.md");
+    // Pack file exists in raw/
+    expect(existsSync(join(wiki.config.rawDir, "digest-packs/test-topic/pack-001.md"))).toBe(true);
+  });
+
+  it("ingests a directory with multiple files", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "doc1.md"), "# Doc 1\nContent one.");
+    writeFileSync(join(SOURCE_DIR, "doc2.md"), "# Doc 2\nContent two.");
+    writeFileSync(join(SOURCE_DIR, "doc3.txt"), "Plain text three.");
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "multi",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matched).toBe(3);
+    expect(parsed.imported).toBe(3);
+    expect(parsed.extracted).toBe(3);
+    // Verify pack contains provenance headers
+    const packContent = readFileSync(join(wiki.config.rawDir, "digest-packs/multi/pack-001.md"), "utf-8");
+    expect(packContent).toContain("## raw/multi/");
+  });
+
+  it("skips already-imported files", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "exists.txt"), "Already here.");
+    // Pre-import with same raw path
+    wiki.rawAdd("skip-topic/exists.txt", { content: "Already here." });
+
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "skip-topic",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matched).toBe(1);
+    expect(parsed.skipped).toBe(1);
+    expect(parsed.imported).toBe(0);
+  });
+
+  it("filters by pattern", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "keep.md"), "# Keep\nContent.");
+    writeFileSync(join(SOURCE_DIR, "skip.txt"), "Skip this.");
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "pattern",
+      pattern: "*.md",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matched).toBe(1);
+    expect(parsed.imported).toBe(1);
+  });
+
+  it("respects maxFiles limit", async () => {
+    const wiki = freshWiki();
+    for (let i = 0; i < 10; i++) {
+      writeFileSync(join(SOURCE_DIR, `file${i}.txt`), `Content ${i}`);
+    }
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      maxFiles: 3,
+      topic: "limited",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matched).toBe(3);
+  });
+
+  it("continues on error with continueOnError", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "good.txt"), "Good content.");
+    // Create a file with .pdf extension but invalid content
+    writeFileSync(join(SOURCE_DIR, "bad.pdf"), "not a real pdf");
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "errors",
+      continueOnError: true,
+    });
+    const parsed = JSON.parse(result as string);
+    // Good file should be processed
+    expect(parsed.extracted).toBeGreaterThan(0);
+    // Bad file should be in errors
+    expect(parsed.failed).toBeGreaterThan(0);
+    expect(parsed.errors[0].file).toContain("bad.pdf");
+  });
+
+  it("splits into multiple packs when content exceeds packLines", async () => {
+    const wiki = freshWiki();
+    // Create files with enough content to exceed packLines
+    for (let i = 0; i < 3; i++) {
+      const body = Array.from({ length: 100 }, (_, j) => `Line ${j} of file ${i}`).join("\n");
+      writeFileSync(join(SOURCE_DIR, `big${i}.txt`), body);
+    }
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "split",
+      packLines: 120, // 3 files x 100 lines > 120, should create multiple packs
+      chunkLines: 50,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.packs).toBeGreaterThan(1);
+    expect(parsed.packPaths.length).toBe(parsed.packs);
+  });
+
+  it("cleans stale packs from previous runs", async () => {
+    const wiki = freshWiki();
+    // First run: create enough content for 3 packs
+    for (let i = 0; i < 3; i++) {
+      const body = Array.from({ length: 100 }, (_, j) => `Run1 file${i} line ${j}`).join("\n");
+      writeFileSync(join(SOURCE_DIR, `run1-${i}.txt`), body);
+    }
+    const result1 = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "stale",
+      packLines: 120,
+      chunkLines: 50,
+    });
+    const parsed1 = JSON.parse(result1 as string);
+    expect(parsed1.packs).toBeGreaterThanOrEqual(3);
+
+    // Clean source dir and create less content for second run
+    for (const f of ["run1-0.txt", "run1-1.txt", "run1-2.txt"]) rmSync(join(SOURCE_DIR, f));
+    writeFileSync(join(SOURCE_DIR, "run2.txt"), "Short content for run 2.");
+
+    const result2 = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "stale",
+    });
+    const parsed2 = JSON.parse(result2 as string);
+    expect(parsed2.packs).toBe(1);
+
+    // Old pack-002, pack-003 should be cleaned
+    const packsDir = join(wiki.config.rawDir, "digest-packs", "stale");
+    expect(existsSync(join(packsDir, "pack-001.md"))).toBe(true);
+    expect(existsSync(join(packsDir, "pack-002.md"))).toBe(false);
+    expect(existsSync(join(packsDir, "pack-003.md"))).toBe(false);
+  });
+
+  it("clamps chunkLines to packLines so no pack exceeds limit", async () => {
+    const wiki = freshWiki();
+    // 200 lines of content, packLines=80, chunkLines=200 (would exceed pack)
+    const body = Array.from({ length: 200 }, (_, i) => `Line ${i}`).join("\n");
+    writeFileSync(join(SOURCE_DIR, "big.txt"), body);
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "clamp",
+      packLines: 80,
+      chunkLines: 200, // should be clamped to 80
+    });
+    const parsed = JSON.parse(result as string);
+    // With chunkLines clamped to 80, each chunk ≤ 80 lines, each pack ≤ 80 lines
+    // 200 lines / 80 = 3 chunks → at least 3 packs
+    expect(parsed.packs).toBeGreaterThanOrEqual(3);
+    // Verify no pack exceeds packLines (80) by much
+    for (const packPath of parsed.packPaths) {
+      const rawPath = packPath.replace(/^raw\//, "");
+      const content = readFileSync(join(wiki.config.rawDir, rawPath), "utf-8");
+      // Pack includes frontmatter + headers, so body lines should be ≤ chunkLines
+      const bodyLines = content.split("\n").filter((l: string) => !l.startsWith("---") && !l.startsWith("title:") && !l.startsWith("topic:") && !l.startsWith("sources:") && !l.startsWith("totalChunks:"));
+      // Each pack's content portion (excluding frontmatter/headers) should not vastly exceed packLines
+      expect(bodyLines.length).toBeLessThan(packPath === parsed.packPaths[0] ? 120 : 120);
+    }
+  });
+
+  it("ingests HTML with provenance", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "page.html"), "<html><body><p>Hello HTML</p></body></html>");
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "html-test",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.extracted).toBe(1);
+    const packContent = readFileSync(join(wiki.config.rawDir, "digest-packs/html-test/pack-001.md"), "utf-8");
+    expect(packContent).toContain("Hello HTML");
+    expect(packContent).toContain("## raw/html-test/page.html");
+  });
+
+  it("rejects topic with path traversal", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "ok.txt"), "content");
+    await expect(
+      handleTool(wiki, "knowledge_ingest_batch", {
+        source_path: SOURCE_DIR,
+        topic: "../../wiki",
+      })
+    ).rejects.toThrow(/invalid topic/i);
+  });
+
+  it("sanitizes topic to safe slug", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "ok.txt"), "content");
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "my topic (v2)",
+    });
+    const parsed = JSON.parse(result as string);
+    // Spaces and parens should be replaced with hyphens
+    expect(parsed.packPaths[0]).toMatch(/my-topic--v2-/);
+    expect(parsed.packPaths[0]).not.toContain(" ");
+    expect(parsed.packPaths[0]).not.toContain("(");
+  });
+});
+
+describe("server tool: knowledge_digest_write", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("writes a single digest page with provenance", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [{
+        page: "summary-transformers.md",
+        title: "Transformer Architecture Summary",
+        body: "# Transformer Architecture\n\nAttention is all you need.\n\n## Key Concepts\n\nSelf-attention, multi-head attention.",
+        type: "summary",
+        tags: ["ai", "transformers"],
+        sources: ["raw/paper.pdf"],
+        sourcePacks: ["raw/digest-packs/ai/pack-001.md"],
+      }],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.written).toBe(1);
+    expect(parsed.results[0].ok).toBe(true);
+
+    // Verify the page exists and has correct frontmatter
+    const page = wiki.read(parsed.results[0].page as string);
+    expect(page).not.toBeNull();
+    expect(page!.title).toBe("Transformer Architecture Summary");
+    expect(page!.type).toBe("summary");
+    expect(page!.tags).toContain("ai");
+
+    // Read raw content to check provenance fields
+    const rawContent = readFileSync(join(wiki.config.wikiDir, parsed.results[0].page as string), "utf-8");
+    expect(rawContent).toContain("raw/paper.pdf");
+    expect(rawContent).toContain("raw/digest-packs/ai/pack-001.md");
+  });
+
+  it("writes multiple pages with one rebuild", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [
+        { page: "concept-a.md", title: "Concept A", body: "Body A." },
+        { page: "concept-b.md", title: "Concept B", body: "Body B." },
+        { page: "concept-c.md", title: "Concept C", body: "Body C." },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.written).toBe(3);
+    expect(parsed.count).toBe(3);
+
+    // All pages should be in the index (rebuilt once at end)
+    const idx = readFileSync(join(wiki.config.wikiDir, "index.md"), "utf-8");
+    expect(idx).toContain("concept-a");
+    expect(idx).toContain("concept-b");
+    expect(idx).toContain("concept-c");
+  });
+
+  it("auto-classifies when type is omitted", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [{
+        page: "guide.md",
+        title: "How to Install",
+        body: "Step 1: Download. Step 2: Install. Step 3: Configure. Step 4: Run.",
+      }],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].autoClassified.type).toBe("how-to");
+  });
+
+  it("auto-routes to topic subdirectory", async () => {
+    const wiki = freshWiki();
+    // Create a topic directory first
+    wiki.write("ai/concept-existing.md", "---\ntitle: Existing\ntype: concept\ntopic: ai\n---\nExisting.");
+    wiki.rebuildIndex();
+
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [{
+        page: "concept-new.md",
+        title: "New AI Concept",
+        body: "Something new about AI.",
+        topic: "ai",
+      }],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].routed).toBe(true);
+    expect(parsed.results[0].page).toContain("ai/");
+  });
+
+  it("continues on individual write errors", async () => {
+    const wiki = freshWiki();
+    wiki.write("lang/js/concept-js.md", "---\ntitle: JS\ntype: concept\n---\nJS.");
+    wiki.rebuildIndex();
+
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [
+        { page: "ok-page.md", title: "OK", body: "Fine." },
+        { page: "lang/js/index.md", title: "Bad", body: "Reserved." },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.written).toBe(1);
+    expect(parsed.results[0].ok).toBe(true);
+    expect(parsed.results[1].ok).toBe(false);
+    expect(parsed.results[1].error).toMatch(/reserved/i);
+  });
+
+  it("rejects topic with path traversal", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [{
+        page: "evil.md",
+        title: "Evil",
+        body: "Content.",
+        topic: "../../etc",
+      }],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].ok).toBe(false);
+    expect(parsed.results[0].error).toMatch(/invalid topic/i);
+  });
+
+  it("rejects empty pages array", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "knowledge_digest_write", { pages: [] })
+    ).rejects.toThrow(/non-empty/);
+  });
+
+  it("handles malformed page items without crashing the batch", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [
+        null,
+        { page: "ok.md", title: "OK", body: "Fine." },
+        { page: 123, title: "Bad", body: "Missing string page." },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(3);
+    expect(parsed.written).toBe(1);
+    // Malformed items get per-item errors, not a whole-tool crash
+    expect(parsed.results[0].ok).toBe(false);
+    expect(parsed.results[0].page).toBe("(item 0)");
+    expect(parsed.results[1].ok).toBe(true);
+    expect(parsed.results[2].ok).toBe(false);
+    expect(parsed.results[2].page).toBe("(item 2)");
+  });
+
+  it("rejects pages exceeding limit", async () => {
+    const wiki = freshWiki();
+    const pages = Array.from({ length: 101 }, (_, i) => ({
+      page: `p${i}.md`, title: `P${i}`, body: `Body ${i}`,
+    }));
+    await expect(
+      handleTool(wiki, "knowledge_digest_write", { pages })
+    ).rejects.toThrow(/limit/i);
+  });
+
+  it("handles YAML special characters in title safely", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [{
+        page: "special.md",
+        title: 'Title with: colon, "quotes", and #hash',
+        body: "Body content.",
+      }],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.written).toBe(1);
+    const page = wiki.read(parsed.results[0].page as string);
+    expect(page).not.toBeNull();
+    expect(page!.title).toBe('Title with: colon, "quotes", and #hash');
   });
 });
 

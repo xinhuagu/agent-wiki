@@ -15,9 +15,11 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { Wiki, splitSections, buildToc, findSectionByHeading } from "./wiki.js";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { join, resolve, basename, extname } from "node:path";
+import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob, safePath } from "./wiki.js";
+import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
+import matter from "gray-matter";
 import { VERSION } from "./version.js";
 import { RequestQueue } from "./queue.js";
 import { registerPlugin, getPluginForFile, listPlugins, summarizeModel } from "./code-analysis.js";
@@ -319,7 +321,9 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "wiki_search",
         description:
-          "Full-text keyword search across all wiki pages. Returns paths, scores, and snippets sorted by relevance.",
+          "Full-text keyword search across all wiki pages. Returns paths, scores, and snippets sorted by relevance. " +
+          "Set include_content=true for simple inline content. For advanced search+read with deduplication, " +
+          "readTopN control, and per-page limits, use wiki_search_read instead.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -330,6 +334,48 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             limit: {
               type: "number",
               description: "Max results (default: 10)",
+            },
+            include_content: {
+              type: "boolean",
+              description: "If true, include page content in results. When a section matched, returns that section; otherwise returns first 200 lines. Saves a follow-up batch read. Default: false.",
+            },
+          },
+          required: ["query"],
+        },
+      },
+      {
+        name: "wiki_search_read",
+        description:
+          "Search wiki pages and read top results in a single call. " +
+          "Combines wiki_search + wiki_read with deduplication — multiple search hits on the same page read it only once. " +
+          "Returns search metadata (results) separately from page content (pages). " +
+          "Remaining unread result paths are listed in nextReads for follow-up if needed.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            query: {
+              type: "string",
+              description: "Search query (keywords)",
+            },
+            limit: {
+              type: "number",
+              description: "Max search results (default: 10)",
+            },
+            readTopN: {
+              type: "number",
+              description: "How many unique top-scoring pages to read content for (default: 3, max: 10). Counts unique pages, not search results.",
+            },
+            section: {
+              type: "string",
+              description: "Section heading filter applied to all page reads (e.g. '## Installation'). Case-insensitive partial match. If omitted, reads full page content.",
+            },
+            perPageLimit: {
+              type: "number",
+              description: "Max lines per page (default: 200, max: 500). Pages exceeding this are truncated with metadata.",
+            },
+            includeToc: {
+              type: "boolean",
+              description: "Include table of contents for truncated pages (default: false).",
             },
           },
           required: ["query"],
@@ -386,6 +432,150 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       // wiki_synthesize removed — agent can call wiki_read on multiple pages directly
 
       // ═══════════════════════════════════════════════════════
+      //  BATCH — Combine multiple tool calls into one request
+      // ═══════════════════════════════════════════════════════
+      {
+        name: "batch",
+        description:
+          "Execute multiple tool calls in a single request. Reduces tool-call count for LLM subscriptions " +
+          "that bill per-request (e.g. GitHub Copilot). Supports ANY combination of tools — " +
+          "e.g. read 5 wiki pages, write 3 pages, add 2 raw files, search, all in one call. " +
+          "Wiki index rebuild is automatically deduplicated (runs once at the end, not per-write). " +
+          "Each operation is independent — one failure does not abort the batch. Nested batch calls are not allowed.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            operations: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  tool: {
+                    type: "string",
+                    description: "Tool name (e.g. 'wiki_read', 'wiki_write', 'raw_add', 'raw_read', 'wiki_search')",
+                  },
+                  args: {
+                    type: "object",
+                    description: "Tool arguments — same as calling the tool individually",
+                  },
+                },
+                required: ["tool"],
+              },
+              description: "Array of operations to execute sequentially",
+            },
+          },
+          required: ["operations"],
+        },
+      },
+
+      // ═══════════════════════════════════════════════════════
+      //  KNOWLEDGE INGESTION — Batch import, extract, chunk, pack
+      // ═══════════════════════════════════════════════════════
+      {
+        name: "knowledge_ingest_batch",
+        description:
+          "Batch import, extract, chunk, and pack source documents into digest packs. " +
+          "Scans a directory (or single file), imports to raw/, extracts text with structural provenance " +
+          "(per-page PDF, per-sheet XLSX, per-slide PPTX), chunks into fixed-line segments, then packs " +
+          "into markdown digest packs under raw/digest-packs/{topic}/. Each pack includes provenance headers. " +
+          "Files already in raw/ are skipped. Returns a compact summary with recommended next reads.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            source_path: {
+              type: "string",
+              description: "Absolute path to a directory or single file to ingest",
+            },
+            pattern: {
+              type: "string",
+              description: "Glob filter when source_path is a directory (e.g. '*.pdf', '*.{xlsx,docx}')",
+            },
+            maxFiles: {
+              type: "number",
+              description: "Maximum files to process (default: 100, max: 1000)",
+            },
+            topic: {
+              type: "string",
+              description: "Topic name for organizing digest packs (default: 'general')",
+            },
+            chunkLines: {
+              type: "number",
+              description: "Maximum lines per chunk (default: 100)",
+            },
+            packLines: {
+              type: "number",
+              description: "Maximum lines per digest pack (default: 500)",
+            },
+            continueOnError: {
+              type: "boolean",
+              description: "Continue processing on individual file errors (default: true)",
+            },
+          },
+          required: ["source_path"],
+        },
+      },
+
+      {
+        name: "knowledge_digest_write",
+        description:
+          "Write LLM-generated digest summaries back to wiki with structured provenance. " +
+          "Creates or updates one or more wiki pages from digested content, linking back to " +
+          "source raw files and digest packs. Supports batch writes — index is rebuilt once at the end. " +
+          "Each page gets auto-classified, auto-routed, and timestamped like wiki_write.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            pages: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  page: {
+                    type: "string",
+                    description: "Page path relative to wiki/ (e.g. 'concept-transformer.md')",
+                  },
+                  title: {
+                    type: "string",
+                    description: "Page title",
+                  },
+                  body: {
+                    type: "string",
+                    description: "Markdown body content (without frontmatter — frontmatter is auto-generated)",
+                  },
+                  type: {
+                    type: "string",
+                    description: "Entity type (concept, person, event, how-to, summary, synthesis, etc.). Auto-classified if omitted.",
+                  },
+                  tags: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "Tags for categorization. Auto-classified if omitted.",
+                  },
+                  topic: {
+                    type: "string",
+                    description: "Topic subdirectory for auto-routing (e.g. 'trade-lifecycle')",
+                  },
+                  sources: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "Source raw file paths (e.g. ['raw/topic/doc.pdf', 'raw/topic/data.xlsx'])",
+                  },
+                  sourcePacks: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "Digest pack paths used to generate this page (e.g. ['raw/digest-packs/topic/pack-001.md'])",
+                  },
+                },
+                required: ["page", "title", "body"],
+              },
+              description: "Array of wiki pages to write",
+            },
+          },
+          required: ["pages"],
+        },
+      },
+
+      // ═══════════════════════════════════════════════════════
       //  CODE ANALYSIS — Parse source files into structured knowledge
       // ═══════════════════════════════════════════════════════
       {
@@ -439,12 +629,23 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
     "wiki_write", "wiki_delete", "wiki_init", "wiki_rebuild",
     "wiki_lint", // writes .lint-cache.json + log.md
     "code_parse", // writes parsed artifacts under raw/parsed/
+    "knowledge_ingest_batch", // writes to raw/ and raw/digest-packs/
+    "knowledge_digest_write", // writes to wiki/
   ]);
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
     const params = args as Record<string, unknown>;
-    const isWrite = WRITE_TOOLS.has(name);
+
+    // batch: route dynamically — write queue only if any op mutates state
+    let isWrite: boolean;
+    if (name === "batch") {
+      const ops = params.operations;
+      // Malformed args → route through read queue; handleTool will return validation error
+      isWrite = Array.isArray(ops) && ops.some((op: any) => WRITE_TOOLS.has(op?.tool));
+    } else {
+      isWrite = WRITE_TOOLS.has(name);
+    }
 
     const run = async () => {
       try {
@@ -488,10 +689,40 @@ export function tryImageBlock(filePath: string, mimeType: string): ContentBlock 
   return { type: "image", data, mimeType };
 }
 
+/** Recursively walk a directory, returning relative file paths (skips dotfiles). */
+function walkSourceDir(dir: string): string[] {
+  const result: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      result.push(...walkSourceDir(full).map(f => join(entry.name, f)));
+    } else {
+      result.push(entry.name);
+    }
+  }
+  return result.sort();
+}
+
+/** Validate and sanitize a topic string to a safe path slug. */
+function sanitizeTopic(raw: string): string {
+  if (!raw || /\.\.|^\/|^\\|\x00/.test(raw)) {
+    throw new Error(`Invalid topic: "${raw}". Must not contain "..", absolute paths, or null bytes.`);
+  }
+  return raw.replace(/[^a-zA-Z0-9_\-/]/g, "-").replace(/\/{2,}/g, "/").replace(/^\/|\/$/g, "");
+}
+
+/** Internal options — not exposed to MCP callers. */
+export interface HandleToolOpts {
+  /** When true, wiki_write/wiki_delete skip rebuildIndex (batch rebuilds once at end). */
+  skipRebuild?: boolean;
+}
+
 export async function handleTool(
   wiki: Wiki,
   name: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  opts?: HandleToolOpts,
 ): Promise<string | ContentBlock[]> {
   switch (name) {
     // ═══ RAW LAYER ═══
@@ -678,8 +909,8 @@ export async function handleTool(
         enrichedContent,
         args.source as string | undefined
       );
-      // Auto-rebuild indexes so directory index chain stays in sync
-      wiki.rebuildIndex();
+      // Auto-rebuild indexes (skipped when called from batch — batch rebuilds once at end)
+      if (!opts?.skipRebuild) wiki.rebuildIndex();
       const classification = wiki.classify(enrichedContent);
       return JSON.stringify({
         ok: true,
@@ -691,7 +922,7 @@ export async function handleTool(
 
     case "wiki_delete": {
       const existed = wiki.delete(args.page as string);
-      if (existed) wiki.rebuildIndex();
+      if (existed && !opts?.skipRebuild) wiki.rebuildIndex();
       return JSON.stringify({ ok: existed, page: args.page });
     }
 
@@ -708,11 +939,141 @@ export async function handleTool(
         args.query as string,
         (args.limit as number) ?? 10
       );
-      return JSON.stringify(
-        { results, count: results.length },
-        null,
-        2
-      );
+      if (!args.include_content) {
+        return JSON.stringify({ results, count: results.length }, null, 2);
+      }
+      // Inline page content — eliminates follow-up wiki_read calls
+      const enriched = results.map((r) => {
+        try {
+          const fullPath = join(wiki.config.wikiDir, r.path);
+          const raw = readFileSync(fullPath, "utf-8");
+          if (r.section) {
+            // Return the matched section only, capped at 200 lines
+            const sections = splitSections(raw);
+            const target = findSectionByHeading(sections, r.section);
+            if (target) {
+              const targetIdx = sections.indexOf(target);
+              const parts = [target.content];
+              for (let i = targetIdx + 1; i < sections.length; i++) {
+                const s = sections[i]!;
+                if (s.level <= target.level && s.heading !== "") break;
+                parts.push(s.content);
+              }
+              const sectionText = parts.join("\n");
+              const sectionLines = sectionText.split("\n");
+              const sectionTruncated = sectionLines.length > 200;
+              return {
+                ...r,
+                content: sectionTruncated ? sectionLines.slice(0, 200).join("\n") : sectionText,
+                ...(sectionTruncated ? { truncated: true, total_lines: sectionLines.length } : {}),
+              };
+            }
+          }
+          // No section match — return first 200 lines
+          const lines = raw.split("\n");
+          const truncated = lines.length > 200;
+          return {
+            ...r,
+            content: truncated ? lines.slice(0, 200).join("\n") : raw,
+            ...(truncated ? { truncated: true, total_lines: lines.length } : {}),
+          };
+        } catch {
+          return { ...r, content: null };
+        }
+      });
+      return JSON.stringify({ results: enriched, count: enriched.length }, null, 2);
+    }
+
+    case "wiki_search_read": {
+      const query = args.query as string;
+      const limit = (args.limit as number) ?? 10;
+      const readTopN = Math.min(Math.max(1, Math.floor((args.readTopN as number) ?? 3)), 10);
+      const sectionFilter = args.section as string | undefined;
+      const perPageLimit = Math.min(500, Math.max(1, Math.floor((args.perPageLimit as number) ?? 200)));
+      const includeToc = (args.includeToc as boolean) ?? false;
+
+      // Step 1: Search
+      const results = wiki.search(query, limit);
+
+      // Step 2: Deduplicate — preserve score order, first occurrence wins
+      const seen = new Set<string>();
+      const uniquePaths: string[] = [];
+      for (const r of results) {
+        if (!seen.has(r.path)) {
+          seen.add(r.path);
+          uniquePaths.push(r.path);
+        }
+      }
+
+      // Step 3: Split into read vs. nextReads
+      const toRead = uniquePaths.slice(0, readTopN);
+      const nextReads = uniquePaths.slice(readTopN);
+
+      // Step 4: Read each page
+      const pages: Array<Record<string, unknown>> = [];
+      for (const pagePath of toRead) {
+        try {
+          const page = wiki.read(pagePath);
+          if (!page) throw new Error(`Page not found: ${pagePath}`);
+          const fullPath = join(wiki.config.wikiDir, page.path);
+          const raw = readFileSync(fullPath, "utf-8");
+
+          if (sectionFilter) {
+            const sections = splitSections(raw);
+            const target = findSectionByHeading(sections, sectionFilter);
+            if (!target) {
+              pages.push({
+                path: pagePath,
+                content: null,
+                error: `Section "${sectionFilter}" not found`,
+                toc: buildToc(sections) || null,
+              });
+              continue;
+            }
+            const targetIdx = sections.indexOf(target);
+            const parts = [target.content];
+            for (let i = targetIdx + 1; i < sections.length; i++) {
+              const s = sections[i]!;
+              if (s.level <= target.level && s.heading !== "") break;
+              parts.push(s.content);
+            }
+            const sectionText = parts.join("\n");
+            const sectionLines = sectionText.split("\n");
+            const truncated = sectionLines.length > perPageLimit;
+            pages.push({
+              path: pagePath,
+              content: truncated ? sectionLines.slice(0, perPageLimit).join("\n") : sectionText,
+              truncated,
+              ...(truncated ? { total_lines: sectionLines.length } : {}),
+              ...(truncated && includeToc ? { toc: buildToc(sections) } : {}),
+            });
+          } else {
+            const lines = raw.split("\n");
+            const truncated = lines.length > perPageLimit;
+            pages.push({
+              path: pagePath,
+              content: truncated ? lines.slice(0, perPageLimit).join("\n") : raw,
+              truncated,
+              ...(truncated ? { total_lines: lines.length } : {}),
+              ...(truncated && includeToc ? { toc: buildToc(splitSections(raw)) } : {}),
+            });
+          }
+        } catch (err) {
+          pages.push({
+            path: pagePath,
+            content: null,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      return JSON.stringify({
+        results,
+        count: results.length,
+        pages,
+        pagesRead: pages.length,
+        nextReads,
+      }, null, 2);
     }
 
     case "wiki_lint": {
@@ -866,6 +1227,324 @@ export async function handleTool(
       const ast = plugin.parse(rawResult.content, filePath);
       const refs = plugin.traceVariable(ast, varName);
       return JSON.stringify({ variable: varName, file: filePath, references: refs }, null, 2);
+    }
+
+    // ═══ KNOWLEDGE INGESTION ═══
+
+    case "knowledge_ingest_batch": {
+      const sourcePath = resolve(args.source_path as string);
+      const pattern = args.pattern as string | undefined;
+      const maxFiles = Math.min(Math.max(1, Math.floor((args.maxFiles as number) ?? 100)), 1000);
+      const topic = sanitizeTopic((args.topic as string) ?? "general");
+      const packLinesLimit = Math.max(50, Math.floor((args.packLines as number) ?? 500));
+      const chunkLinesLimit = Math.min(Math.max(10, Math.floor((args.chunkLines as number) ?? 100)), packLinesLimit);
+      const continueOnError = (args.continueOnError as boolean) ?? true;
+
+      // Step 0: Validate source_path against allowed source directories
+      const allowed = wiki.config.allowedSourceDirs.some(
+        dir => sourcePath.startsWith(resolve(dir) + "/") || sourcePath === resolve(dir)
+      );
+      if (!allowed) {
+        throw new Error(
+          `source_path "${args.source_path}" is outside allowed directories. ` +
+          `Allowed: [${wiki.config.allowedSourceDirs.join(", ")}]. ` +
+          `Configure security.allowed_source_dirs in .agent-wiki.yaml to widen access.`
+        );
+      }
+
+      // Step 1: Scan
+      let filePaths: string[];
+      const srcStat = statSync(sourcePath);
+      if (srcStat.isDirectory()) {
+        filePaths = walkSourceDir(sourcePath);
+        if (pattern) {
+          filePaths = filePaths.filter(f => matchSimpleGlob(f, pattern));
+        }
+      } else {
+        filePaths = [basename(sourcePath)];
+      }
+      filePaths = filePaths.slice(0, maxFiles);
+
+      const matched = filePaths.length;
+      let imported = 0, skipped = 0, extracted = 0, totalChunks = 0;
+      const errors: Array<{ file: string; stage: string; error: string }> = [];
+
+      // Extractable document formats
+      const EXTRACTABLE = new Set([".pdf", ".docx", ".xlsx", ".pptx", ".html", ".htm"]);
+      const TEXT_LIKE = (mime: string) =>
+        mime.startsWith("text/") || mime === "application/json" || mime === "application/xml"
+        || mime === "application/sql" || mime === "application/x-yaml";
+
+      // Clean stale packs from previous runs of this topic (safePath prevents escape)
+      const packsDir = safePath(wiki.config.rawDir, join("digest-packs", topic));
+      if (existsSync(packsDir)) {
+        for (const f of readdirSync(packsDir)) {
+          if (f.startsWith("pack-") && f.endsWith(".md")) {
+            const p = join(packsDir, f);
+            rmSync(p, { force: true });
+            const meta = p + ".meta.yaml";
+            if (existsSync(meta)) rmSync(meta, { force: true });
+          }
+        }
+      }
+
+      // Streaming packer — flushes packs as chunks arrive, bounded memory
+      const packs: Array<{ path: string; chunks: number; sources: string[] }> = [];
+      let packNum = 1;
+      let currentPackLines = 0;
+      let currentPackChunks: ExtractionSegment[] = [];
+
+      const flushPack = () => {
+        if (currentPackChunks.length === 0) return;
+        const packSources = [...new Set(currentPackChunks.map(c => `raw/${c.source.file}`))];
+
+        let md = "---\n";
+        md += `title: "Digest Pack ${String(packNum).padStart(3, "0")}"\n`;
+        md += `topic: "${topic}"\n`;
+        md += `sources: ${JSON.stringify(packSources)}\n`;
+        md += `totalChunks: ${currentPackChunks.length}\n`;
+        md += "---\n\n";
+
+        for (const chunk of currentPackChunks) {
+          let header = `## raw/${chunk.source.file}`;
+          if (chunk.source.page !== undefined) header += ` [Page ${chunk.source.page}]`;
+          if (chunk.source.sheet) header += ` [Sheet: ${chunk.source.sheet}]`;
+          if (chunk.source.slide !== undefined) header += ` [Slide ${chunk.source.slide}]`;
+          md += `${header}\n\n${chunk.text}\n\n`;
+        }
+
+        const packPath = `digest-packs/${topic}/pack-${String(packNum).padStart(3, "0")}.md`;
+        wiki.rawAddParsedArtifact(packPath, md.trimEnd(), {
+          mimeType: "text/markdown",
+          description: `Digest pack ${packNum} for topic "${topic}"`,
+        });
+
+        packs.push({ path: packPath, chunks: currentPackChunks.length, sources: packSources });
+        packNum++;
+        currentPackChunks = [];
+        currentPackLines = 0;
+      };
+
+      const addChunkToPack = (chunk: ExtractionSegment) => {
+        const lines = chunk.text.split("\n").length;
+        if (currentPackLines + lines > packLinesLimit && currentPackChunks.length > 0) {
+          flushPack();
+        }
+        currentPackChunks.push(chunk);
+        currentPackLines += lines;
+        totalChunks++;
+      };
+
+      // Step 2-3: Import + Extract + Stream into packs
+      for (const relPath of filePaths) {
+        const rawFilename = `${topic}/${relPath}`;
+        const fullSourcePath = srcStat.isDirectory()
+          ? join(sourcePath, relPath)
+          : sourcePath;
+
+        // Import to raw/
+        try {
+          wiki.rawAdd(rawFilename, { sourcePath: fullSourcePath });
+          imported++;
+        } catch (e: any) {
+          if (e.message.includes("already exists")) {
+            skipped++;
+          } else if (continueOnError) {
+            errors.push({ file: relPath, stage: "import", error: e.message });
+            continue;
+          } else {
+            throw e;
+          }
+        }
+
+        // Extract + chunk + stream into packs
+        const ext = extname(relPath).toLowerCase();
+        const rawFullPath = join(wiki.config.rawDir, rawFilename);
+        try {
+          let segments: ExtractionSegment[];
+          if (EXTRACTABLE.has(ext)) {
+            const result = await extractDocument(rawFullPath);
+            segments = result.segments;
+          } else {
+            const mime = guessMime(relPath);
+            if (TEXT_LIKE(mime)) {
+              const content = readFileSync(rawFullPath, "utf-8");
+              segments = [{ text: content, source: { file: rawFilename } }];
+            } else {
+              continue; // Binary file — skip extraction
+            }
+          }
+
+          // Normalize file path in source coordinates
+          for (const seg of segments) {
+            seg.source.file = rawFilename;
+          }
+
+          // Chunk and stream directly into packs (bounded memory)
+          const chunked = chunkSegments(segments, chunkLinesLimit);
+          for (const chunk of chunked) {
+            addChunkToPack(chunk);
+          }
+          extracted++;
+        } catch (e: any) {
+          if (continueOnError) {
+            errors.push({ file: relPath, stage: "extract", error: e.message });
+          } else {
+            throw e;
+          }
+        }
+      }
+
+      flushPack(); // flush remaining
+
+      const nextRecommendedReads = packs.slice(0, 5).map(p => `raw/${p.path}`);
+
+      return JSON.stringify({
+        ok: true,
+        matched,
+        imported,
+        skipped,
+        extracted,
+        chunks: totalChunks,
+        packs: packs.length,
+        failed: errors.length,
+        ...(errors.length > 0 ? { errors: errors.slice(0, 10) } : {}),
+        packPaths: packs.map(p => `raw/${p.path}`),
+        nextRecommendedReads,
+      }, null, 2);
+    }
+
+    case "knowledge_digest_write": {
+      const MAX_DIGEST_PAGES = 100;
+      const items = args.pages as Array<{
+        page: string; title: string; body: string;
+        type?: string; tags?: string[]; topic?: string;
+        sources?: string[]; sourcePacks?: string[];
+      }>;
+      if (!Array.isArray(items) || items.length === 0) {
+        throw new Error("pages must be a non-empty array");
+      }
+      if (items.length > MAX_DIGEST_PAGES) {
+        throw new Error(`Too many pages: ${items.length} exceeds limit of ${MAX_DIGEST_PAGES}`);
+      }
+
+      const results: Array<Record<string, unknown>> = [];
+      for (let idx = 0; idx < items.length; idx++) {
+        const item = items[idx];
+        const pageLabel = (item && typeof item === "object" && typeof item.page === "string")
+          ? item.page : `(item ${idx})`;
+        try {
+          // Validate required fields
+          if (!item || typeof item !== "object" || typeof item.page !== "string"
+              || typeof item.title !== "string" || typeof item.body !== "string") {
+            throw new Error("Each page must have string page, title, and body fields");
+          }
+
+          const topicField = item.topic ? sanitizeTopic(item.topic) : undefined;
+
+          // Build frontmatter + body using gray-matter for safe YAML serialization
+          const fm: Record<string, unknown> = { title: item.title };
+          if (item.type) fm.type = item.type;
+          if (item.tags && item.tags.length > 0) fm.tags = item.tags;
+          if (topicField) fm.topic = topicField;
+          if (item.sources && item.sources.length > 0) fm.sources = item.sources;
+          if (item.sourcePacks && item.sourcePacks.length > 0) fm.source_packs = item.sourcePacks;
+          const content = matter.stringify("\n" + item.body, fm);
+
+          // Auto-classify if type/tags missing
+          const enrichedContent = wiki.autoClassifyContent(content);
+          // Auto-route to topic subdirectory
+          const resolvedPage = wiki.resolvePagePath(item.page, enrichedContent);
+          wiki.write(resolvedPage, enrichedContent, item.sourcePacks?.[0] ?? item.sources?.[0]);
+          const classification = wiki.classify(enrichedContent);
+
+          results.push({
+            ok: true,
+            page: resolvedPage,
+            routed: resolvedPage !== item.page,
+            autoClassified: { type: classification.type, tags: classification.tags, confidence: classification.confidence },
+          });
+        } catch (err) {
+          results.push({ ok: false, page: pageLabel, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      // Rebuild index once after all writes
+      wiki.rebuildIndex();
+
+      return JSON.stringify({
+        results,
+        count: results.length,
+        written: results.filter(r => r.ok).length,
+      }, null, 2);
+    }
+
+    // ═══ BATCH ═══
+
+    case "batch": {
+      const MAX_BATCH_OPS = 50;
+      const ops = args.operations as Array<{ tool: string; args?: Record<string, unknown> }>;
+      if (!Array.isArray(ops) || ops.length === 0) {
+        throw new Error("operations must be a non-empty array");
+      }
+      if (ops.length > MAX_BATCH_OPS) {
+        throw new Error(`Batch too large: ${ops.length} operations exceeds limit of ${MAX_BATCH_OPS}`);
+      }
+
+      // Tools whose per-call rebuildIndex should be deferred to end of batch
+      const REBUILD_TOOLS = new Set(["wiki_write", "wiki_delete"]);
+      let needsRebuild = false;
+      let needsTimeline = false;
+
+      const results: Array<Record<string, unknown>> = [];
+      for (const op of ops) {
+        if (op.tool === "batch") {
+          results.push({ tool: op.tool, error: "Cannot nest batch operations" });
+          continue;
+        }
+        // Deduplicate wiki_rebuild — defer to end-of-batch full rebuild
+        if (op.tool === "wiki_rebuild") {
+          needsRebuild = true;
+          needsTimeline = true;
+          results.push({ tool: op.tool, result: { ok: true, deferred: "merged into end-of-batch rebuild" } });
+          continue;
+        }
+        try {
+          const opOpts: HandleToolOpts = REBUILD_TOOLS.has(op.tool) ? { skipRebuild: true } : {};
+          const result = await handleTool(wiki, op.tool, op.args ?? {}, opOpts);
+
+          if (REBUILD_TOOLS.has(op.tool)) {
+            // Check if the operation actually changed something worth rebuilding for
+            if (op.tool === "wiki_write") {
+              needsRebuild = true;
+            } else if (op.tool === "wiki_delete") {
+              const parsed = JSON.parse(typeof result === "string" ? result : "{}");
+              if (parsed.ok) needsRebuild = true;
+            }
+          }
+
+          if (typeof result === "string") {
+            try {
+              results.push({ tool: op.tool, result: JSON.parse(result) });
+            } catch {
+              results.push({ tool: op.tool, result });
+            }
+          } else {
+            // ContentBlock[] — preserve full blocks including inline images
+            results.push({ tool: op.tool, result });
+          }
+        } catch (err) {
+          results.push({ tool: op.tool, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      if (needsRebuild) {
+        const pageCache = wiki.buildPageCache();
+        wiki.rebuildIndex(pageCache);
+        if (needsTimeline) wiki.rebuildTimeline(pageCache);
+      }
+
+      return JSON.stringify({ results, count: results.length }, null, 2);
     }
 
     default:

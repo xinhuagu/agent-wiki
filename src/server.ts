@@ -17,7 +17,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { Wiki } from "./wiki.js";
+import { Wiki, splitSections, buildToc, findSectionByHeading } from "./wiki.js";
 import { VERSION } from "./version.js";
 import { RequestQueue } from "./queue.js";
 import { registerPlugin, getPluginForFile, listPlugins, summarizeModel } from "./code-analysis.js";
@@ -231,13 +231,29 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "wiki_read",
         description:
-          "Read a wiki page by path. Returns frontmatter + Markdown content.",
+          "Read a wiki page by path. Returns frontmatter + Markdown content. " +
+          "RECOMMENDED WORKFLOW: (1) call without 'section' to get the TOC for large pages, " +
+          "(2) use wiki_search 'section' field to jump directly to the relevant heading, " +
+          "(3) call with 'section' to read only that part. " +
+          "Large pages without 'section' are truncated at 200 lines — check 'truncated' and 'toc' in the response.",
         inputSchema: {
           type: "object" as const,
           properties: {
             page: {
               type: "string",
               description: "Page path relative to wiki/ (e.g. 'concept-gil.md')",
+            },
+            section: {
+              type: "string",
+              description: "Heading to read (e.g. '## Installation'). Case-insensitive partial match. Returns that section and its sub-sections only. Use the 'section' field from wiki_search results to navigate directly.",
+            },
+            offset: {
+              type: "number",
+              description: "First line to return, 0-indexed (default: 0). Fallback for line-based paging when section navigation is insufficient.",
+            },
+            limit: {
+              type: "number",
+              description: "Max lines to return (default: 200, max: 500).",
             },
           },
           required: ["page"],
@@ -592,14 +608,64 @@ export async function handleTool(
     case "wiki_read": {
       const page = wiki.read(args.page as string);
       if (!page) throw new Error(`Page not found: ${args.page}`);
-      // wiki.read() already validates the path via safePath, so we
-      // reconstruct the full path from wiki.config + validated pagePath
       const fullPath = join(wiki.config.wikiDir, page.path);
+      let raw: string;
       try {
-        return readFileSync(fullPath, "utf-8");
+        raw = readFileSync(fullPath, "utf-8");
       } catch {
         throw new Error(`Page not found: ${args.page}`);
       }
+
+      // ── Section-based read ──────────────────────────────────
+      if (args.section) {
+        const sections = splitSections(raw);
+        const target = findSectionByHeading(sections, args.section as string);
+        if (!target) {
+          const toc = buildToc(sections);
+          throw new Error(
+            `Section "${args.section}" not found in ${args.page}.\nAvailable sections:\n${toc}`
+          );
+        }
+        // Include sub-sections (higher heading level) that follow immediately
+        const targetIdx = sections.indexOf(target);
+        const parts = [target.content];
+        for (let i = targetIdx + 1; i < sections.length; i++) {
+          const s = sections[i]!;
+          if (s.level <= target.level && s.heading !== "") break;
+          parts.push(s.content);
+        }
+        const content = parts.join("\n");
+        return JSON.stringify({
+          section: target.heading,
+          content,
+          total_lines: content.split("\n").length,
+        }, null, 2);
+      }
+
+      // ── Line-based read (fallback / small pages) ────────────
+      const lines = raw.split("\n");
+      const total = lines.length;
+      const DEFAULT_LIMIT = 200;
+      const MAX_LIMIT = 500;
+      const offset = Math.max(0, Math.floor((args.offset as number) ?? 0));
+      const limit = Math.min(MAX_LIMIT, Math.max(1, Math.floor((args.limit as number) ?? DEFAULT_LIMIT)));
+      const slice = lines.slice(offset, offset + limit);
+      const truncated = offset + limit < total;
+      if (!truncated && offset === 0) {
+        // Small page — return as plain text for backwards compatibility
+        return raw;
+      }
+      // Large page — include TOC so agent can navigate by section
+      const toc = buildToc(splitSections(raw));
+      return JSON.stringify({
+        content: slice.join("\n"),
+        offset,
+        lines_returned: slice.length,
+        total_lines: total,
+        truncated,
+        next_offset: truncated ? offset + limit : null,
+        toc: toc || null,
+      }, null, 2);
     }
 
     case "wiki_write": {

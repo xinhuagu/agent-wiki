@@ -171,6 +171,84 @@ export function safePath(base: string, userPath: string): string {
   return resolved;
 }
 
+// ── Markdown section utilities ────────────────────────────────────
+
+export interface MarkdownSection {
+  heading: string;  // e.g. "## Installation", or "" for frontmatter/pre-heading content
+  level: number;    // 1–6, or 0 for pre-heading content
+  content: string;  // heading line + body up to next same-or-higher heading
+}
+
+/** Split markdown into sections by headings.
+ *  Correctly skips heading-like lines inside fenced code blocks (``` or ~~~).
+ *  The leading frontmatter block (--- ... ---) is returned as the first section
+ *  with heading "" and level 0. */
+export function splitSections(markdown: string): MarkdownSection[] {
+  const lines = markdown.split("\n");
+  const sections: MarkdownSection[] = [];
+  let buf: string[] = [];
+  let currentHeading = "";
+  let currentLevel = 0;
+  let inFrontmatter = false;
+  let inCodeBlock = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+
+    // Frontmatter: first line must be exactly "---"
+    if (i === 0 && line.trim() === "---") {
+      inFrontmatter = true;
+      buf.push(line);
+      continue;
+    }
+    if (inFrontmatter) {
+      buf.push(line);
+      if (line.trim() === "---" && i > 0) inFrontmatter = false;
+      continue;
+    }
+
+    // Code fence toggle (``` or ~~~, optionally with language tag)
+    if (/^(`{3,}|~{3,})/.test(line)) {
+      inCodeBlock = !inCodeBlock;
+      buf.push(line);
+      continue;
+    }
+
+    // Only detect headings outside code blocks
+    const headingMatch = !inCodeBlock && line.match(/^(#{1,6})\s+(.*)/);
+    if (headingMatch) {
+      sections.push({ heading: currentHeading, level: currentLevel, content: buf.join("\n") });
+      buf = [line];
+      currentHeading = line.trimEnd();
+      currentLevel = headingMatch[1]!.length;
+    } else {
+      buf.push(line);
+    }
+  }
+  if (buf.length > 0) {
+    sections.push({ heading: currentHeading, level: currentLevel, content: buf.join("\n") });
+  }
+  return sections;
+}
+
+/** Build a TOC string from sections. Indented relative to the shallowest heading level. */
+export function buildToc(sections: MarkdownSection[]): string {
+  const headingSections = sections.filter(s => s.heading !== "");
+  if (headingSections.length === 0) return "";
+  const minLevel = Math.min(...headingSections.map(s => s.level));
+  return headingSections
+    .map(s => "  ".repeat(s.level - minLevel) + s.heading)
+    .join("\n");
+}
+
+/** Find a section by heading text. Case-insensitive, partial match, `##` prefix optional. */
+export function findSectionByHeading(sections: MarkdownSection[], query: string): MarkdownSection | undefined {
+  const q = query.toLowerCase().replace(/^#{1,6}\s*/, "").trim();
+  return sections.find(s =>
+    s.heading.toLowerCase().replace(/^#{1,6}\s*/, "").trim().includes(q)
+  );
+}
+
 // ── Wiki Class ────────────────────────────────────────────────────
 
 export class Wiki {

@@ -386,6 +386,43 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       // wiki_synthesize removed — agent can call wiki_read on multiple pages directly
 
       // ═══════════════════════════════════════════════════════
+      //  BATCH — Combine multiple tool calls into one request
+      // ═══════════════════════════════════════════════════════
+      {
+        name: "batch",
+        description:
+          "Execute multiple tool calls in a single request. Reduces tool-call count for LLM subscriptions " +
+          "that bill per-request (e.g. GitHub Copilot). Supports ANY combination of tools — " +
+          "e.g. read 5 wiki pages, write 3 pages, add 2 raw files, search, all in one call. " +
+          "Wiki index rebuild is automatically deduplicated (runs once at the end, not per-write). " +
+          "Each operation is independent — one failure does not abort the batch. Nested batch calls are not allowed.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            operations: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  tool: {
+                    type: "string",
+                    description: "Tool name (e.g. 'wiki_read', 'wiki_write', 'raw_add', 'raw_read', 'wiki_search')",
+                  },
+                  args: {
+                    type: "object",
+                    description: "Tool arguments — same as calling the tool individually",
+                  },
+                },
+                required: ["tool"],
+              },
+              description: "Array of operations to execute sequentially",
+            },
+          },
+          required: ["operations"],
+        },
+      },
+
+      // ═══════════════════════════════════════════════════════
       //  CODE ANALYSIS — Parse source files into structured knowledge
       // ═══════════════════════════════════════════════════════
       {
@@ -437,6 +474,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
   const WRITE_TOOLS = new Set([
     "raw_add", "raw_fetch", "raw_import_confluence", "raw_import_jira",
     "wiki_write", "wiki_delete", "wiki_init", "wiki_rebuild",
+    "batch", // may contain writes — must serialize
     "wiki_lint", // writes .lint-cache.json + log.md
     "code_parse", // writes parsed artifacts under raw/parsed/
   ]);
@@ -678,8 +716,8 @@ export async function handleTool(
         enrichedContent,
         args.source as string | undefined
       );
-      // Auto-rebuild indexes so directory index chain stays in sync
-      wiki.rebuildIndex();
+      // Auto-rebuild indexes (skipped when called from batch — batch rebuilds once at end)
+      if (!args._skipRebuild) wiki.rebuildIndex();
       const classification = wiki.classify(enrichedContent);
       return JSON.stringify({
         ok: true,
@@ -691,7 +729,7 @@ export async function handleTool(
 
     case "wiki_delete": {
       const existed = wiki.delete(args.page as string);
-      if (existed) wiki.rebuildIndex();
+      if (existed && !args._skipRebuild) wiki.rebuildIndex();
       return JSON.stringify({ ok: existed, page: args.page });
     }
 
@@ -866,6 +904,69 @@ export async function handleTool(
       const ast = plugin.parse(rawResult.content, filePath);
       const refs = plugin.traceVariable(ast, varName);
       return JSON.stringify({ variable: varName, file: filePath, references: refs }, null, 2);
+    }
+
+    // ═══ BATCH ═══
+
+    case "batch": {
+      const ops = args.operations as Array<{ tool: string; args?: Record<string, unknown> }>;
+      if (!Array.isArray(ops) || ops.length === 0) {
+        throw new Error("operations must be a non-empty array");
+      }
+
+      // Tools whose per-call rebuildIndex should be deferred to end of batch
+      const REBUILD_TOOLS = new Set(["wiki_write", "wiki_delete"]);
+      let needsRebuild = false;
+
+      const results: Array<Record<string, unknown>> = [];
+      for (const op of ops) {
+        if (op.tool === "batch") {
+          results.push({ tool: op.tool, error: "Cannot nest batch operations" });
+          continue;
+        }
+        try {
+          const opArgs: Record<string, unknown> = { ...(op.args ?? {}) };
+          if (REBUILD_TOOLS.has(op.tool)) {
+            opArgs._skipRebuild = true;
+          }
+          const result = await handleTool(wiki, op.tool, opArgs);
+
+          if (REBUILD_TOOLS.has(op.tool)) {
+            // Check if the operation actually changed something worth rebuilding for
+            if (op.tool === "wiki_write") {
+              needsRebuild = true;
+            } else if (op.tool === "wiki_delete") {
+              const parsed = JSON.parse(typeof result === "string" ? result : "{}");
+              if (parsed.ok) needsRebuild = true;
+            }
+          }
+
+          if (typeof result === "string") {
+            try {
+              results.push({ tool: op.tool, result: JSON.parse(result) });
+            } catch {
+              results.push({ tool: op.tool, result });
+            }
+          } else {
+            // ContentBlock[] — extract text blocks, note image blocks (skip large base64)
+            const parts: unknown[] = [];
+            for (const block of result) {
+              if (block.type === "text") {
+                try { parts.push(JSON.parse(block.text)); } catch { parts.push(block.text); }
+              } else {
+                parts.push({ type: block.type, mimeType: (block as any).mimeType });
+              }
+            }
+            results.push({ tool: op.tool, result: parts.length === 1 ? parts[0] : parts });
+          }
+        } catch (err) {
+          results.push({ tool: op.tool, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      if (needsRebuild) wiki.rebuildIndex();
+
+      return JSON.stringify({ results, count: results.length }, null, 2);
     }
 
     default:

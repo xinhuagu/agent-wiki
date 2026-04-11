@@ -83,6 +83,47 @@ describe("server tool: wiki_write + wiki_read", () => {
     expect(page!.title).toBe("Note");
     expect(page!.content).toContain("Test body.");
   });
+
+  it("returns plain text for small pages (< default limit)", async () => {
+    const wiki = freshWiki();
+    wiki.write("note-small.md", "---\ntitle: Small\ntype: note\n---\nJust a few lines.");
+    const result = await handleTool(wiki, "wiki_read", { page: "note-small.md" });
+    // Small page: backwards-compatible plain text, not JSON
+    expect(typeof result).toBe("string");
+    expect(result as string).toContain("Just a few lines.");
+  });
+
+  it("returns paginated JSON for large pages", async () => {
+    const wiki = freshWiki();
+    const body = Array.from({ length: 300 }, (_, i) => `Line ${i + 1}`).join("\n");
+    wiki.write("note-large.md", `---\ntitle: Large\ntype: note\n---\n${body}`);
+    const result = await handleTool(wiki, "wiki_read", { page: "note-large.md" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.total_lines).toBeGreaterThan(200);
+    expect(parsed.lines_returned).toBe(200);
+    expect(parsed.next_offset).toBe(200);
+  });
+
+  it("supports offset and limit for chunked reading", async () => {
+    const wiki = freshWiki();
+    const body = Array.from({ length: 300 }, (_, i) => `Line ${i + 1}`).join("\n");
+    wiki.write("note-large.md", `---\ntitle: Large\ntype: note\n---\n${body}`);
+    const result = await handleTool(wiki, "wiki_read", { page: "note-large.md", offset: 100, limit: 50 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.offset).toBe(100);
+    expect(parsed.lines_returned).toBe(50);
+    expect(parsed.content).toContain("Line 98"); // offset=100 → 0-indexed line 100 = "Line 98" (after 4 frontmatter lines)
+  });
+
+  it("caps limit at 500", async () => {
+    const wiki = freshWiki();
+    const body = Array.from({ length: 600 }, (_, i) => `Line ${i + 1}`).join("\n");
+    wiki.write("note-huge.md", `---\ntitle: Huge\ntype: note\n---\n${body}`);
+    const result = await handleTool(wiki, "wiki_read", { page: "note-huge.md", limit: 9999 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.lines_returned).toBe(500);
+  });
 });
 
 describe("server tool: wiki_delete", () => {

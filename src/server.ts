@@ -231,13 +231,23 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "wiki_read",
         description:
-          "Read a wiki page by path. Returns frontmatter + Markdown content.",
+          "Read a wiki page by path. Returns frontmatter + Markdown content. " +
+          "Large pages (>200 lines) are truncated by default — use 'offset' and 'limit' to page through them. " +
+          "Always check 'truncated' and 'total_lines' in the response to know if there is more content.",
         inputSchema: {
           type: "object" as const,
           properties: {
             page: {
               type: "string",
               description: "Page path relative to wiki/ (e.g. 'concept-gil.md')",
+            },
+            offset: {
+              type: "number",
+              description: "First line to return, 0-indexed (default: 0). Use to read later sections of a large page.",
+            },
+            limit: {
+              type: "number",
+              description: "Max lines to return (default: 200, max: 500). Increase for larger reads.",
             },
           },
           required: ["page"],
@@ -592,14 +602,33 @@ export async function handleTool(
     case "wiki_read": {
       const page = wiki.read(args.page as string);
       if (!page) throw new Error(`Page not found: ${args.page}`);
-      // wiki.read() already validates the path via safePath, so we
-      // reconstruct the full path from wiki.config + validated pagePath
       const fullPath = join(wiki.config.wikiDir, page.path);
+      let raw: string;
       try {
-        return readFileSync(fullPath, "utf-8");
+        raw = readFileSync(fullPath, "utf-8");
       } catch {
         throw new Error(`Page not found: ${args.page}`);
       }
+      const lines = raw.split("\n");
+      const total = lines.length;
+      const DEFAULT_LIMIT = 200;
+      const MAX_LIMIT = 500;
+      const offset = Math.max(0, Math.floor((args.offset as number) ?? 0));
+      const limit = Math.min(MAX_LIMIT, Math.max(1, Math.floor((args.limit as number) ?? DEFAULT_LIMIT)));
+      const slice = lines.slice(offset, offset + limit);
+      const truncated = offset + limit < total;
+      if (!truncated && offset === 0) {
+        // Small page — return as plain text for backwards compatibility
+        return raw;
+      }
+      return JSON.stringify({
+        content: slice.join("\n"),
+        offset,
+        lines_returned: slice.length,
+        total_lines: total,
+        truncated,
+        next_offset: truncated ? offset + limit : null,
+      }, null, 2);
     }
 
     case "wiki_write": {

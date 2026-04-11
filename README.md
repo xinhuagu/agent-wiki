@@ -60,10 +60,43 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **Contradictions** | Invisible — buried in source docs | Flagged automatically by lint |
 | **Source tracking** | Lost after retrieval | Full provenance chain (raw -> wiki) |
 
+## Batch Mode: Minimize LLM Requests
+
+Subscriptions like GitHub Copilot bill per-request, not per-token. agent-wiki includes batch and pipeline tools that **collapse multi-step workflows into single MCP requests** — fewer round-trips, fewer permission prompts, lower cost.
+
+| Workflow | Without batch | With batch | Savings |
+|----------|:---:|:---:|:---:|
+| **Import** 5 files | 5 requests | **1** | 80% |
+| **Digest** 5 sources into wiki | 10 requests | **2** | 80% |
+| **Query** search + read results | 6 requests | **1** | 83% |
+| **Ingest** 50-file directory | 50+ requests | **1** | 98% |
+
+### How it works
+
+**`batch`** — Combine any tools in one call. Reads, writes, searches, deletes — all in a single MCP request. Index rebuild is deduplicated automatically.
+
+```json
+{ "tool": "batch", "args": { "operations": [
+  { "tool": "wiki_read", "args": { "page": "concept-a.md" } },
+  { "tool": "wiki_read", "args": { "page": "concept-b.md" } },
+  { "tool": "wiki_write", "args": { "page": "new.md", "content": "..." } },
+  { "tool": "raw_add", "args": { "filename": "data.csv", "content": "..." } }
+]}}
+```
+
+**`wiki_search_read`** — Search + read top results in one call. Deduplicates pages, returns content inline with `nextReads` for follow-up.
+
+**`knowledge_ingest_batch`** — Scan a directory, import files, extract text with provenance (per-page PDF, per-sheet XLSX, per-slide PPTX), chunk, and pack into digest packs — all in one request.
+
+**`knowledge_digest_write`** — Write LLM-generated summaries back to wiki with structured provenance (`sources`, `sourcePacks`). Batch writes with one rebuild at the end.
+
 ## Features
 
 | Feature | Description |
 |---------|-------------|
+| **Batch Mode** | Generic `batch` tool + semantic pipelines — collapse multi-step workflows into single requests |
+| **Knowledge Pipelines** | `knowledge_ingest_batch` + `knowledge_digest_write` — end-to-end ingest/digest/write-back loop |
+| **Structured Extraction** | PDF (per-page), DOCX, XLSX (per-sheet), PPTX (per-slide) — segments with source provenance |
 | **Immutable Sources** | SHA-256 verified `raw/` layer — write-once, tamper-proof, full provenance |
 | **Knowledge Compilation** | Agent builds structured wiki pages from raw sources — not retrieve-and-forget |
 | **BM25 Search** | Field-weighted scoring, synonym expansion, fuzzy matching, CJK tokenization — zero LLM |
@@ -72,10 +105,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **Self-Checking Lint** | Catches contradictions, broken links, orphan pages, stale content |
 | **Atlassian Import** | One-command Confluence pages and Jira issues with full hierarchy |
 | **File Versioning** | Auto-version same-name files, query latest, list all versions |
-| **Directory Import** | Point to a folder — imports all files with optional glob filtering |
-| **Document Extraction** | PDF (with per-page access), DOCX, XLSX (multi-tab), PPTX — text extracted automatically |
 | **COBOL Code Analysis** | AST parser with variable tracing, call graph generation, and auto wiki pages |
-| **18 MCP Tools** | Full CRUD + search + lint + code analysis + health checks |
 | **Skill Install** | One-command install as native skill for Claude Code and AceClaw |
 | **Git-Native** | Plain Markdown — diffable, blameable, revertable |
 

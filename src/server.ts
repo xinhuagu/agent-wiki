@@ -514,6 +514,66 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
         },
       },
 
+      {
+        name: "knowledge_digest_write",
+        description:
+          "Write LLM-generated digest summaries back to wiki with structured provenance. " +
+          "Creates or updates one or more wiki pages from digested content, linking back to " +
+          "source raw files and digest packs. Supports batch writes — index is rebuilt once at the end. " +
+          "Each page gets auto-classified, auto-routed, and timestamped like wiki_write.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            pages: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  page: {
+                    type: "string",
+                    description: "Page path relative to wiki/ (e.g. 'concept-transformer.md')",
+                  },
+                  title: {
+                    type: "string",
+                    description: "Page title",
+                  },
+                  body: {
+                    type: "string",
+                    description: "Markdown body content (without frontmatter — frontmatter is auto-generated)",
+                  },
+                  type: {
+                    type: "string",
+                    description: "Entity type (concept, person, event, how-to, summary, synthesis, etc.). Auto-classified if omitted.",
+                  },
+                  tags: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "Tags for categorization. Auto-classified if omitted.",
+                  },
+                  topic: {
+                    type: "string",
+                    description: "Topic subdirectory for auto-routing (e.g. 'trade-lifecycle')",
+                  },
+                  sources: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "Source raw file paths (e.g. ['raw/topic/doc.pdf', 'raw/topic/data.xlsx'])",
+                  },
+                  sourcePacks: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "Digest pack paths used to generate this page (e.g. ['raw/digest-packs/topic/pack-001.md'])",
+                  },
+                },
+                required: ["page", "title", "body"],
+              },
+              description: "Array of wiki pages to write",
+            },
+          },
+          required: ["pages"],
+        },
+      },
+
       // ═══════════════════════════════════════════════════════
       //  CODE ANALYSIS — Parse source files into structured knowledge
       // ═══════════════════════════════════════════════════════
@@ -569,6 +629,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
     "wiki_lint", // writes .lint-cache.json + log.md
     "code_parse", // writes parsed artifacts under raw/parsed/
     "knowledge_ingest_batch", // writes to raw/ and raw/digest-packs/
+    "knowledge_digest_write", // writes to wiki/
   ]);
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -1346,6 +1407,67 @@ export async function handleTool(
         ...(errors.length > 0 ? { errors: errors.slice(0, 10) } : {}),
         packPaths: packs.map(p => `raw/${p.path}`),
         nextRecommendedReads,
+      }, null, 2);
+    }
+
+    case "knowledge_digest_write": {
+      const items = args.pages as Array<{
+        page: string; title: string; body: string;
+        type?: string; tags?: string[]; topic?: string;
+        sources?: string[]; sourcePacks?: string[];
+      }>;
+      if (!Array.isArray(items) || items.length === 0) {
+        throw new Error("pages must be a non-empty array");
+      }
+
+      const results: Array<Record<string, unknown>> = [];
+      for (const item of items) {
+        try {
+          // Sanitize topic if provided (same rules as knowledge_ingest_batch)
+          let topicField: string | undefined;
+          if (item.topic) {
+            if (/\.\.|^\/|^\\|\x00/.test(item.topic)) {
+              throw new Error(`Invalid topic: "${item.topic}"`);
+            }
+            topicField = item.topic.replace(/[^a-zA-Z0-9_\-/]/g, "-").replace(/\/{2,}/g, "/").replace(/^\/|\/$/g, "");
+          }
+
+          // Build frontmatter + body
+          const fmParts: string[] = ["---"];
+          fmParts.push(`title: "${item.title.replace(/"/g, '\\"')}"`);
+          if (item.type) fmParts.push(`type: ${item.type}`);
+          if (item.tags && item.tags.length > 0) fmParts.push(`tags: ${JSON.stringify(item.tags)}`);
+          if (topicField) fmParts.push(`topic: ${topicField}`);
+          if (item.sources && item.sources.length > 0) fmParts.push(`sources: ${JSON.stringify(item.sources)}`);
+          if (item.sourcePacks && item.sourcePacks.length > 0) fmParts.push(`source_packs: ${JSON.stringify(item.sourcePacks)}`);
+          fmParts.push("---");
+          const content = fmParts.join("\n") + "\n\n" + item.body;
+
+          // Auto-classify if type/tags missing
+          const enrichedContent = wiki.autoClassifyContent(content);
+          // Auto-route to topic subdirectory
+          const resolvedPage = wiki.resolvePagePath(item.page, enrichedContent);
+          wiki.write(resolvedPage, enrichedContent, item.sourcePacks?.[0] ?? item.sources?.[0]);
+          const classification = wiki.classify(enrichedContent);
+
+          results.push({
+            ok: true,
+            page: resolvedPage,
+            routed: resolvedPage !== item.page,
+            autoClassified: { type: classification.type, tags: classification.tags, confidence: classification.confidence },
+          });
+        } catch (err) {
+          results.push({ ok: false, page: item.page, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      // Rebuild index once after all writes
+      wiki.rebuildIndex();
+
+      return JSON.stringify({
+        results,
+        count: results.length,
+        written: results.filter(r => r.ok).length,
       }, null, 2);
     }
 

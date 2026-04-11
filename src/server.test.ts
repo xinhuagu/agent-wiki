@@ -1204,6 +1204,133 @@ describe("server tool: knowledge_ingest_batch", () => {
   });
 });
 
+describe("server tool: knowledge_digest_write", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("writes a single digest page with provenance", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [{
+        page: "summary-transformers.md",
+        title: "Transformer Architecture Summary",
+        body: "# Transformer Architecture\n\nAttention is all you need.\n\n## Key Concepts\n\nSelf-attention, multi-head attention.",
+        type: "summary",
+        tags: ["ai", "transformers"],
+        sources: ["raw/paper.pdf"],
+        sourcePacks: ["raw/digest-packs/ai/pack-001.md"],
+      }],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.written).toBe(1);
+    expect(parsed.results[0].ok).toBe(true);
+
+    // Verify the page exists and has correct frontmatter
+    const page = wiki.read(parsed.results[0].page as string);
+    expect(page).not.toBeNull();
+    expect(page!.title).toBe("Transformer Architecture Summary");
+    expect(page!.type).toBe("summary");
+    expect(page!.tags).toContain("ai");
+
+    // Read raw content to check provenance fields
+    const rawContent = readFileSync(join(wiki.config.wikiDir, parsed.results[0].page as string), "utf-8");
+    expect(rawContent).toContain("raw/paper.pdf");
+    expect(rawContent).toContain("raw/digest-packs/ai/pack-001.md");
+  });
+
+  it("writes multiple pages with one rebuild", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [
+        { page: "concept-a.md", title: "Concept A", body: "Body A." },
+        { page: "concept-b.md", title: "Concept B", body: "Body B." },
+        { page: "concept-c.md", title: "Concept C", body: "Body C." },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.written).toBe(3);
+    expect(parsed.count).toBe(3);
+
+    // All pages should be in the index (rebuilt once at end)
+    const idx = readFileSync(join(wiki.config.wikiDir, "index.md"), "utf-8");
+    expect(idx).toContain("concept-a");
+    expect(idx).toContain("concept-b");
+    expect(idx).toContain("concept-c");
+  });
+
+  it("auto-classifies when type is omitted", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [{
+        page: "guide.md",
+        title: "How to Install",
+        body: "Step 1: Download. Step 2: Install. Step 3: Configure. Step 4: Run.",
+      }],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].autoClassified.type).toBe("how-to");
+  });
+
+  it("auto-routes to topic subdirectory", async () => {
+    const wiki = freshWiki();
+    // Create a topic directory first
+    wiki.write("ai/concept-existing.md", "---\ntitle: Existing\ntype: concept\ntopic: ai\n---\nExisting.");
+    wiki.rebuildIndex();
+
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [{
+        page: "concept-new.md",
+        title: "New AI Concept",
+        body: "Something new about AI.",
+        topic: "ai",
+      }],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].routed).toBe(true);
+    expect(parsed.results[0].page).toContain("ai/");
+  });
+
+  it("continues on individual write errors", async () => {
+    const wiki = freshWiki();
+    wiki.write("lang/js/concept-js.md", "---\ntitle: JS\ntype: concept\n---\nJS.");
+    wiki.rebuildIndex();
+
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [
+        { page: "ok-page.md", title: "OK", body: "Fine." },
+        { page: "lang/js/index.md", title: "Bad", body: "Reserved." },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.written).toBe(1);
+    expect(parsed.results[0].ok).toBe(true);
+    expect(parsed.results[1].ok).toBe(false);
+    expect(parsed.results[1].error).toMatch(/reserved/i);
+  });
+
+  it("rejects topic with path traversal", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [{
+        page: "evil.md",
+        title: "Evil",
+        body: "Content.",
+        topic: "../../etc",
+      }],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].ok).toBe(false);
+    expect(parsed.results[0].error).toMatch(/invalid topic/i);
+  });
+
+  it("rejects empty pages array", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "knowledge_digest_write", { pages: [] })
+    ).rejects.toThrow(/non-empty/);
+  });
+});
+
 describe("server tool: wiki_config", () => {
   beforeEach(cleanUp);
   afterEach(cleanUp);

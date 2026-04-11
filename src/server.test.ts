@@ -1329,6 +1329,32 @@ describe("server tool: knowledge_digest_write", () => {
       handleTool(wiki, "knowledge_digest_write", { pages: [] })
     ).rejects.toThrow(/non-empty/);
   });
+
+  it("rejects pages exceeding limit", async () => {
+    const wiki = freshWiki();
+    const pages = Array.from({ length: 101 }, (_, i) => ({
+      page: `p${i}.md`, title: `P${i}`, body: `Body ${i}`,
+    }));
+    await expect(
+      handleTool(wiki, "knowledge_digest_write", { pages })
+    ).rejects.toThrow(/limit/i);
+  });
+
+  it("handles YAML special characters in title safely", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [{
+        page: "special.md",
+        title: 'Title with: colon, "quotes", and #hash',
+        body: "Body content.",
+      }],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.written).toBe(1);
+    const page = wiki.read(parsed.results[0].page as string);
+    expect(page).not.toBeNull();
+    expect(page!.title).toBe('Title with: colon, "quotes", and #hash');
+  });
 });
 
 describe("server tool: wiki_config", () => {

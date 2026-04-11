@@ -19,6 +19,7 @@ import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs
 import { join, resolve, basename, extname } from "node:path";
 import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob, safePath } from "./wiki.js";
 import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
+import matter from "gray-matter";
 import { VERSION } from "./version.js";
 import { RequestQueue } from "./queue.js";
 import { registerPlugin, getPluginForFile, listPlugins, summarizeModel } from "./code-analysis.js";
@@ -703,6 +704,14 @@ function walkSourceDir(dir: string): string[] {
   return result.sort();
 }
 
+/** Validate and sanitize a topic string to a safe path slug. */
+function sanitizeTopic(raw: string): string {
+  if (!raw || /\.\.|^\/|^\\|\x00/.test(raw)) {
+    throw new Error(`Invalid topic: "${raw}". Must not contain "..", absolute paths, or null bytes.`);
+  }
+  return raw.replace(/[^a-zA-Z0-9_\-/]/g, "-").replace(/\/{2,}/g, "/").replace(/^\/|\/$/g, "");
+}
+
 /** Internal options — not exposed to MCP callers. */
 export interface HandleToolOpts {
   /** When true, wiki_write/wiki_delete skip rebuildIndex (batch rebuilds once at end). */
@@ -1226,12 +1235,7 @@ export async function handleTool(
       const sourcePath = resolve(args.source_path as string);
       const pattern = args.pattern as string | undefined;
       const maxFiles = Math.min(Math.max(1, Math.floor((args.maxFiles as number) ?? 100)), 1000);
-      // Sanitize topic to a safe slug — reject traversal, absolute paths, null bytes
-      const rawTopic = (args.topic as string) ?? "general";
-      if (!rawTopic || /\.\.|^\/|^\\|\x00/.test(rawTopic)) {
-        throw new Error(`Invalid topic: "${rawTopic}". Must not contain "..", absolute paths, or null bytes.`);
-      }
-      const topic = rawTopic.replace(/[^a-zA-Z0-9_\-/]/g, "-").replace(/\/{2,}/g, "/").replace(/^\/|\/$/g, "");
+      const topic = sanitizeTopic((args.topic as string) ?? "general");
       const packLinesLimit = Math.max(50, Math.floor((args.packLines as number) ?? 500));
       const chunkLinesLimit = Math.min(Math.max(10, Math.floor((args.chunkLines as number) ?? 100)), packLinesLimit);
       const continueOnError = (args.continueOnError as boolean) ?? true;
@@ -1411,6 +1415,7 @@ export async function handleTool(
     }
 
     case "knowledge_digest_write": {
+      const MAX_DIGEST_PAGES = 100;
       const items = args.pages as Array<{
         page: string; title: string; body: string;
         type?: string; tags?: string[]; topic?: string;
@@ -1419,29 +1424,23 @@ export async function handleTool(
       if (!Array.isArray(items) || items.length === 0) {
         throw new Error("pages must be a non-empty array");
       }
+      if (items.length > MAX_DIGEST_PAGES) {
+        throw new Error(`Too many pages: ${items.length} exceeds limit of ${MAX_DIGEST_PAGES}`);
+      }
 
       const results: Array<Record<string, unknown>> = [];
       for (const item of items) {
         try {
-          // Sanitize topic if provided (same rules as knowledge_ingest_batch)
-          let topicField: string | undefined;
-          if (item.topic) {
-            if (/\.\.|^\/|^\\|\x00/.test(item.topic)) {
-              throw new Error(`Invalid topic: "${item.topic}"`);
-            }
-            topicField = item.topic.replace(/[^a-zA-Z0-9_\-/]/g, "-").replace(/\/{2,}/g, "/").replace(/^\/|\/$/g, "");
-          }
+          const topicField = item.topic ? sanitizeTopic(item.topic) : undefined;
 
-          // Build frontmatter + body
-          const fmParts: string[] = ["---"];
-          fmParts.push(`title: "${item.title.replace(/"/g, '\\"')}"`);
-          if (item.type) fmParts.push(`type: ${item.type}`);
-          if (item.tags && item.tags.length > 0) fmParts.push(`tags: ${JSON.stringify(item.tags)}`);
-          if (topicField) fmParts.push(`topic: ${topicField}`);
-          if (item.sources && item.sources.length > 0) fmParts.push(`sources: ${JSON.stringify(item.sources)}`);
-          if (item.sourcePacks && item.sourcePacks.length > 0) fmParts.push(`source_packs: ${JSON.stringify(item.sourcePacks)}`);
-          fmParts.push("---");
-          const content = fmParts.join("\n") + "\n\n" + item.body;
+          // Build frontmatter + body using gray-matter for safe YAML serialization
+          const fm: Record<string, unknown> = { title: item.title };
+          if (item.type) fm.type = item.type;
+          if (item.tags && item.tags.length > 0) fm.tags = item.tags;
+          if (topicField) fm.topic = topicField;
+          if (item.sources && item.sources.length > 0) fm.sources = item.sources;
+          if (item.sourcePacks && item.sourcePacks.length > 0) fm.source_packs = item.sourcePacks;
+          const content = matter.stringify("\n" + item.body, fm);
 
           // Auto-classify if type/tags missing
           const enrichedContent = wiki.autoClassifyContent(content);

@@ -221,11 +221,10 @@ describe("code-analysis plugin system", () => {
 
     it("code_trace_variable reports not supported for plugin without tracer", async () => {
       wiki.rawAdd("Test.mjava", { content: "class Test {}", mimeType: "text/plain" });
-      const result = await handleTool(wiki, "code_trace_variable", {
+      await expect(handleTool(wiki, "code_trace_variable", {
         path: "Test.mjava",
         variable: "x",
-      });
-      expect(result).toContain("does not support variable tracing");
+      })).rejects.toThrow(/does not support variable tracing/);
     });
   });
 

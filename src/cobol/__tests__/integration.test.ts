@@ -83,8 +83,8 @@ describe("COBOL MCP tools integration", () => {
   });
 
   it("rejects unsupported file types", async () => {
-    const result = await handleTool(wiki, "code_parse", { path: "readme.md" });
-    expect(result).toContain("Unsupported file type");
+    await expect(handleTool(wiki, "code_parse", { path: "readme.md" }))
+      .rejects.toThrow(/Unsupported file type/);
   });
 
   it("parsed artifacts pass lint integrity checks (no missing-meta)", async () => {

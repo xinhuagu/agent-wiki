@@ -514,7 +514,7 @@ export async function handleTool(
       const result = await wiki.rawRead(args.filename as string, {
         pages: args.pages as string | undefined,
       });
-      if (!result) return `Raw file not found: ${args.filename}`;
+      if (!result) throw new Error(`Raw file not found: ${args.filename}`);
       if (result.binary) {
         if (result.imageData) {
           // Return text first (consistent with raw_add/raw_fetch), then image block
@@ -591,14 +591,14 @@ export async function handleTool(
 
     case "wiki_read": {
       const page = wiki.read(args.page as string);
-      if (!page) return `Page not found: ${args.page}`;
+      if (!page) throw new Error(`Page not found: ${args.page}`);
       // wiki.read() already validates the path via safePath, so we
       // reconstruct the full path from wiki.config + validated pagePath
       const fullPath = join(wiki.config.wikiDir, page.path);
       try {
         return readFileSync(fullPath, "utf-8");
       } catch {
-        return `Page not found: ${args.page}`;
+        throw new Error(`Page not found: ${args.page}`);
       }
     }
 
@@ -706,11 +706,11 @@ export async function handleTool(
       const plugin = getPluginForFile(filePath);
       if (!plugin) {
         const supported = listPlugins().flatMap((p) => p.extensions).join(", ");
-        return `Unsupported file type: ${filePath}. Supported extensions: ${supported}`;
+        throw new Error(`Unsupported file type: ${filePath}. Supported extensions: ${supported}`);
       }
       const rawResult = await wiki.rawRead(filePath);
       if (!rawResult || rawResult.content === null) {
-        return `Cannot read raw/${filePath}`;
+        throw new Error(`Cannot read raw/${filePath}`);
       }
 
       // All dispatch goes through the plugin interface
@@ -788,14 +788,14 @@ export async function handleTool(
       const plugin = getPluginForFile(filePath);
       if (!plugin) {
         const supported = listPlugins().flatMap((p) => p.extensions).join(", ");
-        return `Unsupported file type: ${filePath}. Supported extensions: ${supported}`;
+        throw new Error(`Unsupported file type: ${filePath}. Supported extensions: ${supported}`);
       }
       if (!plugin.traceVariable) {
-        return `Plugin "${plugin.id}" does not support variable tracing`;
+        throw new Error(`Plugin "${plugin.id}" does not support variable tracing`);
       }
       const rawResult = await wiki.rawRead(filePath);
       if (!rawResult || rawResult.content === null) {
-        return `Cannot read raw/${filePath}`;
+        throw new Error(`Cannot read raw/${filePath}`);
       }
       const ast = plugin.parse(rawResult.content, filePath);
       const refs = plugin.traceVariable(ast, varName);
@@ -803,7 +803,7 @@ export async function handleTool(
     }
 
     default:
-      return `Unknown tool: ${name}`;
+      throw new Error(`Unknown tool: ${name}`);
   }
 }
 

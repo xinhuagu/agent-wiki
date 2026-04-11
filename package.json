@@ -11,7 +11,9 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
-    "schemas"
+    "schemas",
+    "skills",
+    ".claude-plugin"
   ],
   "scripts": {
     "build": "tsc",

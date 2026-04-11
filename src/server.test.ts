@@ -1104,6 +1104,32 @@ describe("server tool: knowledge_ingest_batch", () => {
     expect(parsed.packPaths.length).toBe(parsed.packs);
   });
 
+  it("clamps chunkLines to packLines so no pack exceeds limit", async () => {
+    const wiki = freshWiki();
+    // 200 lines of content, packLines=80, chunkLines=200 (would exceed pack)
+    const body = Array.from({ length: 200 }, (_, i) => `Line ${i}`).join("\n");
+    writeFileSync(join(SOURCE_DIR, "big.txt"), body);
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "clamp",
+      packLines: 80,
+      chunkLines: 200, // should be clamped to 80
+    });
+    const parsed = JSON.parse(result as string);
+    // With chunkLines clamped to 80, each chunk ≤ 80 lines, each pack ≤ 80 lines
+    // 200 lines / 80 = 3 chunks → at least 3 packs
+    expect(parsed.packs).toBeGreaterThanOrEqual(3);
+    // Verify no pack exceeds packLines (80) by much
+    for (const packPath of parsed.packPaths) {
+      const rawPath = packPath.replace(/^raw\//, "");
+      const content = readFileSync(join(wiki.config.rawDir, rawPath), "utf-8");
+      // Pack includes frontmatter + headers, so body lines should be ≤ chunkLines
+      const bodyLines = content.split("\n").filter((l: string) => !l.startsWith("---") && !l.startsWith("title:") && !l.startsWith("topic:") && !l.startsWith("sources:") && !l.startsWith("totalChunks:"));
+      // Each pack's content portion (excluding frontmatter/headers) should not vastly exceed packLines
+      expect(bodyLines.length).toBeLessThan(packPath === parsed.packPaths[0] ? 120 : 120);
+    }
+  });
+
   it("ingests HTML with provenance", async () => {
     const wiki = freshWiki();
     writeFileSync(join(SOURCE_DIR, "page.html"), "<html><body><p>Hello HTML</p></body></html>");

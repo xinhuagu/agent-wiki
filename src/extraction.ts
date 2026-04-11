@@ -264,7 +264,17 @@ export async function extractText(filePath: string, pages?: string): Promise<str
     return `(no pages matched range "${pages}" — PDF has ${result.metadata?.totalPages ?? "?"} pages)`;
   }
 
-  const body = result.segments.map(s => s.text).join("\n\n");
+  // Re-add format-specific separators that the old extractTextNode produced
+  const body = result.segments.map(s => {
+    if (result.format === "xlsx" && s.source.sheet) {
+      return `--- Sheet: ${s.source.sheet} ---\n${s.text}`;
+    }
+    if (result.format === "pptx" && s.source.slide !== undefined) {
+      return `--- Slide ${s.source.slide} ---\n${s.text}`;
+    }
+    return s.text;
+  }).join("\n\n");
+
   if (result.format === "pdf" && pages && result.metadata?.totalPages) {
     return `[Pages ${pages} of ${result.metadata.totalPages}]\n${body}`;
   }

@@ -1166,8 +1166,8 @@ export async function handleTool(
       const pattern = args.pattern as string | undefined;
       const maxFiles = Math.min(Math.max(1, Math.floor((args.maxFiles as number) ?? 100)), 1000);
       const topic = (args.topic as string) ?? "general";
-      const chunkLinesLimit = Math.max(10, Math.floor((args.chunkLines as number) ?? 100));
       const packLinesLimit = Math.max(50, Math.floor((args.packLines as number) ?? 500));
+      const chunkLinesLimit = Math.min(Math.max(10, Math.floor((args.chunkLines as number) ?? 100)), packLinesLimit);
       const continueOnError = (args.continueOnError as boolean) ?? true;
 
       // Step 1: Scan
@@ -1184,10 +1184,8 @@ export async function handleTool(
       filePaths = filePaths.slice(0, maxFiles);
 
       const matched = filePaths.length;
-      let imported = 0, skipped = 0, extracted = 0;
-      const allChunks: ExtractionSegment[] = [];
+      let imported = 0, skipped = 0, extracted = 0, totalChunks = 0;
       const errors: Array<{ file: string; stage: string; error: string }> = [];
-      const sourceNames: string[] = [];
 
       // Extractable document formats
       const EXTRACTABLE = new Set([".pdf", ".docx", ".xlsx", ".pptx", ".html", ".htm"]);
@@ -1195,66 +1193,7 @@ export async function handleTool(
         mime.startsWith("text/") || mime === "application/json" || mime === "application/xml"
         || mime === "application/sql" || mime === "application/x-yaml";
 
-      // Step 2-3: Import + Extract
-      for (const relPath of filePaths) {
-        const rawFilename = `${topic}/${relPath}`;
-        const fullSourcePath = srcStat.isDirectory()
-          ? join(sourcePath, relPath)
-          : sourcePath;
-
-        // Import to raw/
-        try {
-          wiki.rawAdd(rawFilename, { sourcePath: fullSourcePath });
-          imported++;
-        } catch (e: any) {
-          if (e.message.includes("already exists")) {
-            skipped++;
-          } else if (continueOnError) {
-            errors.push({ file: relPath, stage: "import", error: e.message });
-            continue;
-          } else {
-            throw e;
-          }
-        }
-
-        // Extract
-        const ext = extname(relPath).toLowerCase();
-        const rawFullPath = join(wiki.config.rawDir, rawFilename);
-        try {
-          let segments: ExtractionSegment[];
-          if (EXTRACTABLE.has(ext)) {
-            const result = await extractDocument(rawFullPath);
-            segments = result.segments;
-          } else {
-            const mime = guessMime(relPath);
-            if (TEXT_LIKE(mime)) {
-              const content = readFileSync(rawFullPath, "utf-8");
-              segments = [{ text: content, source: { file: rawFilename } }];
-            } else {
-              // Binary file — skip extraction
-              continue;
-            }
-          }
-
-          // Normalize file path in source coordinates
-          for (const seg of segments) {
-            seg.source.file = rawFilename;
-          }
-
-          const chunked = chunkSegments(segments, chunkLinesLimit);
-          allChunks.push(...chunked);
-          sourceNames.push(rawFilename);
-          extracted++;
-        } catch (e: any) {
-          if (continueOnError) {
-            errors.push({ file: relPath, stage: "extract", error: e.message });
-          } else {
-            throw e;
-          }
-        }
-      }
-
-      // Step 4: Pack
+      // Streaming packer — flushes packs as chunks arrive, bounded memory
       const packs: Array<{ path: string; chunks: number; sources: string[] }> = [];
       let packNum = 1;
       let currentPackLines = 0;
@@ -1291,15 +1230,77 @@ export async function handleTool(
         currentPackLines = 0;
       };
 
-      for (const chunk of allChunks) {
+      const addChunkToPack = (chunk: ExtractionSegment) => {
         const lines = chunk.text.split("\n").length;
         if (currentPackLines + lines > packLinesLimit && currentPackChunks.length > 0) {
           flushPack();
         }
         currentPackChunks.push(chunk);
         currentPackLines += lines;
+        totalChunks++;
+      };
+
+      // Step 2-3: Import + Extract + Stream into packs
+      for (const relPath of filePaths) {
+        const rawFilename = `${topic}/${relPath}`;
+        const fullSourcePath = srcStat.isDirectory()
+          ? join(sourcePath, relPath)
+          : sourcePath;
+
+        // Import to raw/
+        try {
+          wiki.rawAdd(rawFilename, { sourcePath: fullSourcePath });
+          imported++;
+        } catch (e: any) {
+          if (e.message.includes("already exists")) {
+            skipped++;
+          } else if (continueOnError) {
+            errors.push({ file: relPath, stage: "import", error: e.message });
+            continue;
+          } else {
+            throw e;
+          }
+        }
+
+        // Extract + chunk + stream into packs
+        const ext = extname(relPath).toLowerCase();
+        const rawFullPath = join(wiki.config.rawDir, rawFilename);
+        try {
+          let segments: ExtractionSegment[];
+          if (EXTRACTABLE.has(ext)) {
+            const result = await extractDocument(rawFullPath);
+            segments = result.segments;
+          } else {
+            const mime = guessMime(relPath);
+            if (TEXT_LIKE(mime)) {
+              const content = readFileSync(rawFullPath, "utf-8");
+              segments = [{ text: content, source: { file: rawFilename } }];
+            } else {
+              continue; // Binary file — skip extraction
+            }
+          }
+
+          // Normalize file path in source coordinates
+          for (const seg of segments) {
+            seg.source.file = rawFilename;
+          }
+
+          // Chunk and stream directly into packs (bounded memory)
+          const chunked = chunkSegments(segments, chunkLinesLimit);
+          for (const chunk of chunked) {
+            addChunkToPack(chunk);
+          }
+          extracted++;
+        } catch (e: any) {
+          if (continueOnError) {
+            errors.push({ file: relPath, stage: "extract", error: e.message });
+          } else {
+            throw e;
+          }
+        }
       }
-      flushPack();
+
+      flushPack(); // flush remaining
 
       const nextRecommendedReads = packs.slice(0, 5).map(p => `raw/${p.path}`);
 
@@ -1309,7 +1310,7 @@ export async function handleTool(
         imported,
         skipped,
         extracted,
-        chunks: allChunks.length,
+        chunks: totalChunks,
         packs: packs.length,
         failed: errors.length,
         ...(errors.length > 0 ? { errors: errors.slice(0, 10) } : {}),

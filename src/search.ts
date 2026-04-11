@@ -70,6 +70,8 @@ export interface SearchResult {
   path: string;
   score: number;
   snippet: string;
+  /** The ## heading of the section containing the best match, if any. */
+  section?: string;
 }
 
 type FieldName = "title" | "tags" | "slug" | "frontmatter" | "body";
@@ -523,10 +525,23 @@ export function editDistance(a: string, b: string): number {
 
 // ── Snippet generation ────────────────────────────────────────────
 
-/** Generate a context snippet around the best matching region. */
-export function makeSnippet(doc: SearchDoc, queryTerms: string[]): string {
+/** Find the nearest ## heading above a given character offset in body text. */
+export function findSection(body: string, charOffset: number): string | undefined {
+  const upTo = body.slice(0, charOffset);
+  // Walk backwards through lines looking for a heading
+  const lines = upTo.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.trimEnd();
+    if (/^#{1,6}\s/.test(line)) return line;
+  }
+  return undefined;
+}
+
+/** Generate a context snippet around the best matching region.
+ *  Returns { snippet, section } where section is the ## heading containing the match. */
+export function makeSnippet(doc: SearchDoc, queryTerms: string[]): { snippet: string; section?: string } {
   const text = doc.body.toLowerCase();
-  if (text.length === 0) return doc.title;
+  if (text.length === 0) return { snippet: doc.title };
 
   // Find the position of the first matching query term
   let bestPos = -1;
@@ -542,14 +557,19 @@ export function makeSnippet(doc: SearchDoc, queryTerms: string[]): string {
   if (bestPos === -1) {
     // No body match — return start of body
     const end = Math.min(doc.body.length, 150);
-    return doc.body.slice(0, end).trim() + (end < doc.body.length ? "..." : "");
+    return {
+      snippet: doc.body.slice(0, end).trim() + (end < doc.body.length ? "..." : ""),
+    };
   }
 
   const start = Math.max(0, bestPos - 60);
   const end = Math.min(text.length, bestPos + bestTerm.length + 90);
   const prefix = start > 0 ? "..." : "";
   const suffix = end < text.length ? "..." : "";
-  return prefix + doc.body.slice(start, end).trim() + suffix;
+  return {
+    snippet: prefix + doc.body.slice(start, end).trim() + suffix,
+    section: findSection(doc.body, bestPos),
+  };
 }
 
 // ── Search Engine ─────────────────────────────────────────────────
@@ -608,10 +628,12 @@ export function searchIndex(
     if (!doc) continue;
     const score = scoreDoc(doc, queryTerms, expandedTerms, index);
     if (score > 0) {
+      const { snippet, section } = makeSnippet(doc, queryTerms);
       results.push({
         path: doc.path,
         score: Math.round(score * 100) / 100,
-        snippet: makeSnippet(doc, queryTerms),
+        snippet,
+        section,
       });
     }
   }

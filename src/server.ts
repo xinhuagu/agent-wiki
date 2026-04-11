@@ -20,6 +20,77 @@ import { join } from "node:path";
 import { Wiki } from "./wiki.js";
 import { VERSION } from "./version.js";
 import { RequestQueue } from "./queue.js";
+
+// ── Markdown section utilities ────────────────────────────────────
+
+interface MarkdownSection {
+  heading: string;   // e.g. "## Installation"
+  level: number;     // 1–6
+  content: string;   // heading line + body up to next same-or-higher heading
+}
+
+/** Split markdown into sections by headings. The leading frontmatter block
+ *  (between --- delimiters) is returned as a special section with heading "". */
+export function splitSections(markdown: string): MarkdownSection[] {
+  const lines = markdown.split("\n");
+  const sections: MarkdownSection[] = [];
+  let buf: string[] = [];
+  let currentHeading = "";
+  let currentLevel = 0;
+  let inFrontmatter = false;
+  let frontmatterDone = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+
+    // Handle frontmatter block
+    if (i === 0 && line.trim() === "---") {
+      inFrontmatter = true;
+      buf.push(line);
+      continue;
+    }
+    if (inFrontmatter) {
+      buf.push(line);
+      if (line.trim() === "---" && i > 0) {
+        inFrontmatter = false;
+        frontmatterDone = true;
+      }
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)/);
+    if (headingMatch) {
+      // Flush previous section
+      sections.push({ heading: currentHeading, level: currentLevel, content: buf.join("\n") });
+      buf = [line];
+      currentHeading = line.trimEnd();
+      currentLevel = headingMatch[1]!.length;
+    } else {
+      buf.push(line);
+    }
+  }
+  // Flush last section
+  if (buf.length > 0) {
+    sections.push({ heading: currentHeading, level: currentLevel, content: buf.join("\n") });
+  }
+  return sections;
+}
+
+/** Extract TOC lines from sections (headings only, indented by level). */
+function buildToc(sections: MarkdownSection[]): string {
+  return sections
+    .filter(s => s.heading !== "")
+    .map(s => "  ".repeat(s.level - 1) + s.heading)
+    .join("\n");
+}
+
+/** Find a section by heading text (case-insensitive, partial match allowed). */
+function findSectionByHeading(sections: MarkdownSection[], query: string): MarkdownSection | undefined {
+  const q = query.toLowerCase().replace(/^#{1,6}\s*/, "").trim();
+  return sections.find(s =>
+    s.heading.toLowerCase().replace(/^#{1,6}\s*/, "").trim().includes(q)
+  );
+}
 import { registerPlugin, getPluginForFile, listPlugins, summarizeModel } from "./code-analysis.js";
 import { cobolPlugin } from "./cobol/plugin.js";
 
@@ -232,8 +303,10 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
         name: "wiki_read",
         description:
           "Read a wiki page by path. Returns frontmatter + Markdown content. " +
-          "Large pages (>200 lines) are truncated by default — use 'offset' and 'limit' to page through them. " +
-          "Always check 'truncated' and 'total_lines' in the response to know if there is more content.",
+          "RECOMMENDED WORKFLOW: (1) call without 'section' to get the TOC for large pages, " +
+          "(2) use wiki_search 'section' field to jump directly to the relevant heading, " +
+          "(3) call with 'section' to read only that part. " +
+          "Large pages without 'section' are truncated at 200 lines — check 'truncated' and 'toc' in the response.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -241,13 +314,17 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
               type: "string",
               description: "Page path relative to wiki/ (e.g. 'concept-gil.md')",
             },
+            section: {
+              type: "string",
+              description: "Heading to read (e.g. '## Installation'). Case-insensitive partial match. Returns that section and its sub-sections only. Use the 'section' field from wiki_search results to navigate directly.",
+            },
             offset: {
               type: "number",
-              description: "First line to return, 0-indexed (default: 0). Use to read later sections of a large page.",
+              description: "First line to return, 0-indexed (default: 0). Fallback for line-based paging when section navigation is insufficient.",
             },
             limit: {
               type: "number",
-              description: "Max lines to return (default: 200, max: 500). Increase for larger reads.",
+              description: "Max lines to return (default: 200, max: 500).",
             },
           },
           required: ["page"],
@@ -609,6 +686,34 @@ export async function handleTool(
       } catch {
         throw new Error(`Page not found: ${args.page}`);
       }
+
+      // ── Section-based read ──────────────────────────────────
+      if (args.section) {
+        const sections = splitSections(raw);
+        const target = findSectionByHeading(sections, args.section as string);
+        if (!target) {
+          const toc = buildToc(sections);
+          throw new Error(
+            `Section "${args.section}" not found in ${args.page}.\nAvailable sections:\n${toc}`
+          );
+        }
+        // Include sub-sections (higher heading level) that follow immediately
+        const targetIdx = sections.indexOf(target);
+        const parts = [target.content];
+        for (let i = targetIdx + 1; i < sections.length; i++) {
+          const s = sections[i]!;
+          if (s.level <= target.level && s.heading !== "") break;
+          parts.push(s.content);
+        }
+        const content = parts.join("\n");
+        return JSON.stringify({
+          section: target.heading,
+          content,
+          total_lines: content.split("\n").length,
+        }, null, 2);
+      }
+
+      // ── Line-based read (fallback / small pages) ────────────
       const lines = raw.split("\n");
       const total = lines.length;
       const DEFAULT_LIMIT = 200;
@@ -621,6 +726,8 @@ export async function handleTool(
         // Small page — return as plain text for backwards compatibility
         return raw;
       }
+      // Large page — include TOC so agent can navigate by section
+      const toc = buildToc(splitSections(raw));
       return JSON.stringify({
         content: slice.join("\n"),
         offset,
@@ -628,6 +735,7 @@ export async function handleTool(
         total_lines: total,
         truncated,
         next_offset: truncated ? offset + limit : null,
+        toc: toc || null,
       }, null, 2);
     }
 

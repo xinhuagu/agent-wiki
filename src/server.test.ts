@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { Readable } from "node:stream";
 import { join } from "node:path";
 import { Wiki } from "./wiki.js";
-import { handleTool, tryImageBlock, type ContentBlock } from "./server.js";
+import { handleTool, tryImageBlock, splitSections, type ContentBlock } from "./server.js";
 
 const TEST_ROOT = join(import.meta.dirname ?? ".", "__test_server__");
 
@@ -123,6 +123,72 @@ describe("server tool: wiki_write + wiki_read", () => {
     const result = await handleTool(wiki, "wiki_read", { page: "note-huge.md", limit: 9999 });
     const parsed = JSON.parse(result as string);
     expect(parsed.lines_returned).toBe(500);
+  });
+
+  it("includes TOC when page is truncated", async () => {
+    const wiki = freshWiki();
+    const body = [
+      "## Overview", ...Array(50).fill("overview text"),
+      "## Installation", ...Array(50).fill("install text"),
+      "## Usage", ...Array(150).fill("usage text"),
+    ].join("\n");
+    wiki.write("note-toc.md", `---\ntitle: Guide\ntype: how-to\n---\n${body}`);
+    const result = await handleTool(wiki, "wiki_read", { page: "note-toc.md" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.toc).toContain("## Overview");
+    expect(parsed.toc).toContain("## Installation");
+    expect(parsed.toc).toContain("## Usage");
+  });
+
+  it("reads a specific section by heading", async () => {
+    const wiki = freshWiki();
+    const content = [
+      "---", "title: Guide", "type: how-to", "---",
+      "## Overview", "This is the overview.",
+      "## Installation", "Run npm install here.",
+      "## Usage", "Import the module.",
+    ].join("\n");
+    wiki.write("note-sections.md", content);
+    const result = await handleTool(wiki, "wiki_read", { page: "note-sections.md", section: "Installation" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.section).toContain("Installation");
+    expect(parsed.content).toContain("npm install");
+    expect(parsed.content).not.toContain("Import the module");
+  });
+
+  it("throws with available sections when section not found", async () => {
+    const wiki = freshWiki();
+    wiki.write("note-secs.md", "---\ntitle: G\ntype: note\n---\n## Intro\nHello.\n## Details\nMore.");
+    await expect(
+      handleTool(wiki, "wiki_read", { page: "note-secs.md", section: "Nonexistent" })
+    ).rejects.toThrow(/Intro|Details/);
+  });
+});
+
+describe("splitSections", () => {
+  it("splits by headings", () => {
+    const md = "---\ntitle: X\n---\n## Intro\nHello.\n## Details\nMore info.";
+    const sections = splitSections(md);
+    expect(sections.some(s => s.heading === "## Intro")).toBe(true);
+    expect(sections.some(s => s.heading === "## Details")).toBe(true);
+  });
+
+  it("includes sub-sections under parent", async () => {
+    const wiki = freshWiki();
+    const content = [
+      "---", "title: Doc", "type: note", "---",
+      "## API", "Top-level API.",
+      "### Method A", "Details of A.",
+      "### Method B", "Details of B.",
+      "## Examples", "Example content.",
+    ].join("\n");
+    wiki.write("note-sub.md", content);
+    const result = await handleTool(wiki, "wiki_read", { page: "note-sub.md", section: "API" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.content).toContain("Method A");
+    expect(parsed.content).toContain("Method B");
+    expect(parsed.content).not.toContain("Example content");
   });
 });
 

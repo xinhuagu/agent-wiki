@@ -339,7 +339,7 @@ describe("makeSnippet", () => {
       title: "Test",
       content: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. The quick brown fox jumps over the lazy dog. Sed do eiusmod tempor incididunt.",
     }));
-    const snippet = makeSnippet(doc, ["fox"]);
+    const { snippet } = makeSnippet(doc, ["fox"]);
     expect(snippet.toLowerCase()).toContain("fox");
   });
 
@@ -349,7 +349,7 @@ describe("makeSnippet", () => {
       title: "My Title",
       content: "",
     }));
-    const snippet = makeSnippet(doc, ["anything"]);
+    const { snippet } = makeSnippet(doc, ["anything"]);
     expect(snippet).toBe("My Title");
   });
 
@@ -359,8 +359,19 @@ describe("makeSnippet", () => {
       title: "Test",
       content: "This is some content that does not contain the search term.",
     }));
-    const snippet = makeSnippet(doc, ["xyznonexistent"]);
+    const { snippet } = makeSnippet(doc, ["xyznonexistent"]);
     expect(snippet).toContain("This is some content");
+  });
+
+  it("returns section heading containing the match", () => {
+    const doc = buildSearchDoc(makePage({
+      path: "a.md",
+      title: "Guide",
+      content: "## Installation\n\nRun npm install.\n\n## Usage\n\nImport the module.",
+    }));
+    const { snippet, section } = makeSnippet(doc, ["import"]);
+    expect(snippet.toLowerCase()).toContain("import");
+    expect(section).toBe("## Usage");
   });
 });
 

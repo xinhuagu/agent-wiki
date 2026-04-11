@@ -1,0 +1,7 @@
+{
+  "name": "agent-wiki",
+  "description": "Agent-driven knowledge base with immutable raw sources, mutable wiki pages, BM25 search, code analysis, and self-checking lint. Use when managing knowledge bases, importing documents, writing wiki pages, or parsing source code.",
+  "author": {
+    "name": "Xinhua Chen"
+  }
+}

@@ -380,11 +380,10 @@ describe("handleTool: raw_read image ContentBlock[]", () => {
     expect(parsed.content).toBe("Hello world");
   });
 
-  it("returns error string for missing file", async () => {
+  it("throws for missing file", async () => {
     const wiki = freshWiki();
-    const result = await handleTool(wiki, "raw_read", { filename: "nope.txt" });
-    expect(typeof result).toBe("string");
-    expect(result).toMatch(/not found/i);
+    await expect(handleTool(wiki, "raw_read", { filename: "nope.txt" }))
+      .rejects.toThrow(/not found/i);
   });
 });
 

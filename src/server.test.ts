@@ -710,6 +710,188 @@ describe("server tool: wiki_search", () => {
   });
 });
 
+describe("server tool: wiki_search_read", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("returns search results and page content for top results", async () => {
+    const wiki = freshWiki();
+    wiki.write("page-a.md", "---\ntitle: A\ntype: note\n---\nAlpha algorithms.");
+    wiki.write("page-b.md", "---\ntitle: B\ntype: note\n---\nBeta algorithms.");
+    wiki.write("page-c.md", "---\ntitle: C\ntype: note\n---\nGamma algorithms.");
+    const result = await handleTool(wiki, "wiki_search_read", { query: "algorithms", readTopN: 2 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(3);
+    expect(parsed.pages.length).toBe(2);
+    expect(parsed.pagesRead).toBe(2);
+    expect(parsed.nextReads.length).toBe(1);
+    expect(parsed.pages.every((p: any) => p.content !== null)).toBe(true);
+  });
+
+  it("deduplicates multiple hits on same page", async () => {
+    const wiki = freshWiki();
+    wiki.write("multi.md", "---\ntitle: Multi\ntype: note\n---\n## Intro\nalgorithm overview\n## Details\nalgorithm details\n## Summary\nalgorithm summary");
+    const result = await handleTool(wiki, "wiki_search_read", { query: "algorithm", readTopN: 5 });
+    const parsed = JSON.parse(result as string);
+    // Multiple search hits but only 1 unique page → pages should have 1 entry
+    expect(parsed.pages.length).toBe(1);
+    expect(parsed.pages[0].path).toBe("multi.md");
+  });
+
+  it("readTopN defaults to 3", async () => {
+    const wiki = freshWiki();
+    for (let i = 0; i < 5; i++) {
+      wiki.write(`note-${i}.md`, `---\ntitle: Note ${i}\ntype: note\n---\nKeyword${i} searchable.`);
+    }
+    const result = await handleTool(wiki, "wiki_search_read", { query: "searchable" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages.length).toBe(3);
+    expect(parsed.nextReads.length).toBe(2);
+  });
+
+  it("section filter reads only matched section", async () => {
+    const wiki = freshWiki();
+    wiki.write("guide-a.md", "---\ntitle: Guide A\ntype: how-to\n---\n## Setup\nInstall step A.\n## Usage\nRun it A.");
+    wiki.write("guide-b.md", "---\ntitle: Guide B\ntype: how-to\n---\n## Setup\nInstall step B.\n## Usage\nRun it B.");
+    const result = await handleTool(wiki, "wiki_search_read", {
+      query: "Install",
+      readTopN: 2,
+      section: "Setup",
+    });
+    const parsed = JSON.parse(result as string);
+    for (const page of parsed.pages) {
+      if (page.content) {
+        expect(page.content).toContain("Install");
+        expect(page.content).not.toContain("Run it");
+      }
+    }
+  });
+
+  it("section not found returns null content with toc", async () => {
+    const wiki = freshWiki();
+    wiki.write("has-it.md", "---\ntitle: Has\ntype: note\n---\n## API\nEndpoint details.\n## Other\nStuff.");
+    wiki.write("missing-it.md", "---\ntitle: Missing\ntype: note\n---\n## Overview\nGeneral info about API.");
+    const result = await handleTool(wiki, "wiki_search_read", {
+      query: "API",
+      readTopN: 2,
+      section: "API",
+    });
+    const parsed = JSON.parse(result as string);
+    const hasIt = parsed.pages.find((p: any) => p.path === "has-it.md");
+    const missingIt = parsed.pages.find((p: any) => p.path === "missing-it.md");
+    expect(hasIt.content).toContain("Endpoint");
+    expect(missingIt.content).toBeNull();
+    expect(missingIt.error).toMatch(/not found/i);
+    expect(missingIt.toc).toBeTruthy();
+  });
+
+  it("truncates pages at perPageLimit lines", async () => {
+    const wiki = freshWiki();
+    const body = Array.from({ length: 300 }, (_, i) => `Searchable line ${i}`).join("\n");
+    wiki.write("big.md", `---\ntitle: Big\ntype: note\n---\n${body}`);
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Searchable", perPageLimit: 100 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages[0].truncated).toBe(true);
+    expect(parsed.pages[0].total_lines).toBeGreaterThan(100);
+    expect(parsed.pages[0].content.split("\n").length).toBe(100);
+  });
+
+  it("includeToc adds TOC to truncated pages", async () => {
+    const wiki = freshWiki();
+    const body = Array.from({ length: 300 }, (_, i) => `Searchable line ${i}`).join("\n");
+    wiki.write("toc-page.md", `---\ntitle: Toc\ntype: note\n---\n## First\n${body}\n## Second\nMore.`);
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Searchable", includeToc: true });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages[0].truncated).toBe(true);
+    expect(parsed.pages[0].toc).toContain("## First");
+    expect(parsed.pages[0].toc).toContain("## Second");
+  });
+
+  it("includeToc=false omits TOC even when truncated", async () => {
+    const wiki = freshWiki();
+    const body = Array.from({ length: 300 }, (_, i) => `Searchable line ${i}`).join("\n");
+    wiki.write("no-toc.md", `---\ntitle: NoToc\ntype: note\n---\n## Heading\n${body}`);
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Searchable" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages[0].truncated).toBe(true);
+    expect(parsed.pages[0].toc).toBeUndefined();
+  });
+
+  it("handles deleted page gracefully", async () => {
+    const wiki = freshWiki();
+    wiki.write("alive.md", "---\ntitle: Alive\ntype: note\n---\nKeyword here.");
+    wiki.write("doomed.md", "---\ntitle: Doomed\ntype: note\n---\nKeyword there.");
+    // Search first to index both, then delete one
+    wiki.search("Keyword");
+    rmSync(join(wiki.config.wikiDir, "doomed.md"));
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Keyword", readTopN: 5 });
+    const parsed = JSON.parse(result as string);
+    const alive = parsed.pages.find((p: any) => p.path === "alive.md");
+    const doomed = parsed.pages.find((p: any) => p.path === "doomed.md");
+    expect(alive.content).toContain("Keyword");
+    expect(doomed.content).toBeNull();
+    expect(doomed.error).toBeTruthy();
+  });
+
+  it("no results returns empty arrays", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_search_read", { query: "zzzznonexistent" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results).toEqual([]);
+    expect(parsed.pages).toEqual([]);
+    expect(parsed.nextReads).toEqual([]);
+    expect(parsed.count).toBe(0);
+    expect(parsed.pagesRead).toBe(0);
+  });
+
+  it("readTopN capped at 10", async () => {
+    const wiki = freshWiki();
+    for (let i = 0; i < 12; i++) {
+      wiki.write(`p-${i}.md`, `---\ntitle: P${i}\ntype: note\n---\nFindable content.`);
+    }
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Findable", readTopN: 99, limit: 12 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages.length).toBeLessThanOrEqual(10);
+  });
+
+  it("perPageLimit capped at 500", async () => {
+    const wiki = freshWiki();
+    const body = Array.from({ length: 600 }, (_, i) => `Searchable line ${i}`).join("\n");
+    wiki.write("huge.md", `---\ntitle: Huge\ntype: note\n---\n${body}`);
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Searchable", perPageLimit: 9999 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages[0].content.split("\n").length).toBeLessThanOrEqual(500);
+  });
+
+  it("eliminates 2-request search+batch workflow", async () => {
+    const wiki = freshWiki();
+    wiki.write("doc-x.md", "---\ntitle: X\ntype: note\n---\nNeural network details.");
+    wiki.write("doc-y.md", "---\ntitle: Y\ntype: note\n---\nNeural network training.");
+
+    // Old: 2 requests
+    let oldCalls = 0;
+    await handleTool(wiki, "wiki_search", { query: "neural network" });
+    oldCalls++;
+    await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_read", args: { page: "doc-x.md" } },
+        { tool: "wiki_read", args: { page: "doc-y.md" } },
+      ],
+    });
+    oldCalls++;
+
+    // New: 1 request
+    let newCalls = 0;
+    const result = await handleTool(wiki, "wiki_search_read", { query: "neural network", readTopN: 5 });
+    newCalls++;
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pagesRead).toBe(2);
+    expect(parsed.pages.every((p: any) => p.content !== null)).toBe(true);
+
+    expect(oldCalls - newCalls).toBe(1);
+  });
+});
+
 describe("server tool: wiki_lint", () => {
   beforeEach(cleanUp);
   afterEach(cleanUp);

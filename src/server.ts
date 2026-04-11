@@ -320,7 +320,8 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
         name: "wiki_search",
         description:
           "Full-text keyword search across all wiki pages. Returns paths, scores, and snippets sorted by relevance. " +
-          "Set include_content=true to return page content inline, eliminating the need for follow-up wiki_read calls.",
+          "Set include_content=true for simple inline content. For advanced search+read with deduplication, " +
+          "readTopN control, and per-page limits, use wiki_search_read instead.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -335,6 +336,44 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             include_content: {
               type: "boolean",
               description: "If true, include page content in results. When a section matched, returns that section; otherwise returns first 200 lines. Saves a follow-up batch read. Default: false.",
+            },
+          },
+          required: ["query"],
+        },
+      },
+      {
+        name: "wiki_search_read",
+        description:
+          "Search wiki pages and read top results in a single call. " +
+          "Combines wiki_search + wiki_read with deduplication — multiple search hits on the same page read it only once. " +
+          "Returns search metadata (results) separately from page content (pages). " +
+          "Remaining unread result paths are listed in nextReads for follow-up if needed.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            query: {
+              type: "string",
+              description: "Search query (keywords)",
+            },
+            limit: {
+              type: "number",
+              description: "Max search results (default: 10)",
+            },
+            readTopN: {
+              type: "number",
+              description: "How many unique top-scoring pages to read content for (default: 3, max: 10). Counts unique pages, not search results.",
+            },
+            section: {
+              type: "string",
+              description: "Section heading filter applied to all page reads (e.g. '## Installation'). Case-insensitive partial match. If omitted, reads full page content.",
+            },
+            perPageLimit: {
+              type: "number",
+              description: "Max lines per page (default: 200, max: 500). Pages exceeding this are truncated with metadata.",
+            },
+            includeToc: {
+              type: "boolean",
+              description: "Include table of contents for truncated pages (default: false).",
             },
           },
           required: ["query"],
@@ -809,6 +848,98 @@ export async function handleTool(
         }
       });
       return JSON.stringify({ results: enriched, count: enriched.length }, null, 2);
+    }
+
+    case "wiki_search_read": {
+      const query = args.query as string;
+      const limit = (args.limit as number) ?? 10;
+      const readTopN = Math.min(Math.max(1, Math.floor((args.readTopN as number) ?? 3)), 10);
+      const sectionFilter = args.section as string | undefined;
+      const perPageLimit = Math.min(500, Math.max(1, Math.floor((args.perPageLimit as number) ?? 200)));
+      const includeToc = (args.includeToc as boolean) ?? false;
+
+      // Step 1: Search
+      const results = wiki.search(query, limit);
+
+      // Step 2: Deduplicate — preserve score order, first occurrence wins
+      const seen = new Set<string>();
+      const uniquePaths: string[] = [];
+      for (const r of results) {
+        if (!seen.has(r.path)) {
+          seen.add(r.path);
+          uniquePaths.push(r.path);
+        }
+      }
+
+      // Step 3: Split into read vs. nextReads
+      const toRead = uniquePaths.slice(0, readTopN);
+      const nextReads = uniquePaths.slice(readTopN);
+
+      // Step 4: Read each page
+      const pages: Array<Record<string, unknown>> = [];
+      for (const pagePath of toRead) {
+        try {
+          const page = wiki.read(pagePath);
+          if (!page) throw new Error(`Page not found: ${pagePath}`);
+          const fullPath = join(wiki.config.wikiDir, page.path);
+          const raw = readFileSync(fullPath, "utf-8");
+
+          if (sectionFilter) {
+            const sections = splitSections(raw);
+            const target = findSectionByHeading(sections, sectionFilter);
+            if (!target) {
+              pages.push({
+                path: pagePath,
+                content: null,
+                error: `Section "${sectionFilter}" not found`,
+                toc: buildToc(sections) || null,
+              });
+              continue;
+            }
+            const targetIdx = sections.indexOf(target);
+            const parts = [target.content];
+            for (let i = targetIdx + 1; i < sections.length; i++) {
+              const s = sections[i]!;
+              if (s.level <= target.level && s.heading !== "") break;
+              parts.push(s.content);
+            }
+            const sectionText = parts.join("\n");
+            const sectionLines = sectionText.split("\n");
+            const truncated = sectionLines.length > perPageLimit;
+            pages.push({
+              path: pagePath,
+              content: truncated ? sectionLines.slice(0, perPageLimit).join("\n") : sectionText,
+              truncated,
+              ...(truncated ? { total_lines: sectionLines.length } : {}),
+              ...(truncated && includeToc ? { toc: buildToc(sections) } : {}),
+            });
+          } else {
+            const lines = raw.split("\n");
+            const truncated = lines.length > perPageLimit;
+            pages.push({
+              path: pagePath,
+              content: truncated ? lines.slice(0, perPageLimit).join("\n") : raw,
+              truncated,
+              ...(truncated ? { total_lines: lines.length } : {}),
+              ...(truncated && includeToc ? { toc: buildToc(splitSections(raw)) } : {}),
+            });
+          }
+        } catch (err) {
+          pages.push({
+            path: pagePath,
+            content: null,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      return JSON.stringify({
+        results,
+        count: results.length,
+        pages,
+        pagesRead: pages.length,
+        nextReads,
+      }, null, 2);
     }
 
     case "wiki_lint": {

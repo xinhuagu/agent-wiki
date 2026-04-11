@@ -140,4 +140,4 @@ Based on $ARGUMENTS:
 7. If user asks about code analysis or variables: use `code_parse` or `code_trace_variable`
 8. If user asks to check health: use `wiki_lint`
 9. Present results in clear, structured format
-10. All tool outputs are JSON — parse them to check status or extract data
+10. Most tool outputs are JSON. Exceptions: `wiki_read` returns raw Markdown; missing-page lookups return plain text errors (non-zero exit code)

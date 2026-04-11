@@ -125,4 +125,4 @@ One-command installation as a native skill for supported agent harnesses:
 | Target | What it does |
 |--------|-------------|
 | `aceclaw` | Copies SKILL.md to `~/.aceclaw/skills/agent-wiki/`, adds MCP server to `~/.aceclaw/mcp-servers.json` |
-| `claude-code` | Copies plugin to `~/.claude/plugins/agent-wiki/` (run `/plugins install` in Claude Code to enable) |
+| `claude-code` | Copies plugin to `~/.claude/plugins/agent-wiki/` (load with `claude --plugin-dir ~/.claude/plugins/agent-wiki`) |

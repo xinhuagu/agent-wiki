@@ -164,7 +164,7 @@ ENDJSON
 - **Auto-routing**: Root-level pages are automatically routed to matching topic subdirectories.
 - **System pages** (`index.md`, `log.md`, `timeline.md`, `*/index.md`) cannot be deleted.
 - **Lint regularly** — `wiki_lint` catches contradictions, orphans, broken links, and integrity issues.
-- All tool outputs are **JSON**. Parse them to check `ok` status or extract data.
+- Most tool outputs are **JSON** (e.g. `wiki_list`, `wiki_search`, `raw_add`). Exceptions: `wiki_read` returns raw Markdown content; missing-page lookups return plain text error messages.
 
 ## Error Handling
 

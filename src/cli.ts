@@ -11,7 +11,7 @@
 
 import { Command } from "commander";
 import { existsSync, mkdirSync, cpSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { Wiki } from "./wiki.js";
@@ -241,9 +241,17 @@ program
     const wiki = new Wiki(opts.wikiPath, opts.workspace);
     const args: Record<string, unknown> = json ? JSON.parse(json) : {};
 
+    // Known error prefixes returned by handleTool as strings (not thrown)
+    const ERROR_PREFIXES = ["Unknown tool:", "Page not found:", "Raw file not found:", "Unsupported file type:", "Cannot read raw/", "Plugin "];
+
     try {
       const result = await handleTool(wiki, tool, args);
       if (typeof result === "string") {
+        const isError = ERROR_PREFIXES.some(p => result.startsWith(p));
+        if (isError) {
+          console.error(result);
+          process.exit(1);
+        }
         console.log(result);
       } else {
         // ContentBlock[] — print text blocks, skip image blocks
@@ -329,7 +337,7 @@ program
 
       const servers = (mcpConfig.mcpServers ?? mcpConfig) as Record<string, unknown>;
       if (!servers["agent-wiki"]) {
-        const wikiPath = opts.wikiPath ?? ".";
+        const wikiPath = resolve(opts.wikiPath ?? ".");
         servers["agent-wiki"] = {
           command: "npx",
           args: ["-y", "@agent-wiki/mcp-server", "serve", "--wiki-path", wikiPath],
@@ -372,7 +380,7 @@ program
 
       console.log(`  ${pluginDir}/`);
       console.log("\nEnable in Claude Code:");
-      console.log("  /plugins install " + pluginDir);
+      console.log("  claude --plugin-dir " + pluginDir);
 
     } else {
       console.error(`Unknown target: ${target}`);

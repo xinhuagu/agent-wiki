@@ -627,6 +627,72 @@ describe("server tool: wiki_search", () => {
     expect(results.length).toBeGreaterThan(0);
     expect(results[0]!.path).toBe("search-target.md");
   });
+
+  it("returns snippets only when include_content is false", async () => {
+    const wiki = freshWiki();
+    wiki.write("page.md", "---\ntitle: Test\ntype: note\n---\n## Overview\nDetailed content here about algorithms.");
+    const result = await handleTool(wiki, "wiki_search", { query: "algorithms" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].snippet).toBeDefined();
+    expect(parsed.results[0].content).toBeUndefined();
+  });
+
+  it("includes page content when include_content is true", async () => {
+    const wiki = freshWiki();
+    wiki.write("page.md", "---\ntitle: Test\ntype: note\n---\n## Overview\nDetailed content here about algorithms.");
+    const result = await handleTool(wiki, "wiki_search", { query: "algorithms", include_content: true });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].content).toContain("Detailed content here about algorithms");
+  });
+
+  it("returns matched section content when include_content is true", async () => {
+    const wiki = freshWiki();
+    const content = [
+      "---", "title: Guide", "type: how-to", "---",
+      "## Setup", "Install the package.",
+      "## Configuration", "Set the API key for algorithms.",
+      "## Usage", "Import and call the function.",
+    ].join("\n");
+    wiki.write("guide.md", content);
+    const result = await handleTool(wiki, "wiki_search", { query: "algorithms", include_content: true });
+    const parsed = JSON.parse(result as string);
+    const hit = parsed.results.find((r: any) => r.path === "guide.md");
+    expect(hit).toBeDefined();
+    // Should return section content, not the whole page
+    expect(hit.content).toContain("API key");
+    expect(hit.content).not.toContain("Import and call");
+  });
+
+  it("eliminates the need for follow-up wiki_read (1 request instead of 2)", async () => {
+    const wiki = freshWiki();
+    wiki.write("doc-a.md", "---\ntitle: Alpha\ntype: note\n---\nAlpha details about neural networks.");
+    wiki.write("doc-b.md", "---\ntitle: Beta\ntype: note\n---\nBeta details about neural networks.");
+
+    // Without include_content: need search + batch read = 2 requests
+    let calls = 0;
+    await handleTool(wiki, "wiki_search", { query: "neural networks" });
+    calls++;
+    await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_read", args: { page: "doc-a.md" } },
+        { tool: "wiki_read", args: { page: "doc-b.md" } },
+      ],
+    });
+    calls++;
+    expect(calls).toBe(2);
+
+    // With include_content: 1 request
+    let optimizedCalls = 0;
+    const result = await handleTool(wiki, "wiki_search", { query: "neural networks", include_content: true });
+    optimizedCalls++;
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results.length).toBe(2);
+    expect(parsed.results.every((r: any) => r.content !== null)).toBe(true);
+    expect(optimizedCalls).toBe(1);
+
+    // Saved 1 request
+    expect(calls - optimizedCalls).toBe(1);
+  });
 });
 
 describe("server tool: wiki_lint", () => {

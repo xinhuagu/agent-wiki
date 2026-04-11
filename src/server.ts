@@ -319,7 +319,8 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "wiki_search",
         description:
-          "Full-text keyword search across all wiki pages. Returns paths, scores, and snippets sorted by relevance.",
+          "Full-text keyword search across all wiki pages. Returns paths, scores, and snippets sorted by relevance. " +
+          "Set include_content=true to return page content inline, eliminating the need for follow-up wiki_read calls.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -330,6 +331,10 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             limit: {
               type: "number",
               description: "Max results (default: 10)",
+            },
+            include_content: {
+              type: "boolean",
+              description: "If true, include page content in results. When a section matched, returns that section; otherwise returns first 200 lines. Saves a follow-up batch read. Default: false.",
             },
           },
           required: ["query"],
@@ -760,11 +765,42 @@ export async function handleTool(
         args.query as string,
         (args.limit as number) ?? 10
       );
-      return JSON.stringify(
-        { results, count: results.length },
-        null,
-        2
-      );
+      if (!args.include_content) {
+        return JSON.stringify({ results, count: results.length }, null, 2);
+      }
+      // Inline page content — eliminates follow-up wiki_read calls
+      const enriched = results.map((r) => {
+        try {
+          const fullPath = join(wiki.config.wikiDir, r.path);
+          const raw = readFileSync(fullPath, "utf-8");
+          if (r.section) {
+            // Return the matched section only
+            const sections = splitSections(raw);
+            const target = findSectionByHeading(sections, r.section);
+            if (target) {
+              const targetIdx = sections.indexOf(target);
+              const parts = [target.content];
+              for (let i = targetIdx + 1; i < sections.length; i++) {
+                const s = sections[i]!;
+                if (s.level <= target.level && s.heading !== "") break;
+                parts.push(s.content);
+              }
+              return { ...r, content: parts.join("\n") };
+            }
+          }
+          // No section match — return first 200 lines
+          const lines = raw.split("\n");
+          const truncated = lines.length > 200;
+          return {
+            ...r,
+            content: truncated ? lines.slice(0, 200).join("\n") : raw,
+            ...(truncated ? { truncated: true, total_lines: lines.length } : {}),
+          };
+        } catch {
+          return { ...r, content: null };
+        }
+      });
+      return JSON.stringify({ results: enriched, count: enriched.length }, null, 2);
     }
 
     case "wiki_lint": {

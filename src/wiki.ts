@@ -28,7 +28,7 @@ import { createHash } from "node:crypto";
 import matter from "gray-matter";
 import yaml from "js-yaml";
 import { VERSION } from "./version.js";
-import { SearchEngine } from "./search.js";
+import { SearchEngine, type SearchResult } from "./search.js";
 import type { AtlassianConfig, ConfluenceImportResult, JiraImportResult } from "./atlassian.js";
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -1285,7 +1285,7 @@ _Chronological view of all knowledge in this wiki._
   /** BM25 search across all wiki pages with inverted index, synonym expansion,
    *  prefix/fuzzy matching, and field-weighted scoring.
    *  Index is built lazily on first search and cached until invalidated by write/delete. */
-  search(query: string, limit = 10): Array<{ path: string; score: number; snippet: string }> {
+  search(query: string, limit = 10): SearchResult[] {
     return this.searchEngine.search(query, limit);
   }
 

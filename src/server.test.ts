@@ -1104,6 +1104,40 @@ describe("server tool: knowledge_ingest_batch", () => {
     expect(parsed.packPaths.length).toBe(parsed.packs);
   });
 
+  it("cleans stale packs from previous runs", async () => {
+    const wiki = freshWiki();
+    // First run: create enough content for 3 packs
+    for (let i = 0; i < 3; i++) {
+      const body = Array.from({ length: 100 }, (_, j) => `Run1 file${i} line ${j}`).join("\n");
+      writeFileSync(join(SOURCE_DIR, `run1-${i}.txt`), body);
+    }
+    const result1 = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "stale",
+      packLines: 120,
+      chunkLines: 50,
+    });
+    const parsed1 = JSON.parse(result1 as string);
+    expect(parsed1.packs).toBeGreaterThanOrEqual(3);
+
+    // Clean source dir and create less content for second run
+    for (const f of ["run1-0.txt", "run1-1.txt", "run1-2.txt"]) rmSync(join(SOURCE_DIR, f));
+    writeFileSync(join(SOURCE_DIR, "run2.txt"), "Short content for run 2.");
+
+    const result2 = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "stale",
+    });
+    const parsed2 = JSON.parse(result2 as string);
+    expect(parsed2.packs).toBe(1);
+
+    // Old pack-002, pack-003 should be cleaned
+    const packsDir = join(wiki.config.rawDir, "digest-packs", "stale");
+    expect(existsSync(join(packsDir, "pack-001.md"))).toBe(true);
+    expect(existsSync(join(packsDir, "pack-002.md"))).toBe(false);
+    expect(existsSync(join(packsDir, "pack-003.md"))).toBe(false);
+  });
+
   it("clamps chunkLines to packLines so no pack exceeds limit", async () => {
     const wiki = freshWiki();
     // 200 lines of content, packLines=80, chunkLines=200 (would exceed pack)

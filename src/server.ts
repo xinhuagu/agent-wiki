@@ -15,7 +15,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve, basename, extname } from "node:path";
 import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob } from "./wiki.js";
 import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
@@ -1170,6 +1170,18 @@ export async function handleTool(
       const chunkLinesLimit = Math.min(Math.max(10, Math.floor((args.chunkLines as number) ?? 100)), packLinesLimit);
       const continueOnError = (args.continueOnError as boolean) ?? true;
 
+      // Step 0: Validate source_path against allowed source directories
+      const allowed = wiki.config.allowedSourceDirs.some(
+        dir => sourcePath.startsWith(resolve(dir) + "/") || sourcePath === resolve(dir)
+      );
+      if (!allowed) {
+        throw new Error(
+          `source_path "${args.source_path}" is outside allowed directories. ` +
+          `Allowed: [${wiki.config.allowedSourceDirs.join(", ")}]. ` +
+          `Configure security.allowed_source_dirs in .agent-wiki.yaml to widen access.`
+        );
+      }
+
       // Step 1: Scan
       let filePaths: string[];
       const srcStat = statSync(sourcePath);
@@ -1192,6 +1204,19 @@ export async function handleTool(
       const TEXT_LIKE = (mime: string) =>
         mime.startsWith("text/") || mime === "application/json" || mime === "application/xml"
         || mime === "application/sql" || mime === "application/x-yaml";
+
+      // Clean stale packs from previous runs of this topic
+      const packsDir = join(wiki.config.rawDir, "digest-packs", topic);
+      if (existsSync(packsDir)) {
+        for (const f of readdirSync(packsDir)) {
+          if (f.startsWith("pack-") && f.endsWith(".md")) {
+            const p = join(packsDir, f);
+            rmSync(p, { force: true });
+            const meta = p + ".meta.yaml";
+            if (existsSync(meta)) rmSync(meta, { force: true });
+          }
+        }
+      }
 
       // Streaming packer — flushes packs as chunks arrive, bounded memory
       const packs: Array<{ path: string; chunks: number; sources: string[] }> = [];

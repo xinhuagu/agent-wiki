@@ -490,8 +490,9 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
     // batch: route dynamically — write queue only if any op mutates state
     let isWrite: boolean;
     if (name === "batch") {
-      const ops = (params.operations ?? []) as Array<{ tool: string }>;
-      isWrite = ops.some((op) => WRITE_TOOLS.has(op.tool));
+      const ops = params.operations;
+      // Malformed args → route through read queue; handleTool will return validation error
+      isWrite = Array.isArray(ops) && ops.some((op: any) => WRITE_TOOLS.has(op?.tool));
     } else {
       isWrite = WRITE_TOOLS.has(name);
     }
@@ -774,7 +775,7 @@ export async function handleTool(
           const fullPath = join(wiki.config.wikiDir, r.path);
           const raw = readFileSync(fullPath, "utf-8");
           if (r.section) {
-            // Return the matched section only
+            // Return the matched section only, capped at 200 lines
             const sections = splitSections(raw);
             const target = findSectionByHeading(sections, r.section);
             if (target) {
@@ -785,7 +786,14 @@ export async function handleTool(
                 if (s.level <= target.level && s.heading !== "") break;
                 parts.push(s.content);
               }
-              return { ...r, content: parts.join("\n") };
+              const sectionText = parts.join("\n");
+              const sectionLines = sectionText.split("\n");
+              const sectionTruncated = sectionLines.length > 200;
+              return {
+                ...r,
+                content: sectionTruncated ? sectionLines.slice(0, 200).join("\n") : sectionText,
+                ...(sectionTruncated ? { truncated: true, total_lines: sectionLines.length } : {}),
+              };
             }
           }
           // No section match — return first 200 lines

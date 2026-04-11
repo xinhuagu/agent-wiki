@@ -663,6 +663,21 @@ describe("server tool: wiki_search", () => {
     expect(hit.content).not.toContain("Import and call");
   });
 
+  it("truncates large sections at 200 lines with metadata", async () => {
+    const wiki = freshWiki();
+    const longSection = Array.from({ length: 300 }, (_, i) => `Algorithm line ${i + 1}`).join("\n");
+    const content = `---\ntitle: Big\ntype: note\n---\n## Algorithms\n${longSection}\n## Other\nEnd.`;
+    wiki.write("big-section.md", content);
+    const result = await handleTool(wiki, "wiki_search", { query: "Algorithm", include_content: true });
+    const parsed = JSON.parse(result as string);
+    const hit = parsed.results.find((r: any) => r.path === "big-section.md");
+    expect(hit).toBeDefined();
+    expect(hit.truncated).toBe(true);
+    expect(hit.total_lines).toBeGreaterThan(200);
+    expect(hit.content.split("\n").length).toBe(200);
+    expect(hit.content).not.toContain("End.");
+  });
+
   it("eliminates the need for follow-up wiki_read (1 request instead of 2)", async () => {
     const wiki = freshWiki();
     wiki.write("doc-a.md", "---\ntitle: Alpha\ntype: note\n---\nAlpha details about neural networks.");

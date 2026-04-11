@@ -1330,6 +1330,26 @@ describe("server tool: knowledge_digest_write", () => {
     ).rejects.toThrow(/non-empty/);
   });
 
+  it("handles malformed page items without crashing the batch", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [
+        null,
+        { page: "ok.md", title: "OK", body: "Fine." },
+        { page: 123, title: "Bad", body: "Missing string page." },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(3);
+    expect(parsed.written).toBe(1);
+    // Malformed items get per-item errors, not a whole-tool crash
+    expect(parsed.results[0].ok).toBe(false);
+    expect(parsed.results[0].page).toBe("(item 0)");
+    expect(parsed.results[1].ok).toBe(true);
+    expect(parsed.results[2].ok).toBe(false);
+    expect(parsed.results[2].page).toBe("(item 2)");
+  });
+
   it("rejects pages exceeding limit", async () => {
     const wiki = freshWiki();
     const pages = Array.from({ length: 101 }, (_, i) => ({

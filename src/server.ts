@@ -1429,8 +1429,17 @@ export async function handleTool(
       }
 
       const results: Array<Record<string, unknown>> = [];
-      for (const item of items) {
+      for (let idx = 0; idx < items.length; idx++) {
+        const item = items[idx];
+        const pageLabel = (item && typeof item === "object" && typeof item.page === "string")
+          ? item.page : `(item ${idx})`;
         try {
+          // Validate required fields
+          if (!item || typeof item !== "object" || typeof item.page !== "string"
+              || typeof item.title !== "string" || typeof item.body !== "string") {
+            throw new Error("Each page must have string page, title, and body fields");
+          }
+
           const topicField = item.topic ? sanitizeTopic(item.topic) : undefined;
 
           // Build frontmatter + body using gray-matter for safe YAML serialization
@@ -1456,7 +1465,7 @@ export async function handleTool(
             autoClassified: { type: classification.type, tags: classification.tags, confidence: classification.confidence },
           });
         } catch (err) {
-          results.push({ ok: false, page: item.page, error: err instanceof Error ? err.message : String(err) });
+          results.push({ ok: false, page: pageLabel, error: err instanceof Error ? err.message : String(err) });
         }
       }
 

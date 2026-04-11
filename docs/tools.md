@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-agent-wiki exposes 16 tools through the Model Context Protocol.
+agent-wiki exposes 18 tools through the Model Context Protocol.
 
 ## Raw Layer — Immutable Sources
 
@@ -32,6 +32,38 @@ agent-wiki exposes 16 tools through the Model Context Protocol.
 | `wiki_init` | Initialize a new knowledge base (creates wiki/, raw/, schemas/) |
 | `wiki_config` | Show current workspace configuration, paths, and available entity templates |
 | `wiki_rebuild` | Rebuild all `index.md` files (multi-level directory indexes) and `timeline.md` (chronological view) |
+
+## Code Analysis — Language Plugins
+
+| Tool | Description |
+|------|-------------|
+| `code_parse` | Parse a source file from raw/ into structured code knowledge (AST, normalized model, summary). Generates wiki pages automatically. Currently supports COBOL (.cbl, .cob, .cpy). Optionally traces a variable. |
+| `code_trace_variable` | Trace all references to a variable across a parsed source file. Shows where it is read, written, or passed, grouped by section/paragraph. |
+
+The code analysis system is plugin-based with a language-agnostic `NormalizedCodeModel`:
+
+```
+raw/PAYROLL.cbl
+  → code_parse
+    → raw/parsed/cobol/PAYROLL.ast.json        (language-specific AST)
+    → raw/parsed/cobol/PAYROLL.normalized.json  (language-agnostic model)
+    → raw/parsed/cobol/PAYROLL.summary.json     (summary statistics)
+    → raw/parsed/cobol/PAYROLL.model.json       (COBOL-specific model)
+    → wiki/code-payroll.md                      (auto-generated wiki page)
+    → wiki/code-call-graph.md                   (aggregate call graph)
+```
+
+### Normalized Code Model
+
+All language plugins emit a common `NormalizedCodeModel`:
+
+| Field | Description |
+|-------|-------------|
+| `units` | Programs, classes, modules, copybooks |
+| `procedures` | Functions, methods, paragraphs, sections |
+| `symbols` | Variables, fields, constants, parameters |
+| `relations` | Calls, performs, includes, imports |
+| `diagnostics` | Warnings and errors from parsing |
 
 ### Removed Tools
 

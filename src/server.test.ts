@@ -10,7 +10,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { Readable } from "node:stream";
 import { join } from "node:path";
 import { Wiki } from "./wiki.js";
-import { handleTool, tryImageBlock, splitSections, type ContentBlock } from "./server.js";
+import { handleTool, tryImageBlock, type ContentBlock } from "./server.js";
+import { splitSections, buildToc } from "./wiki.js";
 
 const TEST_ROOT = join(import.meta.dirname ?? ".", "__test_server__");
 
@@ -172,6 +173,25 @@ describe("splitSections", () => {
     const sections = splitSections(md);
     expect(sections.some(s => s.heading === "## Intro")).toBe(true);
     expect(sections.some(s => s.heading === "## Details")).toBe(true);
+  });
+
+  it("does not treat # inside code fences as headings", () => {
+    const md = "## Setup\n\n```bash\n# not a heading\nnpm install\n```\n\n## Usage\nDone.";
+    const sections = splitSections(md);
+    const headings = sections.map(s => s.heading).filter(Boolean);
+    expect(headings).toEqual(["## Setup", "## Usage"]);
+    expect(headings).not.toContain("# not a heading");
+  });
+
+  it("buildToc indentation is relative to shallowest heading (not absolute level)", () => {
+    // All H2/H3 — H2 should show flush left, H3 indented once
+    const md = "## Overview\n\nText.\n\n### Details\n\nMore.\n\n## Summary\n\nEnd.";
+    const sections = splitSections(md);
+    const toc = buildToc(sections);
+    const lines = toc.split("\n");
+    expect(lines[0]).toBe("## Overview");        // H2, minLevel=2 → 0 indent
+    expect(lines[1]).toBe("  ### Details");      // H3 → 1 indent (2 spaces)
+    expect(lines[2]).toBe("## Summary");
   });
 
   it("includes sub-sections under parent", async () => {

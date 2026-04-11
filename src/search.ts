@@ -525,16 +525,17 @@ export function editDistance(a: string, b: string): number {
 
 // ── Snippet generation ────────────────────────────────────────────
 
-/** Find the nearest ## heading above a given character offset in body text. */
+/** Find the nearest heading above a given character offset in body text.
+ *  Skips heading-like lines inside fenced code blocks (``` or ~~~). */
 export function findSection(body: string, charOffset: number): string | undefined {
-  const upTo = body.slice(0, charOffset);
-  // Walk backwards through lines looking for a heading
-  const lines = upTo.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i]!.trimEnd();
-    if (/^#{1,6}\s/.test(line)) return line;
+  const lines = body.slice(0, charOffset).split("\n");
+  let inCodeBlock = false;
+  let lastHeading: string | undefined;
+  for (const line of lines) {
+    if (/^(`{3,}|~{3,})/.test(line)) { inCodeBlock = !inCodeBlock; continue; }
+    if (!inCodeBlock && /^#{1,6}\s/.test(line.trimEnd())) lastHeading = line.trimEnd();
   }
-  return undefined;
+  return lastHeading;
 }
 
 /** Generate a context snippet around the best matching region.

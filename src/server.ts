@@ -17,80 +17,9 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { Wiki } from "./wiki.js";
+import { Wiki, splitSections, buildToc, findSectionByHeading } from "./wiki.js";
 import { VERSION } from "./version.js";
 import { RequestQueue } from "./queue.js";
-
-// ── Markdown section utilities ────────────────────────────────────
-
-interface MarkdownSection {
-  heading: string;   // e.g. "## Installation"
-  level: number;     // 1–6
-  content: string;   // heading line + body up to next same-or-higher heading
-}
-
-/** Split markdown into sections by headings. The leading frontmatter block
- *  (between --- delimiters) is returned as a special section with heading "". */
-export function splitSections(markdown: string): MarkdownSection[] {
-  const lines = markdown.split("\n");
-  const sections: MarkdownSection[] = [];
-  let buf: string[] = [];
-  let currentHeading = "";
-  let currentLevel = 0;
-  let inFrontmatter = false;
-  let frontmatterDone = false;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-
-    // Handle frontmatter block
-    if (i === 0 && line.trim() === "---") {
-      inFrontmatter = true;
-      buf.push(line);
-      continue;
-    }
-    if (inFrontmatter) {
-      buf.push(line);
-      if (line.trim() === "---" && i > 0) {
-        inFrontmatter = false;
-        frontmatterDone = true;
-      }
-      continue;
-    }
-
-    const headingMatch = line.match(/^(#{1,6})\s+(.*)/);
-    if (headingMatch) {
-      // Flush previous section
-      sections.push({ heading: currentHeading, level: currentLevel, content: buf.join("\n") });
-      buf = [line];
-      currentHeading = line.trimEnd();
-      currentLevel = headingMatch[1]!.length;
-    } else {
-      buf.push(line);
-    }
-  }
-  // Flush last section
-  if (buf.length > 0) {
-    sections.push({ heading: currentHeading, level: currentLevel, content: buf.join("\n") });
-  }
-  return sections;
-}
-
-/** Extract TOC lines from sections (headings only, indented by level). */
-function buildToc(sections: MarkdownSection[]): string {
-  return sections
-    .filter(s => s.heading !== "")
-    .map(s => "  ".repeat(s.level - 1) + s.heading)
-    .join("\n");
-}
-
-/** Find a section by heading text (case-insensitive, partial match allowed). */
-function findSectionByHeading(sections: MarkdownSection[], query: string): MarkdownSection | undefined {
-  const q = query.toLowerCase().replace(/^#{1,6}\s*/, "").trim();
-  return sections.find(s =>
-    s.heading.toLowerCase().replace(/^#{1,6}\s*/, "").trim().includes(q)
-  );
-}
 import { registerPlugin, getPluginForFile, listPlugins, summarizeModel } from "./code-analysis.js";
 import { cobolPlugin } from "./cobol/plugin.js";
 

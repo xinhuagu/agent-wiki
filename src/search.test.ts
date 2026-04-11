@@ -373,6 +373,16 @@ describe("makeSnippet", () => {
     expect(snippet.toLowerCase()).toContain("import");
     expect(section).toBe("## Usage");
   });
+
+  it("does not treat # inside code fences as section headings", () => {
+    const doc = buildSearchDoc(makePage({
+      path: "a.md",
+      title: "Guide",
+      content: "## Setup\n\n```bash\n# this is a comment\nnpm install\n```\n\n## Usage\n\nImport here.",
+    }));
+    const { section } = makeSnippet(doc, ["import"]);
+    expect(section).toBe("## Usage");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════

@@ -15,9 +15,10 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { Wiki, splitSections, buildToc, findSectionByHeading } from "./wiki.js";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { join, resolve, basename, extname } from "node:path";
+import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob } from "./wiki.js";
+import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
 import { VERSION } from "./version.js";
 import { RequestQueue } from "./queue.js";
 import { registerPlugin, getPluginForFile, listPlugins, summarizeModel } from "./code-analysis.js";
@@ -467,6 +468,53 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       },
 
       // ═══════════════════════════════════════════════════════
+      //  KNOWLEDGE INGESTION — Batch import, extract, chunk, pack
+      // ═══════════════════════════════════════════════════════
+      {
+        name: "knowledge_ingest_batch",
+        description:
+          "Batch import, extract, chunk, and pack source documents into digest packs. " +
+          "Scans a directory (or single file), imports to raw/, extracts text with structural provenance " +
+          "(per-page PDF, per-sheet XLSX, per-slide PPTX), chunks into fixed-line segments, then packs " +
+          "into markdown digest packs under raw/digest-packs/{topic}/. Each pack includes provenance headers. " +
+          "Files already in raw/ are skipped. Returns a compact summary with recommended next reads.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            source_path: {
+              type: "string",
+              description: "Absolute path to a directory or single file to ingest",
+            },
+            pattern: {
+              type: "string",
+              description: "Glob filter when source_path is a directory (e.g. '*.pdf', '*.{xlsx,docx}')",
+            },
+            maxFiles: {
+              type: "number",
+              description: "Maximum files to process (default: 100, max: 1000)",
+            },
+            topic: {
+              type: "string",
+              description: "Topic name for organizing digest packs (default: 'general')",
+            },
+            chunkLines: {
+              type: "number",
+              description: "Maximum lines per chunk (default: 100)",
+            },
+            packLines: {
+              type: "number",
+              description: "Maximum lines per digest pack (default: 500)",
+            },
+            continueOnError: {
+              type: "boolean",
+              description: "Continue processing on individual file errors (default: true)",
+            },
+          },
+          required: ["source_path"],
+        },
+      },
+
+      // ═══════════════════════════════════════════════════════
       //  CODE ANALYSIS — Parse source files into structured knowledge
       // ═══════════════════════════════════════════════════════
       {
@@ -520,6 +568,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
     "wiki_write", "wiki_delete", "wiki_init", "wiki_rebuild",
     "wiki_lint", // writes .lint-cache.json + log.md
     "code_parse", // writes parsed artifacts under raw/parsed/
+    "knowledge_ingest_batch", // writes to raw/ and raw/digest-packs/
   ]);
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -576,6 +625,21 @@ export function tryImageBlock(filePath: string, mimeType: string): ContentBlock 
   if (size > MAX_INLINE_IMAGE_BYTES) return null;
   const data = readFileSync(filePath).toString("base64");
   return { type: "image", data, mimeType };
+}
+
+/** Recursively walk a directory, returning relative file paths (skips dotfiles). */
+function walkSourceDir(dir: string): string[] {
+  const result: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      result.push(...walkSourceDir(full).map(f => join(entry.name, f)));
+    } else {
+      result.push(entry.name);
+    }
+  }
+  return result.sort();
 }
 
 /** Internal options — not exposed to MCP callers. */
@@ -1093,6 +1157,165 @@ export async function handleTool(
       const ast = plugin.parse(rawResult.content, filePath);
       const refs = plugin.traceVariable(ast, varName);
       return JSON.stringify({ variable: varName, file: filePath, references: refs }, null, 2);
+    }
+
+    // ═══ KNOWLEDGE INGESTION ═══
+
+    case "knowledge_ingest_batch": {
+      const sourcePath = resolve(args.source_path as string);
+      const pattern = args.pattern as string | undefined;
+      const maxFiles = Math.min(Math.max(1, Math.floor((args.maxFiles as number) ?? 100)), 1000);
+      const topic = (args.topic as string) ?? "general";
+      const chunkLinesLimit = Math.max(10, Math.floor((args.chunkLines as number) ?? 100));
+      const packLinesLimit = Math.max(50, Math.floor((args.packLines as number) ?? 500));
+      const continueOnError = (args.continueOnError as boolean) ?? true;
+
+      // Step 1: Scan
+      let filePaths: string[];
+      const srcStat = statSync(sourcePath);
+      if (srcStat.isDirectory()) {
+        filePaths = walkSourceDir(sourcePath);
+        if (pattern) {
+          filePaths = filePaths.filter(f => matchSimpleGlob(f, pattern));
+        }
+      } else {
+        filePaths = [basename(sourcePath)];
+      }
+      filePaths = filePaths.slice(0, maxFiles);
+
+      const matched = filePaths.length;
+      let imported = 0, skipped = 0, extracted = 0;
+      const allChunks: ExtractionSegment[] = [];
+      const errors: Array<{ file: string; stage: string; error: string }> = [];
+      const sourceNames: string[] = [];
+
+      // Extractable document formats
+      const EXTRACTABLE = new Set([".pdf", ".docx", ".xlsx", ".pptx", ".html", ".htm"]);
+      const TEXT_LIKE = (mime: string) =>
+        mime.startsWith("text/") || mime === "application/json" || mime === "application/xml"
+        || mime === "application/sql" || mime === "application/x-yaml";
+
+      // Step 2-3: Import + Extract
+      for (const relPath of filePaths) {
+        const rawFilename = `${topic}/${relPath}`;
+        const fullSourcePath = srcStat.isDirectory()
+          ? join(sourcePath, relPath)
+          : sourcePath;
+
+        // Import to raw/
+        try {
+          wiki.rawAdd(rawFilename, { sourcePath: fullSourcePath });
+          imported++;
+        } catch (e: any) {
+          if (e.message.includes("already exists")) {
+            skipped++;
+          } else if (continueOnError) {
+            errors.push({ file: relPath, stage: "import", error: e.message });
+            continue;
+          } else {
+            throw e;
+          }
+        }
+
+        // Extract
+        const ext = extname(relPath).toLowerCase();
+        const rawFullPath = join(wiki.config.rawDir, rawFilename);
+        try {
+          let segments: ExtractionSegment[];
+          if (EXTRACTABLE.has(ext)) {
+            const result = await extractDocument(rawFullPath);
+            segments = result.segments;
+          } else {
+            const mime = guessMime(relPath);
+            if (TEXT_LIKE(mime)) {
+              const content = readFileSync(rawFullPath, "utf-8");
+              segments = [{ text: content, source: { file: rawFilename } }];
+            } else {
+              // Binary file — skip extraction
+              continue;
+            }
+          }
+
+          // Normalize file path in source coordinates
+          for (const seg of segments) {
+            seg.source.file = rawFilename;
+          }
+
+          const chunked = chunkSegments(segments, chunkLinesLimit);
+          allChunks.push(...chunked);
+          sourceNames.push(rawFilename);
+          extracted++;
+        } catch (e: any) {
+          if (continueOnError) {
+            errors.push({ file: relPath, stage: "extract", error: e.message });
+          } else {
+            throw e;
+          }
+        }
+      }
+
+      // Step 4: Pack
+      const packs: Array<{ path: string; chunks: number; sources: string[] }> = [];
+      let packNum = 1;
+      let currentPackLines = 0;
+      let currentPackChunks: ExtractionSegment[] = [];
+
+      const flushPack = () => {
+        if (currentPackChunks.length === 0) return;
+        const packSources = [...new Set(currentPackChunks.map(c => `raw/${c.source.file}`))];
+
+        let md = "---\n";
+        md += `title: "Digest Pack ${String(packNum).padStart(3, "0")}"\n`;
+        md += `topic: "${topic}"\n`;
+        md += `sources: ${JSON.stringify(packSources)}\n`;
+        md += `totalChunks: ${currentPackChunks.length}\n`;
+        md += "---\n\n";
+
+        for (const chunk of currentPackChunks) {
+          let header = `## raw/${chunk.source.file}`;
+          if (chunk.source.page !== undefined) header += ` [Page ${chunk.source.page}]`;
+          if (chunk.source.sheet) header += ` [Sheet: ${chunk.source.sheet}]`;
+          if (chunk.source.slide !== undefined) header += ` [Slide ${chunk.source.slide}]`;
+          md += `${header}\n\n${chunk.text}\n\n`;
+        }
+
+        const packPath = `digest-packs/${topic}/pack-${String(packNum).padStart(3, "0")}.md`;
+        wiki.rawAddParsedArtifact(packPath, md.trimEnd(), {
+          mimeType: "text/markdown",
+          description: `Digest pack ${packNum} for topic "${topic}"`,
+        });
+
+        packs.push({ path: packPath, chunks: currentPackChunks.length, sources: packSources });
+        packNum++;
+        currentPackChunks = [];
+        currentPackLines = 0;
+      };
+
+      for (const chunk of allChunks) {
+        const lines = chunk.text.split("\n").length;
+        if (currentPackLines + lines > packLinesLimit && currentPackChunks.length > 0) {
+          flushPack();
+        }
+        currentPackChunks.push(chunk);
+        currentPackLines += lines;
+      }
+      flushPack();
+
+      const nextRecommendedReads = packs.slice(0, 5).map(p => `raw/${p.path}`);
+
+      return JSON.stringify({
+        ok: true,
+        matched,
+        imported,
+        skipped,
+        extracted,
+        chunks: allChunks.length,
+        packs: packs.length,
+        failed: errors.length,
+        ...(errors.length > 0 ? { errors: errors.slice(0, 10) } : {}),
+        packPaths: packs.map(p => `raw/${p.path}`),
+        nextRecommendedReads,
+      }, null, 2);
     }
 
     // ═══ BATCH ═══

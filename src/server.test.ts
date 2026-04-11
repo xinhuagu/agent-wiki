@@ -979,6 +979,146 @@ describe("server tool: wiki_rebuild_index + wiki_rebuild_timeline", () => {
   });
 });
 
+describe("server tool: knowledge_ingest_batch", () => {
+  const SOURCE_DIR = join(TEST_ROOT, "__ingest_source__");
+
+  beforeEach(() => {
+    cleanUp();
+    mkdirSync(SOURCE_DIR, { recursive: true });
+  });
+  afterEach(cleanUp);
+
+  it("ingests a single text file", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "readme.txt"), "Hello world\nLine two\nLine three");
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "test-topic",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.matched).toBe(1);
+    expect(parsed.imported).toBe(1);
+    expect(parsed.extracted).toBe(1);
+    expect(parsed.packs).toBeGreaterThan(0);
+    expect(parsed.packPaths[0]).toContain("digest-packs/test-topic/pack-001.md");
+    // Pack file exists in raw/
+    expect(existsSync(join(wiki.config.rawDir, "digest-packs/test-topic/pack-001.md"))).toBe(true);
+  });
+
+  it("ingests a directory with multiple files", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "doc1.md"), "# Doc 1\nContent one.");
+    writeFileSync(join(SOURCE_DIR, "doc2.md"), "# Doc 2\nContent two.");
+    writeFileSync(join(SOURCE_DIR, "doc3.txt"), "Plain text three.");
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "multi",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matched).toBe(3);
+    expect(parsed.imported).toBe(3);
+    expect(parsed.extracted).toBe(3);
+    // Verify pack contains provenance headers
+    const packContent = readFileSync(join(wiki.config.rawDir, "digest-packs/multi/pack-001.md"), "utf-8");
+    expect(packContent).toContain("## raw/multi/");
+  });
+
+  it("skips already-imported files", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "exists.txt"), "Already here.");
+    // Pre-import with same raw path
+    wiki.rawAdd("skip-topic/exists.txt", { content: "Already here." });
+
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "skip-topic",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matched).toBe(1);
+    expect(parsed.skipped).toBe(1);
+    expect(parsed.imported).toBe(0);
+  });
+
+  it("filters by pattern", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "keep.md"), "# Keep\nContent.");
+    writeFileSync(join(SOURCE_DIR, "skip.txt"), "Skip this.");
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "pattern",
+      pattern: "*.md",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matched).toBe(1);
+    expect(parsed.imported).toBe(1);
+  });
+
+  it("respects maxFiles limit", async () => {
+    const wiki = freshWiki();
+    for (let i = 0; i < 10; i++) {
+      writeFileSync(join(SOURCE_DIR, `file${i}.txt`), `Content ${i}`);
+    }
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      maxFiles: 3,
+      topic: "limited",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.matched).toBe(3);
+  });
+
+  it("continues on error with continueOnError", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "good.txt"), "Good content.");
+    // Create a file with .pdf extension but invalid content
+    writeFileSync(join(SOURCE_DIR, "bad.pdf"), "not a real pdf");
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "errors",
+      continueOnError: true,
+    });
+    const parsed = JSON.parse(result as string);
+    // Good file should be processed
+    expect(parsed.extracted).toBeGreaterThan(0);
+    // Bad file should be in errors
+    expect(parsed.failed).toBeGreaterThan(0);
+    expect(parsed.errors[0].file).toContain("bad.pdf");
+  });
+
+  it("splits into multiple packs when content exceeds packLines", async () => {
+    const wiki = freshWiki();
+    // Create files with enough content to exceed packLines
+    for (let i = 0; i < 3; i++) {
+      const body = Array.from({ length: 100 }, (_, j) => `Line ${j} of file ${i}`).join("\n");
+      writeFileSync(join(SOURCE_DIR, `big${i}.txt`), body);
+    }
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "split",
+      packLines: 120, // 3 files x 100 lines > 120, should create multiple packs
+      chunkLines: 50,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.packs).toBeGreaterThan(1);
+    expect(parsed.packPaths.length).toBe(parsed.packs);
+  });
+
+  it("ingests HTML with provenance", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "page.html"), "<html><body><p>Hello HTML</p></body></html>");
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "html-test",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.extracted).toBe(1);
+    const packContent = readFileSync(join(wiki.config.rawDir, "digest-packs/html-test/pack-001.md"), "utf-8");
+    expect(packContent).toContain("Hello HTML");
+    expect(packContent).toContain("## raw/html-test/page.html");
+  });
+});
+
 describe("server tool: wiki_config", () => {
   beforeEach(cleanUp);
   afterEach(cleanUp);

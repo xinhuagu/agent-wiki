@@ -526,10 +526,17 @@ export function tryImageBlock(filePath: string, mimeType: string): ContentBlock 
   return { type: "image", data, mimeType };
 }
 
+/** Internal options — not exposed to MCP callers. */
+export interface HandleToolOpts {
+  /** When true, wiki_write/wiki_delete skip rebuildIndex (batch rebuilds once at end). */
+  skipRebuild?: boolean;
+}
+
 export async function handleTool(
   wiki: Wiki,
   name: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  opts?: HandleToolOpts,
 ): Promise<string | ContentBlock[]> {
   switch (name) {
     // ═══ RAW LAYER ═══
@@ -717,7 +724,7 @@ export async function handleTool(
         args.source as string | undefined
       );
       // Auto-rebuild indexes (skipped when called from batch — batch rebuilds once at end)
-      if (!args._skipRebuild) wiki.rebuildIndex();
+      if (!opts?.skipRebuild) wiki.rebuildIndex();
       const classification = wiki.classify(enrichedContent);
       return JSON.stringify({
         ok: true,
@@ -729,7 +736,7 @@ export async function handleTool(
 
     case "wiki_delete": {
       const existed = wiki.delete(args.page as string);
-      if (existed && !args._skipRebuild) wiki.rebuildIndex();
+      if (existed && !opts?.skipRebuild) wiki.rebuildIndex();
       return JSON.stringify({ ok: existed, page: args.page });
     }
 
@@ -925,11 +932,8 @@ export async function handleTool(
           continue;
         }
         try {
-          const opArgs: Record<string, unknown> = { ...(op.args ?? {}) };
-          if (REBUILD_TOOLS.has(op.tool)) {
-            opArgs._skipRebuild = true;
-          }
-          const result = await handleTool(wiki, op.tool, opArgs);
+          const opOpts: HandleToolOpts = REBUILD_TOOLS.has(op.tool) ? { skipRebuild: true } : {};
+          const result = await handleTool(wiki, op.tool, op.args ?? {}, opOpts);
 
           if (REBUILD_TOOLS.has(op.tool)) {
             // Check if the operation actually changed something worth rebuilding for
@@ -948,16 +952,8 @@ export async function handleTool(
               results.push({ tool: op.tool, result });
             }
           } else {
-            // ContentBlock[] — extract text blocks, note image blocks (skip large base64)
-            const parts: unknown[] = [];
-            for (const block of result) {
-              if (block.type === "text") {
-                try { parts.push(JSON.parse(block.text)); } catch { parts.push(block.text); }
-              } else {
-                parts.push({ type: block.type, mimeType: (block as any).mimeType });
-              }
-            }
-            results.push({ tool: op.tool, result: parts.length === 1 ? parts[0] : parts });
+            // ContentBlock[] — preserve full blocks including inline images
+            results.push({ tool: op.tool, result });
           }
         } catch (err) {
           results.push({ tool: op.tool, error: err instanceof Error ? err.message : String(err) });

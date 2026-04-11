@@ -344,6 +344,40 @@ describe("server tool: batch", () => {
     expect(parsed.results[0].error).toMatch(/nest/i);
   });
 
+  it("preserves inline image data in batch responses", async () => {
+    const wiki = freshWiki();
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const srcPath = join(TEST_ROOT, "batch-img.png");
+    writeFileSync(srcPath, pngBytes);
+
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "raw_add", args: { filename: "img.png", source_path: srcPath } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    // Result should be the full ContentBlock[] with image data preserved
+    const blocks = parsed.results[0].result as any[];
+    expect(Array.isArray(blocks)).toBe(true);
+    const imgBlock = blocks.find((b: any) => b.type === "image");
+    expect(imgBlock).toBeDefined();
+    expect(imgBlock.data).toBe(pngBytes.toString("base64"));
+    expect(imgBlock.mimeType).toBe("image/png");
+  });
+
+  it("does not allow external callers to skip rebuild via args", async () => {
+    const wiki = freshWiki();
+    // Even if a caller passes _skipRebuild in args, it should be ignored
+    await handleTool(wiki, "wiki_write", {
+      page: "sneaky.md",
+      content: "---\ntitle: Sneaky\ntype: note\n---\nBody.",
+      _skipRebuild: true,
+    });
+    // Index should still have been rebuilt (rebuildIndex checks opts, not args)
+    const idx = readFileSync(join(wiki.config.wikiDir, "index.md"), "utf-8");
+    expect(idx).toContain("sneaky");
+  });
+
   it("handles ops with no args", async () => {
     const wiki = freshWiki();
     wiki.write("p.md", "---\ntitle: P\ntype: note\n---\nP.");

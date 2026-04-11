@@ -1177,6 +1177,31 @@ describe("server tool: knowledge_ingest_batch", () => {
     expect(packContent).toContain("Hello HTML");
     expect(packContent).toContain("## raw/html-test/page.html");
   });
+
+  it("rejects topic with path traversal", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "ok.txt"), "content");
+    await expect(
+      handleTool(wiki, "knowledge_ingest_batch", {
+        source_path: SOURCE_DIR,
+        topic: "../../wiki",
+      })
+    ).rejects.toThrow(/invalid topic/i);
+  });
+
+  it("sanitizes topic to safe slug", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(SOURCE_DIR, "ok.txt"), "content");
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: SOURCE_DIR,
+      topic: "my topic (v2)",
+    });
+    const parsed = JSON.parse(result as string);
+    // Spaces and parens should be replaced with hyphens
+    expect(parsed.packPaths[0]).toMatch(/my-topic--v2-/);
+    expect(parsed.packPaths[0]).not.toContain(" ");
+    expect(parsed.packPaths[0]).not.toContain("(");
+  });
 });
 
 describe("server tool: wiki_config", () => {

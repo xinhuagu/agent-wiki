@@ -17,7 +17,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve, basename, extname } from "node:path";
-import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob } from "./wiki.js";
+import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob, safePath } from "./wiki.js";
 import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
 import { VERSION } from "./version.js";
 import { RequestQueue } from "./queue.js";
@@ -1165,7 +1165,12 @@ export async function handleTool(
       const sourcePath = resolve(args.source_path as string);
       const pattern = args.pattern as string | undefined;
       const maxFiles = Math.min(Math.max(1, Math.floor((args.maxFiles as number) ?? 100)), 1000);
-      const topic = (args.topic as string) ?? "general";
+      // Sanitize topic to a safe slug — reject traversal, absolute paths, null bytes
+      const rawTopic = (args.topic as string) ?? "general";
+      if (!rawTopic || /\.\.|^\/|^\\|\x00/.test(rawTopic)) {
+        throw new Error(`Invalid topic: "${rawTopic}". Must not contain "..", absolute paths, or null bytes.`);
+      }
+      const topic = rawTopic.replace(/[^a-zA-Z0-9_\-/]/g, "-").replace(/\/{2,}/g, "/").replace(/^\/|\/$/g, "");
       const packLinesLimit = Math.max(50, Math.floor((args.packLines as number) ?? 500));
       const chunkLinesLimit = Math.min(Math.max(10, Math.floor((args.chunkLines as number) ?? 100)), packLinesLimit);
       const continueOnError = (args.continueOnError as boolean) ?? true;
@@ -1205,8 +1210,8 @@ export async function handleTool(
         mime.startsWith("text/") || mime === "application/json" || mime === "application/xml"
         || mime === "application/sql" || mime === "application/x-yaml";
 
-      // Clean stale packs from previous runs of this topic
-      const packsDir = join(wiki.config.rawDir, "digest-packs", topic);
+      // Clean stale packs from previous runs of this topic (safePath prevents escape)
+      const packsDir = safePath(wiki.config.rawDir, join("digest-packs", topic));
       if (existsSync(packsDir)) {
         for (const f of readdirSync(packsDir)) {
           if (f.startsWith("pack-") && f.endsWith(".md")) {

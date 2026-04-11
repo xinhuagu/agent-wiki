@@ -680,7 +680,7 @@ _Chronological view of all knowledge in this wiki._
    * A .meta.yaml sidecar is written so lint/integrity checks pass.
    */
   rawAddParsedArtifact(relativePath: string, content: string, opts?: { mimeType?: string; description?: string }): void {
-    const fullPath = join(this.config.rawDir, relativePath);
+    const fullPath = safePath(this.config.rawDir, relativePath);
     mkdirSync(dirname(fullPath), { recursive: true });
     writeFileSync(fullPath, content, "utf-8");
 

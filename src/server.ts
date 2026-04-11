@@ -474,7 +474,6 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
   const WRITE_TOOLS = new Set([
     "raw_add", "raw_fetch", "raw_import_confluence", "raw_import_jira",
     "wiki_write", "wiki_delete", "wiki_init", "wiki_rebuild",
-    "batch", // may contain writes — must serialize
     "wiki_lint", // writes .lint-cache.json + log.md
     "code_parse", // writes parsed artifacts under raw/parsed/
   ]);
@@ -482,7 +481,15 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
     const params = args as Record<string, unknown>;
-    const isWrite = WRITE_TOOLS.has(name);
+
+    // batch: route dynamically — write queue only if any op mutates state
+    let isWrite: boolean;
+    if (name === "batch") {
+      const ops = (params.operations ?? []) as Array<{ tool: string }>;
+      isWrite = ops.some((op) => WRITE_TOOLS.has(op.tool));
+    } else {
+      isWrite = WRITE_TOOLS.has(name);
+    }
 
     const run = async () => {
       try {
@@ -916,19 +923,31 @@ export async function handleTool(
     // ═══ BATCH ═══
 
     case "batch": {
+      const MAX_BATCH_OPS = 50;
       const ops = args.operations as Array<{ tool: string; args?: Record<string, unknown> }>;
       if (!Array.isArray(ops) || ops.length === 0) {
         throw new Error("operations must be a non-empty array");
+      }
+      if (ops.length > MAX_BATCH_OPS) {
+        throw new Error(`Batch too large: ${ops.length} operations exceeds limit of ${MAX_BATCH_OPS}`);
       }
 
       // Tools whose per-call rebuildIndex should be deferred to end of batch
       const REBUILD_TOOLS = new Set(["wiki_write", "wiki_delete"]);
       let needsRebuild = false;
+      let needsTimeline = false;
 
       const results: Array<Record<string, unknown>> = [];
       for (const op of ops) {
         if (op.tool === "batch") {
           results.push({ tool: op.tool, error: "Cannot nest batch operations" });
+          continue;
+        }
+        // Deduplicate wiki_rebuild — defer to end-of-batch full rebuild
+        if (op.tool === "wiki_rebuild") {
+          needsRebuild = true;
+          needsTimeline = true;
+          results.push({ tool: op.tool, result: { ok: true, deferred: "merged into end-of-batch rebuild" } });
           continue;
         }
         try {
@@ -960,7 +979,11 @@ export async function handleTool(
         }
       }
 
-      if (needsRebuild) wiki.rebuildIndex();
+      if (needsRebuild) {
+        const pageCache = wiki.buildPageCache();
+        wiki.rebuildIndex(pageCache);
+        if (needsTimeline) wiki.rebuildTimeline(pageCache);
+      }
 
       return JSON.stringify({ results, count: results.length }, null, 2);
     }

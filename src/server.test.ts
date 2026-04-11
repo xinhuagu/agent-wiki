@@ -378,6 +378,37 @@ describe("server tool: batch", () => {
     expect(idx).toContain("sneaky");
   });
 
+  it("rejects batch exceeding max operations limit", async () => {
+    const wiki = freshWiki();
+    const ops = Array.from({ length: 51 }, (_, i) => ({
+      tool: "wiki_list",
+    }));
+    await expect(
+      handleTool(wiki, "batch", { operations: ops })
+    ).rejects.toThrow(/limit/i);
+  });
+
+  it("deduplicates wiki_rebuild within batch", async () => {
+    const wiki = freshWiki();
+    wiki.write("page-a.md", "---\ntitle: A\ntype: note\n---\nA.");
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_write", args: { page: "page-b.md", content: "---\ntitle: B\ntype: note\n---\nB." } },
+        { tool: "wiki_rebuild" },
+        { tool: "wiki_write", args: { page: "page-c.md", content: "---\ntitle: C\ntype: note\n---\nC." } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    // wiki_rebuild should be deferred, not executed inline
+    expect(parsed.results[1].result.deferred).toBeTruthy();
+    // All pages should be in the index (rebuilt once at end)
+    const idx = readFileSync(join(wiki.config.wikiDir, "index.md"), "utf-8");
+    expect(idx).toContain("page-b");
+    expect(idx).toContain("page-c");
+    // Timeline should also be rebuilt since wiki_rebuild was in the batch
+    expect(existsSync(join(wiki.config.wikiDir, "timeline.md"))).toBe(true);
+  });
+
   it("handles ops with no args", async () => {
     const wiki = freshWiki();
     wiki.write("p.md", "---\ntitle: P\ntype: note\n---\nP.");

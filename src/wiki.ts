@@ -28,7 +28,7 @@ import { createHash } from "node:crypto";
 import matter from "gray-matter";
 import yaml from "js-yaml";
 import { VERSION } from "./version.js";
-import { SearchEngine, type SearchResult } from "./search.js";
+import { SearchEngine, type SearchResult, type SearchConfig, DEFAULT_SEARCH_CONFIG } from "./search.js";
 import { extractText, extractDocument, guessMime } from "./extraction.js";
 import type { AtlassianConfig, ConfluenceImportResult, JiraImportResult } from "./atlassian.js";
 
@@ -133,6 +133,8 @@ export interface WikiConfig {
     maxPages: number;
     maxAttachmentSize: number;
   };
+  /** Search engine configuration. */
+  search: SearchConfig;
 }
 
 // System pages that lint should treat specially
@@ -266,6 +268,11 @@ export class Wiki {
     this.config = Wiki.loadConfig(resolvedRoot, workspace);
     this.searchEngine = new SearchEngine();
     this.searchEngine.setLoader(() => this.loadAllPages());
+    this.searchEngine.setConfig(this.config.search);
+    // Load persisted vector index if hybrid mode is enabled
+    if (this.config.search.hybrid) {
+      this.loadVectorIndex();
+    }
   }
 
   /** Load and parse all wiki pages from disk. Used as search index loader. */
@@ -406,6 +413,7 @@ _Chronological view of all knowledge in this wiki._
     const lintData = (raw.lint ?? {}) as Record<string, unknown>;
     const securityData = (raw.security ?? {}) as Record<string, unknown>;
     const atlassianData = (raw.atlassian ?? {}) as Record<string, unknown>;
+    const searchData = (raw.search ?? {}) as Record<string, unknown>;
 
     // Resolve workspace directory (priority: override > env > config > root)
     let workspace: string;
@@ -448,6 +456,12 @@ _Chronological view of all knowledge in this wiki._
         allowedHosts: Array.isArray(atlassianData.allowed_hosts) ? atlassianData.allowed_hosts as string[] : [],
         maxPages: (atlassianData.max_pages as number) ?? 100,
         maxAttachmentSize: (atlassianData.max_attachment_size as number) ?? 10 * 1024 * 1024,
+      },
+      search: {
+        hybrid: (searchData.hybrid as boolean) ?? DEFAULT_SEARCH_CONFIG.hybrid,
+        bm25Weight: (searchData.bm25_weight as number) ?? DEFAULT_SEARCH_CONFIG.bm25Weight,
+        vectorWeight: (searchData.vector_weight as number) ?? DEFAULT_SEARCH_CONFIG.vectorWeight,
+        model: (searchData.model as string) ?? DEFAULT_SEARCH_CONFIG.model,
       },
     };
   }
@@ -1357,11 +1371,86 @@ _Chronological view of all knowledge in this wiki._
 
   // ── Search ────────────────────────────────────────────────────
 
-  /** BM25 search across all wiki pages with inverted index, synonym expansion,
-   *  prefix/fuzzy matching, and field-weighted scoring.
+  /** BM25 search across all wiki pages (synchronous, pure BM25).
    *  Index is built lazily on first search and cached until invalidated by write/delete. */
   search(query: string, limit = 10): SearchResult[] {
     return this.searchEngine.search(query, limit);
+  }
+
+  /** Hybrid BM25+vector search (async).
+   *  When `config.search.hybrid` is true, re-ranks BM25 candidates using vector
+   *  cosine similarity. Falls back to pure BM25 if embeddings are unavailable. */
+  async searchHybrid(query: string, limit = 10): Promise<SearchResult[]> {
+    return this.searchEngine.searchHybrid(query, limit);
+  }
+
+  // ── Vector index persistence (hybrid search) ─────────────────
+
+  /** Path where the vector index is persisted. */
+  get vectorIndexPath(): string {
+    return join(this.config.wikiDir, ".search-vectors.json");
+  }
+
+  /** Load the persisted vector index from disk into the search engine.
+   *  No-op if the file doesn't exist. */
+  loadVectorIndex(): void {
+    const p = this.vectorIndexPath;
+    if (!existsSync(p)) return;
+    try {
+      const raw = JSON.parse(readFileSync(p, "utf-8")) as {
+        model?: string;
+        vectors?: Record<string, number[]>;
+      };
+      if (raw.model !== this.config.search.model) return; // stale model — discard
+      const map = new Map<string, number[]>();
+      for (const [path, vec] of Object.entries(raw.vectors ?? {})) {
+        if (Array.isArray(vec)) map.set(path, vec);
+      }
+      this.searchEngine.setVectors(map);
+    } catch {
+      // Corrupted index — ignore, will be rebuilt on next write/rebuild
+    }
+  }
+
+  /** Persist the current in-memory vector index to disk. */
+  saveVectorIndex(): void {
+    const vectors: Record<string, number[]> = {};
+    for (const [path, vec] of this.searchEngine.getVectors()) {
+      vectors[path] = vec;
+    }
+    const p = this.vectorIndexPath;
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({ model: this.config.search.model, vectors }, null, 0));
+  }
+
+  /** Compute and store the embedding for a single wiki page.
+   *  Intended to be called by the server after wiki_write when hybrid mode is on. */
+  async updatePageVector(pagePath: string): Promise<void> {
+    const page = this.read(pagePath);
+    if (!page) return;
+    const text = `${page.title} ${page.tags.join(" ")} ${page.content}`.slice(0, 2000);
+    const embedding = await this.searchEngine.embedText(text);
+    this.searchEngine.updateVector(pagePath, embedding);
+    this.saveVectorIndex();
+  }
+
+  /** Remove the stored embedding for a deleted page and persist the change. */
+  removePageVector(pagePath: string): void {
+    this.searchEngine.removeVector(pagePath);
+    this.saveVectorIndex();
+  }
+
+  /** Rebuild the full vector index for all pages (used by wiki_rebuild when hybrid is on). */
+  async rebuildVectorIndex(): Promise<void> {
+    const pages = this.listAllPages();
+    for (const pagePath of pages) {
+      const page = this.read(pagePath);
+      if (!page) continue;
+      const text = `${page.title} ${page.tags.join(" ")} ${page.content}`.slice(0, 2000);
+      const embedding = await this.searchEngine.embedText(text);
+      this.searchEngine.updateVector(pagePath, embedding);
+    }
+    this.saveVectorIndex();
   }
 
   // ── Lint — Self-checking & error detection ────────────────────

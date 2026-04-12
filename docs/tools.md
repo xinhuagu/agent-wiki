@@ -27,7 +27,7 @@ agent-wiki exposes 18 tools through the Model Context Protocol.
 | `wiki_write` | Create or update a page (auto-timestamps, auto-classify, auto-route to nested dirs). Triggers index rebuild. |
 | `wiki_delete` | Delete a page (guards system pages). Triggers index rebuild — stale indexes and empty dirs are cleaned up. |
 | `wiki_list` | List pages, filter by entity type or tag |
-| `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support |
+| `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support. Optional hybrid BM25+vector mode (enable `search.hybrid: true` in `.agent-wiki.yaml`, requires `@xenova/transformers`). |
 | `wiki_lint` | Health checks: contradictions, orphans, broken links, SHA-256 integrity |
 | `wiki_init` | Initialize a new knowledge base (creates wiki/, raw/, schemas/) |
 | `wiki_config` | Show current workspace configuration, paths, and available entity templates |

@@ -9,7 +9,7 @@ agent-wiki exposes 18 tools through the Model Context Protocol.
 | `raw_add` | Add a source document (content string, local file, or entire directory). SHA-256 hashed with `.meta.yaml` sidecar. Supports `auto_version` for same-name files and `pattern` filtering for directories. |
 | `raw_fetch` | Download from URL to raw/ (smart arXiv handling — `arxiv.org/abs/XXXX` auto-converts to PDF) |
 | `raw_list` | List all raw documents with metadata (path, source URL, hash, size) |
-| `raw_read` | Read a raw document — text/SVG return content; PDF/DOCX/XLSX/PPTX extracted automatically; other binary return metadata only. For PDFs, optional `pages` parameter (e.g. `"1-5"`, `"3,7-10"`) extracts specific pages without parsing the entire file. |
+| `raw_read` | Read a raw document — text/SVG return content; PDF/DOCX/XLSX/PPTX extracted automatically; images returned inline (<10MB); other binary return metadata only. Supports pagination to bypass the 10K char default truncation: `pages` for PDF/PPTX ranges, `sheet` for a specific XLSX sheet, `offset`+`limit` for line-based reading of DOCX and text files. Paginated responses include metadata (`total_pages`, `sheet_names`, `total_lines`, etc.) for follow-up reads. |
 | `raw_versions` | List all versions of a file with metadata, returns latest version |
 
 ## Atlassian — Confluence & Jira

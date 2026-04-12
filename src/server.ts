@@ -351,6 +351,10 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
               type: "boolean",
               description: "If true, include page content in results. When a section matched, returns that section; otherwise returns first 200 lines. Saves a follow-up batch read. Default: false.",
             },
+            inline_budget: {
+              type: "number",
+              description: "Max total characters of inlined content across all results (only with include_content=true). Greedy — top-scoring results get content first; lower-scoring ones fall back to snippet-only when budget is exhausted. Omit for no limit.",
+            },
           },
           required: ["query"],
         },
@@ -964,6 +968,8 @@ export async function handleTool(
         return JSON.stringify({ results, count: results.length }, null, 2);
       }
       // Inline page content — eliminates follow-up wiki_read calls
+      const inlineBudget = args.inline_budget != null ? (args.inline_budget as number) : Infinity;
+      let budgetRemaining = inlineBudget;
       const enriched = results.map((r) => {
         try {
           const fullPath = join(wiki.config.wikiDir, r.path);
@@ -974,28 +980,41 @@ export async function handleTool(
             const target = findSectionByHeading(sections, r.section);
             if (target) {
               const targetIdx = sections.indexOf(target);
+              let hasSubsections = false;
               const parts = [target.content];
               for (let i = targetIdx + 1; i < sections.length; i++) {
                 const s = sections[i]!;
                 if (s.level <= target.level && s.heading !== "") break;
+                if (s.heading !== "") hasSubsections = true;
                 parts.push(s.content);
               }
               const sectionText = parts.join("\n");
               const sectionLines = sectionText.split("\n");
               const sectionTruncated = sectionLines.length > 200;
+              const content = sectionTruncated ? sectionLines.slice(0, 200).join("\n") : sectionText;
+              if (content.length > budgetRemaining) {
+                return { ...r, budget_exceeded: true };
+              }
+              budgetRemaining -= content.length;
               return {
                 ...r,
-                content: sectionTruncated ? sectionLines.slice(0, 200).join("\n") : sectionText,
+                content,
                 ...(sectionTruncated ? { truncated: true, total_lines: sectionLines.length } : {}),
+                ...(sectionTruncated && hasSubsections ? { has_subsections: true } : {}),
               };
             }
           }
           // No section match — return first 200 lines
           const lines = raw.split("\n");
           const truncated = lines.length > 200;
+          const content = truncated ? lines.slice(0, 200).join("\n") : raw;
+          if (content.length > budgetRemaining) {
+            return { ...r, budget_exceeded: true };
+          }
+          budgetRemaining -= content.length;
           return {
             ...r,
-            content: truncated ? lines.slice(0, 200).join("\n") : raw,
+            content,
             ...(truncated ? { truncated: true, total_lines: lines.length } : {}),
           };
         } catch {
@@ -1052,10 +1071,12 @@ export async function handleTool(
               continue;
             }
             const targetIdx = sections.indexOf(target);
+            let hasSubsections = false;
             const parts = [target.content];
             for (let i = targetIdx + 1; i < sections.length; i++) {
               const s = sections[i]!;
               if (s.level <= target.level && s.heading !== "") break;
+              if (s.heading !== "") hasSubsections = true;
               parts.push(s.content);
             }
             const sectionText = parts.join("\n");
@@ -1066,6 +1087,7 @@ export async function handleTool(
               content: truncated ? sectionLines.slice(0, perPageLimit).join("\n") : sectionText,
               truncated,
               ...(truncated ? { total_lines: sectionLines.length } : {}),
+              ...(truncated && hasSubsections ? { has_subsections: true } : {}),
               ...(truncated && includeToc ? { toc: buildToc(sections) } : {}),
             });
           } else {

@@ -708,6 +708,62 @@ describe("server tool: wiki_search", () => {
     // Saved 1 request
     expect(calls - optimizedCalls).toBe(1);
   });
+
+  it("has_subsections is true when truncated section has child headings", async () => {
+    const wiki = freshWiki();
+    // 201 body lines + a sub-heading → section will be truncated and has sub-sections
+    const longBody = Array.from({ length: 201 }, (_, i) => `Line ${i + 1} about subsections`).join("\n");
+    const content = ["---", "title: Deep Guide", "type: how-to", "---",
+      "## Main", longBody, "### Sub A", "Sub-section detail."].join("\n");
+    wiki.write("deep-guide.md", content);
+    const result = await handleTool(wiki, "wiki_search", { query: "subsections", include_content: true });
+    const parsed = JSON.parse(result as string);
+    const hit = parsed.results.find((r: any) => r.path === "deep-guide.md");
+    expect(hit).toBeDefined();
+    expect(hit.truncated).toBe(true);
+    expect(hit.has_subsections).toBe(true);
+  });
+
+  it("has_subsections is omitted when section is not truncated", async () => {
+    const wiki = freshWiki();
+    const content = ["---", "title: Small Guide", "type: how-to", "---",
+      "## Main", "Short content about subsections.", "### Sub A", "Sub content."].join("\n");
+    wiki.write("small-guide.md", content);
+    const result = await handleTool(wiki, "wiki_search", { query: "subsections", include_content: true });
+    const parsed = JSON.parse(result as string);
+    const hit = parsed.results.find((r: any) => r.path === "small-guide.md");
+    expect(hit).toBeDefined();
+    expect(hit.truncated).toBeUndefined();
+    expect(hit.has_subsections).toBeUndefined();
+  });
+
+  it("inline_budget limits inlined content; over-budget results return budget_exceeded", async () => {
+    const wiki = freshWiki();
+    wiki.write("page-a.md", "---\ntitle: Alpha\ntype: note\n---\nContent about inline budget alpha.");
+    wiki.write("page-b.md", "---\ntitle: Beta\ntype: note\n---\nContent about inline budget beta.");
+    // Budget of 10 chars — far smaller than any result's content → all should exceed
+    const result = await handleTool(wiki, "wiki_search", {
+      query: "inline budget",
+      include_content: true,
+      inline_budget: 10,
+    });
+    const parsed = JSON.parse(result as string);
+    const exceeded = parsed.results.filter((r: any) => r.budget_exceeded === true);
+    expect(exceeded.length).toBeGreaterThan(0);
+    // Exceeded results still carry snippet (from base search result)
+    expect(exceeded[0].snippet).toBeDefined();
+    expect(exceeded[0].content).toBeUndefined();
+  });
+
+  it("no inline_budget returns content for all results", async () => {
+    const wiki = freshWiki();
+    wiki.write("page-a.md", "---\ntitle: Alpha\ntype: note\n---\nContent about budget test.");
+    wiki.write("page-b.md", "---\ntitle: Beta\ntype: note\n---\nContent about budget test.");
+    const result = await handleTool(wiki, "wiki_search", { query: "budget test", include_content: true });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results.every((r: any) => r.budget_exceeded !== true)).toBe(true);
+    expect(parsed.results.every((r: any) => r.content !== undefined)).toBe(true);
+  });
 });
 
 describe("server tool: wiki_search_read", () => {

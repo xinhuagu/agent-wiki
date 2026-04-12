@@ -889,7 +889,7 @@ describe("server tool: wiki_search_read", () => {
     expect(doomed.error).toBeTruthy();
   });
 
-  it("no results returns empty arrays", async () => {
+  it("no results returns empty arrays and knowledge_gap", async () => {
     const wiki = freshWiki();
     const result = await handleTool(wiki, "wiki_search_read", { query: "zzzznonexistent" });
     const parsed = JSON.parse(result as string);
@@ -898,6 +898,7 @@ describe("server tool: wiki_search_read", () => {
     expect(parsed.nextReads).toEqual([]);
     expect(parsed.count).toBe(0);
     expect(parsed.pagesRead).toBe(0);
+    expect(parsed.knowledge_gap).toBeDefined();
   });
 
   it("readTopN capped at 10", async () => {
@@ -2032,5 +2033,69 @@ describe("wiki_search: type and tags filter", () => {
     const result = await handleTool(wiki, "wiki_search", { query: "foo", type: "concept" });
     const parsed = JSON.parse(result as string);
     expect(parsed.results).toHaveLength(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// wiki_search knowledge_gap
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("wiki_search: knowledge_gap", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("returns knowledge_gap when no results found", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_search", { query: "quantum computing" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(0);
+    expect(parsed.knowledge_gap).toBeDefined();
+    expect(parsed.knowledge_gap.query).toBe("quantum computing");
+    expect(parsed.knowledge_gap.suggested_page).toContain("quantum");
+    expect(parsed.knowledge_gap.suggested_title).toBe("Quantum Computing");
+    expect(parsed.knowledge_gap.suggested_type).toBeDefined();
+    expect(Array.isArray(parsed.knowledge_gap.suggested_tags)).toBe(true);
+    expect(parsed.knowledge_gap.hint).toContain("wiki_write");
+  });
+
+  it("does not return knowledge_gap when results exist", async () => {
+    const wiki = freshWiki();
+    wiki.write("concept-qc.md", "---\ntitle: Quantum Computing\ntype: concept\n---\nQubits and superposition.");
+    const result = await handleTool(wiki, "wiki_search", { query: "quantum computing" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBeGreaterThan(0);
+    expect(parsed.knowledge_gap).toBeUndefined();
+  });
+
+  it("knowledge_gap suggested_page uses type prefix", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_search", { query: "docker deployment guide" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.knowledge_gap.suggested_page).toMatch(/^(how-to|concept|note|artifact)-/);
+  });
+
+  it("wiki_search_read also returns knowledge_gap on empty results", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_search_read", { query: "nonexistent topic xyz" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(0);
+    expect(parsed.knowledge_gap).toBeDefined();
+    expect(parsed.knowledge_gap.hint).toContain("wiki_write");
+  });
+
+  it("CJK query produces non-empty suggested_page", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_search", { query: "机器学习" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.knowledge_gap.suggested_page).not.toContain("-.md");
+    expect(parsed.knowledge_gap.suggested_page.length).toBeGreaterThan(5);
+  });
+
+  it("filterType is reflected in knowledge_gap.suggested_type", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_search", { query: "nonexistent xyz", type: "artifact" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.knowledge_gap.suggested_type).toBe("artifact");
+    expect(parsed.knowledge_gap.suggested_page).toMatch(/^artifact-/);
   });
 });

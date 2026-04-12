@@ -347,7 +347,8 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           ".agent-wiki.yaml (requires wiki_rebuild to build the vector index first). " +
           "Set include_content=true for simple inline content. For advanced search+read with deduplication, " +
           "readTopN control, and per-page limits, use wiki_search_read instead. " +
-          "Use `type` or `tags` to narrow results without a separate wiki_list call.",
+          "Use `type` or `tags` to narrow results without a separate wiki_list call. " +
+          "When no results are found, returns a `knowledge_gap` field with a suggested page slug, title, type, and tags — use it to decide what to create with wiki_write.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -762,6 +763,49 @@ export interface HandleToolOpts {
   skipRebuild?: boolean;
 }
 
+/**
+ * Build a knowledge_gap suggestion when a search returns no results.
+ * Derives suggested_page, suggested_title, type, and tags from the query
+ * using the same heuristics as wiki_write auto-classification.
+ *
+ * @param forceType  When the caller searched with a type filter, use that type
+ *                   instead of the classify() guess (avoids inconsistency).
+ */
+function buildKnowledgeGap(query: string, wiki: Wiki, forceType?: string): Record<string, unknown> {
+  const classification = wiki.classify(query);
+  const type = forceType ?? classification.type;
+  // Title-case each word of the query
+  const suggestedTitle = query
+    .split(/\s+/)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+  // Slug: lowercase ASCII, collapse spaces to hyphens, max 50 chars.
+  // Falls back to a hex digest of the query for non-ASCII (CJK etc.) text.
+  let slug = query
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 50)
+    .replace(/-$/, "");
+  if (!slug) {
+    // Non-ASCII query (e.g. CJK) — use a short hash to avoid "concept-.md"
+    let h = 0;
+    for (let i = 0; i < query.length; i++) h = (Math.imul(31, h) + query.charCodeAt(i)) | 0;
+    slug = (h >>> 0).toString(16).slice(0, 8);
+  }
+  const suggestedPage = `${type}-${slug}.md`;
+  return {
+    query,
+    suggested_page: suggestedPage,
+    suggested_title: suggestedTitle,
+    suggested_type: type,
+    suggested_tags: classification.tags,
+    hint: `No pages found for "${query}". Use wiki_write to create "${suggestedPage}".`,
+  };
+}
+
 export async function handleTool(
   wiki: Wiki,
   name: string,
@@ -1052,6 +1096,14 @@ export async function handleTool(
             return true;
           }).slice(0, searchLimit)
         : rawResults;
+      // Knowledge gap: guide the agent when the search finds nothing
+      if (results.length === 0) {
+        return JSON.stringify({
+          results: [],
+          count: 0,
+          knowledge_gap: buildKnowledgeGap(searchQuery, wiki, filterType),
+        }, null, 2);
+      }
       if (!args.include_content) {
         return JSON.stringify({ results, count: results.length }, null, 2);
       }
@@ -1124,6 +1176,18 @@ export async function handleTool(
       const results = wiki.config.search.hybrid
         ? await wiki.searchHybrid(query, limit)
         : wiki.search(query, limit);
+
+      // Knowledge gap: guide the agent when the search finds nothing
+      if (results.length === 0) {
+        return JSON.stringify({
+          results: [],
+          pages: [],
+          nextReads: [],
+          count: 0,
+          pagesRead: 0,
+          knowledge_gap: buildKnowledgeGap(query, wiki),
+        }, null, 2);
+      }
 
       // Step 2: Deduplicate — preserve score order, first occurrence wins
       const seen = new Set<string>();

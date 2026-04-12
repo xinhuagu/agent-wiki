@@ -124,6 +124,38 @@ Instead of `wiki_search` + manual filtering or a separate `wiki_list`:
 
 Filter is applied post-ranking — BM25 scores are unaffected. `tags` is an OR match (any tag satisfies).
 
+### `wiki_search` — `knowledge_gap` on miss → skip retry loop
+
+When search returns 0 results, the response includes a ready-to-use `knowledge_gap`:
+
+```json
+{
+  "results": [],
+  "count": 0,
+  "knowledge_gap": {
+    "query": "transformer attention",
+    "suggested_page": "concept-transformer-attention.md",
+    "suggested_title": "Transformer Attention",
+    "suggested_type": "concept",
+    "suggested_tags": ["transformer", "attention-mechanism"],
+    "hint": "No pages found. Use wiki_write to create ..."
+  }
+}
+```
+
+**Without `knowledge_gap`** (old pattern):
+1. `wiki_search` → 0 results
+2. Retry with synonyms × N
+3. `wiki_list` to see what exists
+4. Infer type/tags manually
+5. `wiki_write`
+
+**With `knowledge_gap`** (new pattern):
+1. `wiki_search` → 0 results + `knowledge_gap`
+2. `wiki_write` with `suggested_page` / `suggested_type` / `suggested_tags`
+
+Saves N retry searches + `wiki_list` + manual classify step. `knowledge_gap` is computed inside the existing `wiki_search` call — zero extra requests.
+
 ---
 
 ## Batch Tools
@@ -143,6 +175,7 @@ The `batch` tool collapses multiple operations into a single MCP request:
 | Read 3 related pages | 3 | **1** (`wiki_read pages[]`) | 67% |
 | Write then reference | 2 | **1** (`return_content: true`) | 50% |
 | Search + filter by type | 2 | **1** (`type` param) | 50% |
+| Search miss → create page | 3–5+ | **2** (`knowledge_gap`) | 60–80% |
 | Import 5 files | 5 | **1** | 80% |
 | Digest 5 sources into wiki | 10 | **2** | 80% |
 | Search + read top results | 6 | **1** | 83% |

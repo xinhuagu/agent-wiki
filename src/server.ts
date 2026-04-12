@@ -932,6 +932,10 @@ export async function handleTool(
       );
       // Auto-rebuild indexes (skipped when called from batch — batch rebuilds once at end)
       if (!opts?.skipRebuild) wiki.rebuildIndex();
+      // Update vector embedding if hybrid search is enabled
+      if (wiki.config.search.hybrid) {
+        await wiki.updatePageVector(resolvedPage).catch(() => { /* non-fatal */ });
+      }
       const classification = wiki.classify(enrichedContent);
       return JSON.stringify({
         ok: true,
@@ -944,6 +948,10 @@ export async function handleTool(
     case "wiki_delete": {
       const existed = wiki.delete(args.page as string);
       if (existed && !opts?.skipRebuild) wiki.rebuildIndex();
+      // Remove vector embedding if hybrid search is enabled
+      if (existed && wiki.config.search.hybrid) {
+        wiki.removePageVector(args.page as string);
+      }
       return JSON.stringify({ ok: existed, page: args.page });
     }
 
@@ -956,10 +964,11 @@ export async function handleTool(
     }
 
     case "wiki_search": {
-      const results = wiki.search(
-        args.query as string,
-        (args.limit as number) ?? 10
-      );
+      const searchQuery = args.query as string;
+      const searchLimit = (args.limit as number) ?? 10;
+      const results = wiki.config.search.hybrid
+        ? await wiki.searchHybrid(searchQuery, searchLimit)
+        : wiki.search(searchQuery, searchLimit);
       if (!args.include_content) {
         return JSON.stringify({ results, count: results.length }, null, 2);
       }
@@ -1014,7 +1023,9 @@ export async function handleTool(
       const includeToc = (args.includeToc as boolean) ?? false;
 
       // Step 1: Search
-      const results = wiki.search(query, limit);
+      const results = wiki.config.search.hybrid
+        ? await wiki.searchHybrid(query, limit)
+        : wiki.search(query, limit);
 
       // Step 2: Deduplicate — preserve score order, first occurrence wins
       const seen = new Set<string>();
@@ -1128,6 +1139,7 @@ export async function handleTool(
         rawDir: cfg.rawDir,
         schemasDir: cfg.schemasDir,
         lint: cfg.lint,
+        search: cfg.search,
         separateWorkspace: cfg.configRoot !== cfg.workspace,
         schemas: schemas.map(s => s.name),
       }, null, 2);
@@ -1143,6 +1155,10 @@ export async function handleTool(
       // Yield event loop so MCP transport can respond to client pings.
       await new Promise((r) => setImmediate(r));
       wiki.rebuildTimeline(pageCache);
+      // Rebuild vector index if hybrid search is enabled
+      if (wiki.config.search.hybrid) {
+        await wiki.rebuildVectorIndex().catch(() => { /* non-fatal */ });
+      }
       return JSON.stringify({ ok: true, message: "Index and timeline rebuilt" });
     }
 
@@ -1390,7 +1406,14 @@ export async function handleTool(
             const mime = guessMime(relPath);
             if (TEXT_LIKE(mime)) {
               const content = readFileSync(rawFullPath, "utf-8");
-              segments = [{ text: content, source: { file: rawFilename } }];
+              // Semantic chunking: split by headings first so each chunk is a
+              // coherent logical unit. Falls back to a single segment for files
+              // with no headings (e.g. plain CSV, config files).
+              const mdSections = splitSections(content);
+              const nonEmpty = mdSections.filter(s => s.content.trim().length > 0);
+              segments = nonEmpty.length > 1
+                ? nonEmpty.map(s => ({ text: s.content, source: { file: rawFilename } }))
+                : [{ text: content, source: { file: rawFilename } }];
             } else {
               continue; // Binary file — skip extraction
             }

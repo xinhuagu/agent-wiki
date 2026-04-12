@@ -20,6 +20,8 @@ export interface SourceCoordinates {
 export interface ExtractionSegment {
   text: string;
   source: SourceCoordinates;
+  /** First CSV row from an XLSX sheet — prepended to non-first chunks to preserve column context. */
+  columnHeaders?: string;
 }
 
 export interface ExtractionResult {
@@ -205,8 +207,12 @@ export async function extractDocument(filePath: string, pages?: string, sheet?: 
       const ws = wb.Sheets[name];
       if (!ws) continue;
       const csv = XLSX.utils.sheet_to_csv(ws);
-      if (csv.trim()) {
-        segments.push({ text: csv.trim(), source: { file: filePath, sheet: name } });
+      const trimmed = csv.trim();
+      if (trimmed) {
+        // Capture the header row so chunkSegments can prepend it to non-first chunks.
+        const firstNewline = trimmed.indexOf("\n");
+        const columnHeaders = firstNewline > 0 ? trimmed.slice(0, firstNewline) : undefined;
+        segments.push({ text: trimmed, source: { file: filePath, sheet: name }, columnHeaders });
       }
     }
     return {
@@ -290,7 +296,9 @@ export async function extractText(filePath: string, pages?: string, sheet?: stri
 
 // ── Chunking ─────────────────────────────────────────────────────
 
-/** Split large segments into fixed-line chunks, preserving source coordinates. */
+/** Split large segments into fixed-line chunks, preserving source coordinates.
+ *  For XLSX segments with `columnHeaders`, prepends the header row to every
+ *  non-first chunk so downstream consumers retain column context. */
 export function chunkSegments(segments: ExtractionSegment[], maxLines: number): ExtractionSegment[] {
   const result: ExtractionSegment[] = [];
   for (const seg of segments) {
@@ -299,11 +307,13 @@ export function chunkSegments(segments: ExtractionSegment[], maxLines: number): 
       result.push(seg);
       continue;
     }
+    let isFirst = true;
     for (let i = 0; i < lines.length; i += maxLines) {
-      result.push({
-        text: lines.slice(i, i + maxLines).join("\n"),
-        source: { ...seg.source },
-      });
+      const slice = lines.slice(i, i + maxLines).join("\n");
+      // Prepend the header row to every non-first chunk so the LLM knows the column names.
+      const text = (!isFirst && seg.columnHeaders) ? `${seg.columnHeaders}\n${slice}` : slice;
+      result.push({ text, source: { ...seg.source }, columnHeaders: seg.columnHeaders });
+      isFirst = false;
     }
   }
   return result;

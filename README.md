@@ -4,7 +4,7 @@
 
 Instead of retrieving raw fragments every query (RAG), your agent compiles, refines, and interlinks knowledge — like a team wiki that writes itself.
 
-Works with Claude Code, Cursor, Windsurf, AceClaw, and any MCP client. Also installable as a native skill for Claude Code and AceClaw. No LLM built in — your agent IS the intelligence.
+Works with Claude Code, Cursor, Windsurf, and any MCP client. Also installable as a native skill for Claude Code. No LLM built in — your agent IS the intelligence.
 
 [![npm](https://img.shields.io/npm/v/@agent-wiki/mcp-server)](https://www.npmjs.com/package/@agent-wiki/mcp-server)
 [![CI](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml)
@@ -29,13 +29,10 @@ Add to your MCP client config:
 }
 ```
 
-### Option B: Native Skill (Claude Code, AceClaw)
+### Option B: Native Skill (Claude Code)
 
 ```bash
 npm install -g @agent-wiki/mcp-server
-
-# Install as AceClaw skill (copies SKILL.md + configures MCP)
-agent-wiki install aceclaw --wiki-path /path/to/knowledge
 
 # Install as Claude Code plugin
 agent-wiki install claude-code
@@ -60,36 +57,6 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **Contradictions** | Invisible — buried in source docs | Flagged automatically by lint |
 | **Source tracking** | Lost after retrieval | Full provenance chain (raw -> wiki) |
 
-## Batch Mode: Minimize LLM Requests
-
-Subscriptions like GitHub Copilot bill per-request, not per-token. agent-wiki includes batch and pipeline tools that **collapse multi-step workflows into single MCP requests** — fewer round-trips, fewer permission prompts, lower cost.
-
-| Workflow | Without batch | With batch | Savings |
-|----------|:---:|:---:|:---:|
-| **Import** 5 files | 5 requests | **1** | 80% |
-| **Digest** 5 sources into wiki | 10 requests | **2** | 80% |
-| **Query** search + read results | 6 requests | **1** | 83% |
-| **Ingest** 50-file directory | 50+ requests | **1** | 98% |
-
-### How it works
-
-**`batch`** — Combine any tools in one call. Reads, writes, searches, deletes — all in a single MCP request. Index rebuild is deduplicated automatically.
-
-```json
-{ "tool": "batch", "args": { "operations": [
-  { "tool": "wiki_read", "args": { "page": "concept-a.md" } },
-  { "tool": "wiki_read", "args": { "page": "concept-b.md" } },
-  { "tool": "wiki_write", "args": { "page": "new.md", "content": "..." } },
-  { "tool": "raw_add", "args": { "filename": "data.csv", "content": "..." } }
-]}}
-```
-
-**`wiki_search_read`** — Search + read top results in one call. Deduplicates pages, returns content inline with `nextReads` for follow-up.
-
-**`knowledge_ingest_batch`** — Scan a directory, import files, extract text with provenance (per-page PDF, per-sheet XLSX, per-slide PPTX), chunk, and pack into digest packs — all in one request.
-
-**`knowledge_digest_write`** — Write LLM-generated summaries back to wiki with structured provenance (`sources`, `sourcePacks`). Batch writes with one rebuild at the end.
-
 ## Features
 
 | Feature | Description |
@@ -106,7 +73,7 @@ Subscriptions like GitHub Copilot bill per-request, not per-token. agent-wiki in
 | **Atlassian Import** | One-command Confluence pages and Jira issues with full hierarchy |
 | **File Versioning** | Auto-version same-name files, query latest, list all versions |
 | **COBOL Code Analysis** | AST parser with variable tracing, call graph generation, and auto wiki pages |
-| **Skill Install** | One-command install as native skill for Claude Code and AceClaw |
+| **Skill Install** | One-command install as native skill for Claude Code and compatible clients |
 | **Git-Native** | Plain Markdown — diffable, blameable, revertable |
 
 ## Architecture
@@ -138,14 +105,14 @@ Three immutability layers, inspired by how compilers work:
 | Method | Best For | Setup |
 |--------|----------|-------|
 | **MCP Server** | Cursor, Windsurf, Claude Desktop, any MCP client | Add to `.mcp.json` |
-| **Claude Code Skill** | Claude Code (native plugin) | `agent-wiki install claude-code` |
-| **AceClaw Skill** | AceClaw (native skill) | `agent-wiki install aceclaw` |
+| **Native Skill** | Claude Code (native plugin) | `agent-wiki install claude-code` |
 | **CLI** | Any agent with shell access | `agent-wiki call <tool> '{json}'` |
 
 ## Documentation
 
 - [MCP Tools (18) & Entity Types](docs/tools.md)
 - [Configuration, CLI & Security](docs/configuration.md)
+- [Request Optimization — Batch Digest, Pagination, Context Limits](docs/request-optimization.md)
 
 ## Acknowledgment
 

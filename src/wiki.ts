@@ -853,12 +853,26 @@ _Chronological view of all knowledge in this wiki._
             paginationMeta: { total_slides: totalSlides },
           };
         }
-        const pages = ext === ".pdf" ? opts?.pages : undefined;
-        const text = await extractText(fullPath, pages);
-        const paginationMeta = ext === ".pdf" ? { total_pages: undefined } : undefined;
-        if (ext === ".pdf" && opts?.pages) {
-          return { content: text, meta, binary: false, paginationMeta: { total_pages: undefined } };
+        // PDF — use extractDocument to get totalPages metadata
+        if (ext === ".pdf") {
+          const result = await extractDocument(fullPath, opts?.pages);
+          const totalPages = result.metadata?.totalPages;
+          if (result.segments.length === 0 && opts?.pages) {
+            return {
+              content: `(no pages matched range "${opts.pages}" — PDF has ${totalPages ?? "?"} pages)`,
+              meta, binary: false,
+            };
+          }
+          const prefix = opts?.pages ? `[Pages ${opts.pages} of ${totalPages ?? "?"}]\n` : "";
+          const body = result.segments.map(s => s.text).join("\n\n");
+          return {
+            content: prefix + body,
+            meta, binary: false,
+            ...(opts?.pages ? { paginationMeta: { total_pages: totalPages } } : {}),
+          };
         }
+        // DOCX / HTML — flat text extraction with optional line-based pagination
+        const text = await extractText(fullPath);
         if (opts?.offset !== undefined || opts?.limit !== undefined) {
           const lines = text.split("\n");
           const total_lines = lines.length;

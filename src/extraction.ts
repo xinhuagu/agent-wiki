@@ -26,7 +26,7 @@ export interface ExtractionResult {
   segments: ExtractionSegment[];
   mimeType: string;
   format: string; // "pdf" | "docx" | "xlsx" | "pptx" | "html" | "text"
-  metadata?: { totalPages?: number };
+  metadata?: { totalPages?: number; sheetNames?: string[]; totalSlides?: number };
 }
 
 // ── Page range parsing ───────────────────────────────────────────
@@ -138,7 +138,7 @@ export function guessMime(filename: string): string {
 // ── Structured document extraction ───────────────────────────────
 
 /** Extract text from a document file into structured segments with source provenance. */
-export async function extractDocument(filePath: string, pages?: string): Promise<ExtractionResult> {
+export async function extractDocument(filePath: string, pages?: string, sheet?: string): Promise<ExtractionResult> {
   const ext = extname(filePath).toLowerCase();
 
   if (ext === ".pdf") {
@@ -198,8 +198,10 @@ export async function extractDocument(filePath: string, pages?: string): Promise
   if (ext === ".xlsx") {
     const XLSX = await import("xlsx");
     const wb = XLSX.readFile(filePath);
+    const sheetNames = wb.SheetNames;
     const segments: ExtractionSegment[] = [];
-    for (const name of wb.SheetNames) {
+    const sheetsToRead = sheet ? sheetNames.filter(n => n === sheet) : sheetNames;
+    for (const name of sheetsToRead) {
       const ws = wb.Sheets[name];
       if (!ws) continue;
       const csv = XLSX.utils.sheet_to_csv(ws);
@@ -211,21 +213,25 @@ export async function extractDocument(filePath: string, pages?: string): Promise
       segments,
       mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       format: "xlsx",
+      metadata: { sheetNames },
     };
   }
 
   if (ext === ".pptx") {
     const AdmZip = (await import("adm-zip")).default;
     const zip = new AdmZip(filePath);
-    const entries = zip.getEntries()
+    const allEntries = zip.getEntries()
       .filter(e => /^ppt\/slides\/slide\d+\.xml$/.test(e.entryName))
       .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
+    const totalSlides = allEntries.length;
+    const wanted = pages ? parsePageRange(pages, totalSlides) : null;
     const segments: ExtractionSegment[] = [];
-    for (const entry of entries) {
+    for (const entry of allEntries) {
+      const num = parseInt(entry.entryName.match(/slide(\d+)/)?.[1] ?? "0", 10);
+      if (wanted && !wanted.has(num - 1)) continue;
       const xml = entry.getData().toString("utf-8");
       const text = xml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
       if (text) {
-        const num = parseInt(entry.entryName.match(/slide(\d+)/)?.[1] ?? "0", 10);
         segments.push({ text, source: { file: filePath, slide: num } });
       }
     }
@@ -233,6 +239,7 @@ export async function extractDocument(filePath: string, pages?: string): Promise
       segments,
       mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
       format: "pptx",
+      metadata: { totalSlides },
     };
   }
 
@@ -257,8 +264,8 @@ export async function extractDocument(filePath: string, pages?: string): Promise
 // ── Backward-compat flat text extraction ─────────────────────────
 
 /** Extract text from a document file, returning flat text (backward compat with extractTextNode). */
-export async function extractText(filePath: string, pages?: string): Promise<string> {
-  const result = await extractDocument(filePath, pages);
+export async function extractText(filePath: string, pages?: string, sheet?: string): Promise<string> {
+  const result = await extractDocument(filePath, pages, sheet);
 
   if (result.segments.length === 0 && result.format === "pdf" && pages) {
     return `(no pages matched range "${pages}" — PDF has ${result.metadata?.totalPages ?? "?"} pages)`;

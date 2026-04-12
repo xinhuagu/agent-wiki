@@ -1444,6 +1444,18 @@ describe("server tool: wiki_config", () => {
     expect(cfg.wikiDir).toContain("wiki");
     expect(cfg.rawDir).toContain("raw");
   });
+
+  it("includes search config with hybrid=false by default", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_config", {});
+    expect(typeof result).toBe("string");
+    const parsed = JSON.parse(result as string);
+    expect(parsed.search).toBeDefined();
+    expect(parsed.search.hybrid).toBe(false);
+    expect(typeof parsed.search.bm25Weight).toBe("number");
+    expect(typeof parsed.search.vectorWeight).toBe("number");
+    expect(typeof parsed.search.model).toBe("string");
+  });
 });
 
 // ═══ Image ContentBlock tests (server layer) ═══════════════════
@@ -1669,5 +1681,163 @@ describe("handleTool: raw_fetch image ContentBlock[] (mocked network)", () => {
     const parsed = JSON.parse(result as string);
     expect(parsed.ok).toBe(true);
     expect(parsed.document.mimeType).toBe("image/jpeg");
+  });
+});
+
+// ── knowledge_ingest_batch: semantic chunking ─────────────────────
+
+describe("knowledge_ingest_batch: semantic chunking", () => {
+  const TEST_SRC = join(TEST_ROOT, "src-docs");
+
+  beforeEach(() => {
+    cleanUp();
+    mkdirSync(TEST_SRC, { recursive: true });
+  });
+  afterEach(cleanUp);
+
+  function freshWikiWithSrc(): Wiki {
+    const wiki = Wiki.init(TEST_ROOT);
+    // Allow TEST_SRC as a source directory
+    (wiki.config as any).allowedSourceDirs = [TEST_SRC];
+    return wiki;
+  }
+
+  it("single-section markdown is one chunk", async () => {
+    writeFileSync(join(TEST_SRC, "simple.md"), "# Title\n\nSome content here.\n");
+    const wiki = freshWikiWithSrc();
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: TEST_SRC,
+      topic: "test",
+      chunkLines: 200,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.extracted).toBe(1);
+    // One section → one chunk
+    expect(parsed.chunks).toBe(1);
+  });
+
+  it("multi-section markdown produces one chunk per section (not one chunk total)", async () => {
+    const md = [
+      "# Overview",
+      "Introduction paragraph.",
+      "",
+      "## Section A",
+      "Content for section A.",
+      "",
+      "## Section B",
+      "Content for section B.",
+    ].join("\n");
+    writeFileSync(join(TEST_SRC, "multi.md"), md);
+    const wiki = freshWikiWithSrc();
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: TEST_SRC,
+      topic: "test",
+      chunkLines: 200, // high limit so we don't split sections further
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    // 3 sections (preamble + Section A + Section B) → 3 chunks
+    expect(parsed.chunks).toBeGreaterThanOrEqual(2);
+  });
+
+  it("plain text without headings falls back to single segment", async () => {
+    writeFileSync(join(TEST_SRC, "data.txt"), "line1\nline2\nline3\n");
+    const wiki = freshWikiWithSrc();
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: TEST_SRC,
+      topic: "test",
+      chunkLines: 200,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.chunks).toBe(1);
+  });
+});
+
+// ── hybrid search: SearchEngine vector API ────────────────────────
+
+import { SearchEngine, cosineSimilarity } from "./search.js";
+
+describe("cosineSimilarity", () => {
+  it("returns 1 for identical vectors", () => {
+    expect(cosineSimilarity([1, 0, 0], [1, 0, 0])).toBeCloseTo(1);
+  });
+
+  it("returns 0 for orthogonal vectors", () => {
+    expect(cosineSimilarity([1, 0], [0, 1])).toBeCloseTo(0);
+  });
+
+  it("returns 0 for dimension mismatch", () => {
+    expect(cosineSimilarity([1, 2], [1])).toBe(0);
+  });
+
+  it("returns 0 for zero-length vectors", () => {
+    expect(cosineSimilarity([], [])).toBe(0);
+  });
+});
+
+describe("SearchEngine hybrid vector API", () => {
+  it("updateVector / getVectors round-trips correctly", () => {
+    const engine = new SearchEngine();
+    engine.updateVector("foo.md", [0.1, 0.2, 0.3]);
+    engine.updateVector("bar.md", [0.4, 0.5, 0.6]);
+    const vecs = engine.getVectors();
+    expect(vecs.size).toBe(2);
+    expect(vecs.get("foo.md")).toEqual([0.1, 0.2, 0.3]);
+  });
+
+  it("removeVector deletes the entry", () => {
+    const engine = new SearchEngine();
+    engine.updateVector("foo.md", [1, 0]);
+    engine.removeVector("foo.md");
+    expect(engine.getVectors().size).toBe(0);
+  });
+
+  it("setVectors replaces the whole map", () => {
+    const engine = new SearchEngine();
+    engine.updateVector("old.md", [1, 0]);
+    const fresh = new Map([["new.md", [0, 1]]]);
+    engine.setVectors(fresh);
+    expect(engine.getVectors().size).toBe(1);
+    expect(engine.getVectors().has("new.md")).toBe(true);
+  });
+
+  it("searchHybrid re-ranks via vectors when available", async () => {
+    // Two pages: "alpha" and "beta". We set vectors so "beta" is much closer
+    // to the query embedding than "alpha", then verify beta wins.
+    const pages = [
+      {
+        path: "alpha.md", title: "Alpha Topic", type: "concept",
+        tags: ["alpha"], content: "Alpha alpha alpha alpha alpha",
+        sources: [], links: [], frontmatter: {},
+      },
+      {
+        path: "beta.md", title: "Beta Topic", type: "concept",
+        tags: ["beta"], content: "Beta beta beta beta beta",
+        sources: [], links: [], frontmatter: {},
+      },
+    ] as any[];
+
+    const engine = new SearchEngine();
+    engine.setLoader(() => pages);
+    engine.setConfig({ hybrid: true, bm25Weight: 0.0, vectorWeight: 1.0, model: "test-model" });
+
+    // Set vectors: query will get [1, 0]; beta has [0.99, 0.01] ≈ cosine 0.99
+    // alpha has [0, 1] ≈ cosine 0
+    engine.updateVector("alpha.md", [0, 1]);
+    engine.updateVector("beta.md", [0.99, Math.sqrt(1 - 0.99 ** 2)]);
+
+    // Mock embedText to return [1, 0] for any query
+    (engine as any).embedPipeline = {
+      // The pipeline call returns an object with .data
+    };
+    vi.spyOn(engine as any, "embedText").mockResolvedValue([1, 0]);
+
+    // BM25 should find both pages if we search "topic" (in titles)
+    const results = await engine.searchHybrid("alpha topic", 2);
+    expect(results.length).toBeGreaterThan(0);
+    // beta should rank higher because its vector is closer to [1, 0]
+    expect(results[0]!.path).toBe("beta.md");
   });
 });

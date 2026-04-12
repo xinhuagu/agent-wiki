@@ -71,9 +71,11 @@ program
   .option("-w, --wiki-path <path>", "Path to config root", ".")
   .option("--workspace <path>", "Workspace directory override")
   .option("-n, --limit <n>", "Max results", "10")
-  .action((query: string, opts: { wikiPath: string; workspace?: string; limit: string }) => {
+  .action(async (query: string, opts: { wikiPath: string; workspace?: string; limit: string }) => {
     const wiki = new Wiki(opts.wikiPath, opts.workspace);
-    const results = wiki.search(query, parseInt(opts.limit));
+    const results = wiki.config.search.hybrid
+      ? await wiki.searchHybrid(query, parseInt(opts.limit))
+      : wiki.search(query, parseInt(opts.limit));
     if (program.opts().json) {
       console.log(JSON.stringify({ results, count: results.length }, null, 2));
       return;

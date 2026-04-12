@@ -722,6 +722,11 @@ export class SearchEngine {
     return this.vectors;
   }
 
+  /** Return the number of stored page vectors. */
+  getVectorCount(): number {
+    return this.vectors.size;
+  }
+
   /** Set the page loader. Invalidates any cached index so the next search rebuilds. */
   setLoader(loader: () => WikiPage[]): void {
     this.loader = loader;

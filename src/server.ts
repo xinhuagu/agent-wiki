@@ -334,6 +334,8 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
         name: "wiki_search",
         description:
           "Full-text keyword search across all wiki pages. Returns paths, scores, and snippets sorted by relevance. " +
+          "Uses BM25 by default; switches to hybrid BM25+vector re-ranking when `search.hybrid: true` is set in " +
+          ".agent-wiki.yaml (requires wiki_rebuild to build the vector index first). " +
           "Set include_content=true for simple inline content. For advanced search+read with deduplication, " +
           "readTopN control, and per-page limits, use wiki_search_read instead.",
         inputSchema: {
@@ -428,7 +430,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "wiki_config",
         description:
-          "Show the current workspace configuration: config root, workspace directory, data directories (wiki/, raw/, schemas/), lint settings, and available entity type templates.",
+          "Show the current workspace configuration: config root, workspace directory, data directories (wiki/, raw/, schemas/), lint settings, search settings (including hybrid mode status and vector count), and available entity type templates.",
         inputSchema: {
           type: "object" as const,
           properties: {},
@@ -438,7 +440,8 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "wiki_rebuild",
         description:
-          "Rebuild the index.md and timeline.md from all wiki pages. If topic subdirectories exist, generates per-topic sub-indexes and a top-level hub. Otherwise groups pages by type with counts and dates.",
+          "Rebuild the index.md and timeline.md from all wiki pages. If topic subdirectories exist, generates per-topic sub-indexes and a top-level hub. Otherwise groups pages by type with counts and dates. " +
+          "When `search.hybrid: true` is enabled, also rebuilds the vector index (embeds all pages for semantic re-ranking). This downloads the embedding model (~90 MB) on first run.",
         inputSchema: {
           type: "object" as const,
           properties: {},
@@ -1154,6 +1157,10 @@ export async function handleTool(
     case "wiki_config": {
       const cfg = wiki.config;
       const schemas = wiki.schemas();
+      const searchInfo: Record<string, unknown> = { ...cfg.search };
+      if (cfg.search.hybrid) {
+        searchInfo.vectorCount = wiki.getVectorCount();
+      }
       return JSON.stringify({
         configRoot: cfg.configRoot,
         workspace: cfg.workspace,
@@ -1161,7 +1168,7 @@ export async function handleTool(
         rawDir: cfg.rawDir,
         schemasDir: cfg.schemasDir,
         lint: cfg.lint,
-        search: cfg.search,
+        search: searchInfo,
         separateWorkspace: cfg.configRoot !== cfg.workspace,
         schemas: schemas.map(s => s.name),
       }, null, 2);
@@ -1178,10 +1185,14 @@ export async function handleTool(
       await new Promise((r) => setImmediate(r));
       wiki.rebuildTimeline(pageCache);
       // Rebuild vector index if hybrid search is enabled
+      let vectorStats: { pagesProcessed: number; errors: number } | undefined;
       if (wiki.config.search.hybrid) {
-        await wiki.rebuildVectorIndex().catch(() => { /* non-fatal */ });
+        vectorStats = await wiki.rebuildVectorIndex().catch(() => undefined);
       }
-      return JSON.stringify({ ok: true, message: "Index and timeline rebuilt" });
+      const rebuildMsg = vectorStats
+        ? `Index and timeline rebuilt. Vector index: ${vectorStats.pagesProcessed} pages embedded${vectorStats.errors > 0 ? `, ${vectorStats.errors} errors` : ""}.`
+        : "Index and timeline rebuilt";
+      return JSON.stringify({ ok: true, message: rebuildMsg });
     }
 
     // wiki_classify removed — wiki_write auto-classifies

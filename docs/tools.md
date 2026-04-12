@@ -27,11 +27,11 @@ agent-wiki exposes 18 tools through the Model Context Protocol.
 | `wiki_write` | Create or update a page (auto-timestamps, auto-classify, auto-route to nested dirs). Triggers index rebuild. |
 | `wiki_delete` | Delete a page (guards system pages). Triggers index rebuild — stale indexes and empty dirs are cleaned up. |
 | `wiki_list` | List pages, filter by entity type or tag |
-| `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support. Optional hybrid BM25+vector mode (enable `search.hybrid: true` in `.agent-wiki.yaml`, requires `@xenova/transformers`). |
+| `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support. Optional hybrid BM25+vector mode: enable `search.hybrid: true` in `.agent-wiki.yaml`, then run `wiki_rebuild` to embed all pages. |
 | `wiki_lint` | Health checks: contradictions, orphans, broken links, SHA-256 integrity |
 | `wiki_init` | Initialize a new knowledge base (creates wiki/, raw/, schemas/) |
 | `wiki_config` | Show current workspace configuration, paths, and available entity templates |
-| `wiki_rebuild` | Rebuild all `index.md` files (multi-level directory indexes) and `timeline.md` (chronological view) |
+| `wiki_rebuild` | Rebuild all `index.md` files (multi-level directory indexes) and `timeline.md` (chronological view). When `search.hybrid: true`, also embeds all pages to build the vector index (downloads ~90 MB model on first run). |
 
 ## Code Analysis — Language Plugins
 
@@ -173,6 +173,45 @@ derived_from: [concept-yolo.md, concept-ssd.md, concept-rcnn.md]
 | **CJK tokenization** | `Intl.Segmenter` word segmentation + 2/3-gram fallback for Chinese, Japanese, Korean text |
 | **Exact phrase boost** | Full query phrase in title (+8), slug (+6), or body (+3) |
 | **Postings union** | Only scores documents containing at least one query term — skips the rest of the corpus |
+
+### Hybrid BM25+Vector Search
+
+Hybrid mode re-ranks BM25 candidates using dense vector similarity, improving recall for semantic queries ("how does auth work?" rather than exact keywords).
+
+**Setup** (one-time, ~90 MB model download):
+
+1. Add to `.agent-wiki.yaml`:
+
+```yaml
+search:
+  hybrid: true
+```
+
+2. Run `wiki_rebuild` once to embed all existing pages. The sentence-transformer model (`Xenova/all-MiniLM-L6-v2`) is downloaded from HuggingFace Hub and cached locally.
+
+After setup, every `wiki_write` automatically embeds the new page — no manual steps needed.
+
+**How it works:**
+
+| Step | Description |
+|------|-------------|
+| BM25 pre-filter | Fetch 3× the requested result count using the BM25 index |
+| Embed query | Compute a 384-dim dense vector for the query |
+| Cosine re-rank | Score each candidate: `bm25_weight × norm_bm25 + vector_weight × cosine` |
+| Return top-N | Final ranked list blends lexical and semantic signals |
+
+**Configuration:**
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `search.hybrid` | `false` | Enable hybrid mode |
+| `search.model` | `Xenova/all-MiniLM-L6-v2` | Sentence-transformer model |
+| `search.bm25_weight` | `0.5` | Weight for the normalized BM25 score |
+| `search.vector_weight` | `0.5` | Weight for cosine similarity |
+
+**Graceful degradation:** If the embedding model fails or `@xenova/transformers` is unavailable, `wiki_search` silently falls back to pure BM25 — searches never fail.
+
+**Vector index persistence:** Embeddings are cached in `wiki/.search-vectors.json`. The index is invalidated and rebuilt automatically if you change `search.model`.
 
 ## Auto-Classification
 

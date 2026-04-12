@@ -43,14 +43,30 @@ Read a raw document's content and metadata.
 ```json
 {
   "filename": "(required) string — Path relative to raw/ (e.g. 'article.md')",
-  "pages": "string — Page range for PDFs (e.g. '1-5', '1-3,7-10'). Only for PDFs."
+  "pages":  "string — Page/slide range (e.g. '1-5', '3', '1-3,7-10'). PDF and PPTX only.",
+  "sheet":  "string — Sheet name for XLSX files (e.g. 'Revenue'). Omit to read all sheets.",
+  "offset": "number — Line offset for DOCX/text pagination. Default: 0.",
+  "limit":  "number — Max lines for DOCX/text pagination. Default: 200, max: 500."
 }
 ```
 
-- Text/SVG: returns full content (truncated at 10K chars)
-- PDF/DOCX/XLSX/PPTX: auto-extracted text
-- Images (<10MB): returned inline
+**Default behavior (no pagination params):**
+- Text/SVG: full content, truncated at 10K chars
+- PDF/DOCX/XLSX/PPTX: auto-extracted text, truncated at 10K chars
+- Images (<10MB): returned inline (no truncation)
 - Other binary: metadata only
+
+**With pagination params** — bypasses 10K truncation, returns full requested range:
+
+| Format | Param | Response extras |
+|--------|-------|----------------|
+| PDF    | `pages="1-10"` | `pagination.total_pages` |
+| PPTX   | `pages="1-20"` | `pagination.total_slides` |
+| XLSX   | `sheet="Name"` | `pagination.sheet_names`, `total_sheets` |
+| DOCX/text | `offset=0, limit=200` | `pagination.total_lines`, `truncated`, `next_offset` |
+
+For XLSX: read without `sheet` first to get `sheet_names`, then target each sheet by name.
+For DOCX/text: use `next_offset` from the response to paginate through the full document.
 
 ### raw_versions
 

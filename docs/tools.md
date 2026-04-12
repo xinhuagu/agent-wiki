@@ -235,7 +235,17 @@ Skipped zones (never modified):
 - Markdown `[text](url)` links
 - Bare URLs (`https?://...`)
 
-The `autoLinked` count in the response shows how many links were injected. Link extraction (`page.links`) correctly handles `[[slug|display text]]` by stripping the display part.
+The `autoLinked` count in the response shows how many links were injected. Link extraction (`page.links`) correctly handles `[[slug|display text]]` by stripping the display part. Word-boundary detection is Unicode-aware (`\p{L}\p{N}`) so CJK text is handled correctly.
+
+**Disable auto-linking** (per workspace):
+
+```yaml
+# .agent-wiki.yaml
+auto_link:
+  enabled: false
+```
+
+When `return_content: true`, the returned content includes the timestamps injected by the write step (accurate reflection of what is on disk).
 
 ## Auto-Classification
 

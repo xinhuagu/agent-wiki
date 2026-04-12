@@ -983,10 +983,12 @@ export async function handleTool(
       // Auto-classify if type/tags are missing
       const enrichedContent = wiki.autoClassifyContent(args.content as string);
       // Auto-link: inject [[slug|text]] for mentioned page titles in body
-      const { content: linkedContent, linksAdded } = wiki.autoLink(enrichedContent, args.page as string);
+      const { content: linkedContent, linksAdded } = wiki.config.autoLink.enabled
+        ? wiki.autoLink(enrichedContent, args.page as string)
+        : { content: enrichedContent, linksAdded: 0 };
       // Auto-route to matching topic subdirectory
       const resolvedPage = wiki.resolvePagePath(args.page as string, linkedContent);
-      wiki.write(
+      const writtenContent = wiki.write(
         resolvedPage,
         linkedContent,
         args.source as string | undefined
@@ -1006,7 +1008,8 @@ export async function handleTool(
         autoLinked: linksAdded,
       };
       if (args.return_content) {
-        writeResult.content = linkedContent;
+        // Return the content actually written to disk (includes injected timestamps)
+        writeResult.content = writtenContent;
       }
       return JSON.stringify(writeResult);
     }

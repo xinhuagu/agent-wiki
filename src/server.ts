@@ -280,7 +280,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "wiki_write",
         description:
-          "Create or update a wiki page. Content should include YAML frontmatter (title, type, tags, sources) and Markdown body. Timestamps (created/updated) are auto-managed. Auto-routes root-level pages to matching topic subdirectories (via frontmatter `topic` field or tag matching). Wiki pages are MUTABLE — they represent compiled knowledge that improves over time. " +
+          "Create or update a wiki page. Content should include YAML frontmatter (title, type, tags, sources) and Markdown body. Timestamps (created/updated) are auto-managed. Auto-routes root-level pages to matching topic subdirectories (via frontmatter `topic` field or tag matching). Auto-links: scans body for mentions of existing page titles and injects [[slug|text]] links automatically (skips code blocks, existing links, URLs). Wiki pages are MUTABLE — they represent compiled knowledge that improves over time. " +
           "Set `return_content: true` to include the final written content in the response — eliminates the follow-up wiki_read call in write-then-reference workflows.",
         inputSchema: {
           type: "object" as const,
@@ -982,11 +982,15 @@ export async function handleTool(
     case "wiki_write": {
       // Auto-classify if type/tags are missing
       const enrichedContent = wiki.autoClassifyContent(args.content as string);
+      // Auto-link: inject [[slug|text]] for mentioned page titles in body
+      const { content: linkedContent, linksAdded } = wiki.config.autoLink.enabled
+        ? wiki.autoLink(enrichedContent, args.page as string)
+        : { content: enrichedContent, linksAdded: 0 };
       // Auto-route to matching topic subdirectory
-      const resolvedPage = wiki.resolvePagePath(args.page as string, enrichedContent);
-      wiki.write(
+      const resolvedPage = wiki.resolvePagePath(args.page as string, linkedContent);
+      const writtenContent = wiki.write(
         resolvedPage,
-        enrichedContent,
+        linkedContent,
         args.source as string | undefined
       );
       // Auto-rebuild indexes (skipped when called from batch — batch rebuilds once at end)
@@ -995,15 +999,17 @@ export async function handleTool(
       if (wiki.config.search.hybrid) {
         await wiki.updatePageVector(resolvedPage).catch(() => { /* non-fatal */ });
       }
-      const classification = wiki.classify(enrichedContent);
+      const classification = wiki.classify(linkedContent);
       const writeResult: Record<string, unknown> = {
         ok: true,
         page: resolvedPage,
         routed: resolvedPage !== args.page,
         autoClassified: { type: classification.type, tags: classification.tags, confidence: classification.confidence },
+        autoLinked: linksAdded,
       };
       if (args.return_content) {
-        writeResult.content = enrichedContent;
+        // Return the content actually written to disk (includes injected timestamps)
+        writeResult.content = writtenContent;
       }
       return JSON.stringify(writeResult);
     }

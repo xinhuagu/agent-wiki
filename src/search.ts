@@ -573,6 +573,41 @@ export function makeSnippet(doc: SearchDoc, queryTerms: string[]): { snippet: st
   };
 }
 
+// ── Hybrid search configuration ──────────────────────────────────
+
+export interface SearchConfig {
+  /** Enable hybrid BM25+vector scoring. Requires @xenova/transformers. Default: false. */
+  hybrid: boolean;
+  /** BM25 score weight in hybrid mode (0–1). Default: 0.6. */
+  bm25Weight: number;
+  /** Vector similarity weight in hybrid mode (0–1). Default: 0.4. */
+  vectorWeight: number;
+  /** Sentence-transformer model ID for embeddings. Default: "Xenova/all-MiniLM-L6-v2". */
+  model: string;
+}
+
+export const DEFAULT_SEARCH_CONFIG: SearchConfig = {
+  hybrid: false,
+  bm25Weight: 0.6,
+  vectorWeight: 0.4,
+  model: "Xenova/all-MiniLM-L6-v2",
+};
+
+// ── Vector utilities ──────────────────────────────────────────────
+
+/** Cosine similarity between two equal-length float vectors. Returns 0 on dimension mismatch. */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i]! * b[i]!;
+    normA += a[i]! * a[i]!;
+    normB += b[i]! * b[i]!;
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
 // ── Search Engine ─────────────────────────────────────────────────
 
 // ── Stateless search function ─────────────────────────────────────
@@ -649,10 +684,43 @@ export function searchIndex(
  *  The engine owns the corpus snapshot via a loader function.
  *  The loader is only invoked when the index needs to be (re)built.
  *
+ *  Hybrid mode: set `config.hybrid = true` and inject page vectors via
+ *  `setVectors()` / `updateVector()`. Requires @xenova/transformers installed.
+ *
  *  For stateless / ad-hoc searches, use `searchIndex(buildIndex(pages), query)`. */
 export class SearchEngine {
   private index: SearchIndex | null = null;
   private loader: (() => WikiPage[]) | null = null;
+  private config: SearchConfig = { ...DEFAULT_SEARCH_CONFIG };
+  // page path → embedding vector (set externally, persisted in wiki/.search-vectors.json)
+  private vectors = new Map<string, number[]>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private embedPipeline: any = null;
+
+  /** Configure hybrid search. Call before first search. */
+  setConfig(config: Partial<SearchConfig>): void {
+    this.config = { ...this.config, ...config };
+  }
+
+  /** Replace the entire vector index (used on startup to restore persisted state). */
+  setVectors(vectors: Map<string, number[]>): void {
+    this.vectors = vectors;
+  }
+
+  /** Add or update the embedding for a single page. */
+  updateVector(path: string, embedding: number[]): void {
+    this.vectors.set(path, embedding);
+  }
+
+  /** Remove the embedding for a deleted page. */
+  removeVector(path: string): void {
+    this.vectors.delete(path);
+  }
+
+  /** Return a snapshot of all stored vectors (for persistence). */
+  getVectors(): Map<string, number[]> {
+    return this.vectors;
+  }
 
   /** Set the page loader. Invalidates any cached index so the next search rebuilds. */
   setLoader(loader: () => WikiPage[]): void {
@@ -676,8 +744,64 @@ export class SearchEngine {
     return this.index;
   }
 
-  /** Execute a search query against the cached index. */
+  /** Compute an embedding for `text` using the configured transformers.js model.
+   *  Lazy-loads the pipeline on first call.
+   *  Throws if @xenova/transformers is not installed. */
+  async embedText(text: string): Promise<number[]> {
+    if (!this.embedPipeline) {
+      let pipelineFn: (task: string, model: string) => Promise<unknown>;
+      try {
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore — @xenova/transformers is an optional dependency
+        const mod = await import("@xenova/transformers");
+        pipelineFn = (mod as any).pipeline;
+      } catch {
+        throw new Error(
+          "Hybrid search requires @xenova/transformers. " +
+          "Run: npm install @xenova/transformers"
+        );
+      }
+      this.embedPipeline = await pipelineFn("feature-extraction", this.config.model);
+    }
+    const output = await (this.embedPipeline as any)(text, { pooling: "mean", normalize: true });
+    return Array.from(output.data as Float32Array);
+  }
+
+  /** Execute a BM25 search query against the cached index (synchronous). */
   search(query: string, limit = 10): SearchResult[] {
     return searchIndex(this.ensureIndex(), query, limit);
+  }
+
+  /** Hybrid BM25+vector search (async).
+   *  Computes a query embedding, re-ranks BM25 candidates by cosine similarity,
+   *  and blends scores: final = bm25_weight × norm_bm25 + vector_weight × cosine.
+   *  Falls back to pure BM25 if @xenova/transformers is unavailable or embedding fails. */
+  async searchHybrid(query: string, limit = 10): Promise<SearchResult[]> {
+    const index = this.ensureIndex();
+    // Fetch 3× candidates so re-ranking has room to promote vector-close docs
+    const bm25Results = searchIndex(index, query, limit * 3);
+
+    if (this.vectors.size === 0 || bm25Results.length === 0) {
+      return bm25Results.slice(0, limit);
+    }
+
+    let queryEmbedding: number[];
+    try {
+      queryEmbedding = await this.embedText(query);
+    } catch {
+      return bm25Results.slice(0, limit); // embedding failed → pure BM25
+    }
+
+    const maxBm25 = bm25Results[0]!.score;
+    const scored = bm25Results.map(r => {
+      const docVec = this.vectors.get(r.path);
+      const vectorScore = docVec ? cosineSimilarity(queryEmbedding, docVec) : 0;
+      const normalizedBm25 = maxBm25 > 0 ? r.score / maxBm25 : 0;
+      const hybrid = normalizedBm25 * this.config.bm25Weight + vectorScore * this.config.vectorWeight;
+      return { ...r, score: Math.round(hybrid * 10000) / 10000 };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, limit);
   }
 }

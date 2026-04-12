@@ -89,6 +89,43 @@ describe("chunkSegments", () => {
     const result = chunkSegments(segs, 10);
     expect(result).toHaveLength(3); // 1 (small) + 2 (15/10)
   });
+
+  it("prepends columnHeaders to non-first chunks only", () => {
+    const header = "id,name,salary";
+    const dataLines = Array.from({ length: 25 }, (_, i) => `${i},Alice,${i * 1000}`).join("\n");
+    const seg: ExtractionSegment = {
+      text: `${header}\n${dataLines}`,
+      source: { file: "payroll.xlsx", sheet: "Sheet1" },
+      columnHeaders: header,
+    };
+    const result = chunkSegments([seg], 10);
+    // 26 lines (1 header + 25 data) → ceiling(26/10) = 3 chunks
+    expect(result).toHaveLength(3);
+    // First chunk already contains the header row — no prefix added
+    expect(result[0].text.startsWith(header)).toBe(true);
+    expect(result[0].text.indexOf(header)).toBe(0); // appears once
+    // Second chunk: header prepended
+    expect(result[1].text.startsWith(header + "\n")).toBe(true);
+    // Ensure original data lines still present in second chunk
+    expect(result[1].text).toContain(",Alice,");
+    // Third chunk: header prepended
+    expect(result[2].text.startsWith(header + "\n")).toBe(true);
+    // columnHeaders propagated to all chunks
+    for (const chunk of result) {
+      expect(chunk.columnHeaders).toBe(header);
+    }
+  });
+
+  it("does not add headers to a segment without columnHeaders", () => {
+    const lines = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
+    const seg: ExtractionSegment = { text: lines, source: { file: "plain.txt" } };
+    const result = chunkSegments([seg], 10);
+    expect(result).toHaveLength(2);
+    expect(result[0].columnHeaders).toBeUndefined();
+    expect(result[1].columnHeaders).toBeUndefined();
+    // No header line injected
+    expect(result[1].text).not.toContain("line 0");
+  });
 });
 
 describe("extractDocument", () => {

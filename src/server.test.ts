@@ -2082,4 +2082,20 @@ describe("wiki_search: knowledge_gap", () => {
     expect(parsed.knowledge_gap).toBeDefined();
     expect(parsed.knowledge_gap.hint).toContain("wiki_write");
   });
+
+  it("CJK query produces non-empty suggested_page", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_search", { query: "机器学习" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.knowledge_gap.suggested_page).not.toContain("-.md");
+    expect(parsed.knowledge_gap.suggested_page.length).toBeGreaterThan(5);
+  });
+
+  it("filterType is reflected in knowledge_gap.suggested_type", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_search", { query: "nonexistent xyz", type: "artifact" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.knowledge_gap.suggested_type).toBe("artifact");
+    expect(parsed.knowledge_gap.suggested_page).toMatch(/^artifact-/);
+  });
 });

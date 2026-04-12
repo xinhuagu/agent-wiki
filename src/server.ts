@@ -767,16 +767,21 @@ export interface HandleToolOpts {
  * Build a knowledge_gap suggestion when a search returns no results.
  * Derives suggested_page, suggested_title, type, and tags from the query
  * using the same heuristics as wiki_write auto-classification.
+ *
+ * @param forceType  When the caller searched with a type filter, use that type
+ *                   instead of the classify() guess (avoids inconsistency).
  */
-function buildKnowledgeGap(query: string, wiki: Wiki): Record<string, unknown> {
+function buildKnowledgeGap(query: string, wiki: Wiki, forceType?: string): Record<string, unknown> {
   const classification = wiki.classify(query);
+  const type = forceType ?? classification.type;
   // Title-case each word of the query
   const suggestedTitle = query
     .split(/\s+/)
     .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
     .join(" ");
-  // Slug: lowercase, strip non-alphanumeric, collapse to hyphens, max 50 chars
-  const slug = query
+  // Slug: lowercase ASCII, collapse spaces to hyphens, max 50 chars.
+  // Falls back to a hex digest of the query for non-ASCII (CJK etc.) text.
+  let slug = query
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, "")
     .trim()
@@ -784,17 +789,22 @@ function buildKnowledgeGap(query: string, wiki: Wiki): Record<string, unknown> {
     .replace(/-+/g, "-")
     .slice(0, 50)
     .replace(/-$/, "");
-  const suggestedPage = `${classification.type}-${slug}.md`;
+  if (!slug) {
+    // Non-ASCII query (e.g. CJK) — use a short hash to avoid "concept-.md"
+    let h = 0;
+    for (let i = 0; i < query.length; i++) h = (Math.imul(31, h) + query.charCodeAt(i)) | 0;
+    slug = (h >>> 0).toString(16).slice(0, 8);
+  }
+  const suggestedPage = `${type}-${slug}.md`;
   return {
     query,
     suggested_page: suggestedPage,
     suggested_title: suggestedTitle,
-    suggested_type: classification.type,
+    suggested_type: type,
     suggested_tags: classification.tags,
     hint: `No pages found for "${query}". Use wiki_write to create "${suggestedPage}".`,
   };
 }
-
 
 export async function handleTool(
   wiki: Wiki,
@@ -1091,7 +1101,7 @@ export async function handleTool(
         return JSON.stringify({
           results: [],
           count: 0,
-          knowledge_gap: buildKnowledgeGap(searchQuery, wiki),
+          knowledge_gap: buildKnowledgeGap(searchQuery, wiki, filterType),
         }, null, 2);
       }
       if (!args.include_content) {

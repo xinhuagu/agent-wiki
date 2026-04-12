@@ -421,10 +421,16 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "wiki_lint",
         description:
-          "Run comprehensive health checks. Detects: contradictions between pages, orphan pages, broken [[links]], missing sources, stale content, raw file integrity (SHA-256 verification), synthesis page integrity. Returns categorized issues with fix suggestions.",
+          "Run comprehensive health checks. Detects: contradictions between pages (numeric/date claims across related pages), orphan pages, broken [[links]] (with 'did you mean?' suggestions from BM25), missing sources, stale content, raw file integrity (SHA-256 verification), synthesis page integrity. " +
+          "Set `apply_fixes: true` to automatically repair fixable issues: missing frontmatter pages get title + type + tags injected via auto-classify.",
         inputSchema: {
           type: "object" as const,
-          properties: {},
+          properties: {
+            apply_fixes: {
+              type: "boolean",
+              description: "If true, automatically fix auto-fixable issues (missing frontmatter → inject title/type/tags). Default: false.",
+            },
+          },
         },
       },
       // wiki_log removed — use wiki_read("log.md") instead
@@ -1198,7 +1204,8 @@ export async function handleTool(
     }
 
     case "wiki_lint": {
-      const report = wiki.lint();
+      const applyFixes = (args.apply_fixes as boolean) ?? false;
+      const report = wiki.lint(applyFixes);
       return JSON.stringify(report, null, 2);
     }
 

@@ -28,7 +28,7 @@ agent-wiki exposes 18 tools through the Model Context Protocol.
 | `wiki_delete` | Delete a page (guards system pages). Triggers index rebuild — stale indexes and empty dirs are cleaned up. |
 | `wiki_list` | List pages, filter by entity type or tag |
 | `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support. Use `type` or `tags` to filter without a separate `wiki_list` call. Optional hybrid BM25+vector mode: enable `search.hybrid: true` in `.agent-wiki.yaml`, then run `wiki_rebuild` to embed all pages. |
-| `wiki_lint` | Health checks: contradictions, orphans, broken links, SHA-256 integrity |
+| `wiki_lint` | Health checks: contradictions (numeric/date, topic-isolated, unit-normalized), orphans, broken links (with "did you mean?" suggestions), SHA-256 integrity. Pass `apply_fixes: true` to auto-repair missing frontmatter. |
 | `wiki_init` | Initialize a new knowledge base (creates wiki/, raw/, schemas/) |
 | `wiki_config` | Show current workspace configuration, paths, and available entity templates |
 | `wiki_rebuild` | Rebuild all `index.md` files (multi-level directory indexes) and `timeline.md` (chronological view). When `search.hybrid: true`, also embeds all pages to build the vector index (downloads ~90 MB model on first run). |

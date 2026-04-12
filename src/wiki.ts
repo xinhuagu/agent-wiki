@@ -1471,8 +1471,12 @@ _Chronological view of all knowledge in this wiki._
 
   /** Run comprehensive health checks. Pure rules, no LLM.
    *  Detects: contradictions, orphans, broken links, missing sources,
-   *  stale content, structural issues, integrity problems. */
-  lint(): LintReport {
+   *  stale content, structural issues, integrity problems.
+   *
+   *  @param applyFixes  When true, automatically fix `autoFixable` issues:
+   *    - Missing frontmatter → auto-classify + inject title/type/tags
+   *  Returns `fixed` count of pages that were automatically repaired. */
+  lint(applyFixes = false): LintReport & { fixed: number; fixedPages: string[] } {
     const pages = this.listAllPages();
     const report: LintReport = {
       pagesChecked: pages.length,
@@ -1480,6 +1484,8 @@ _Chronological view of all knowledge in this wiki._
       issues: [],
       contradictions: [],
     };
+    let fixed = 0;
+    const fixedPages: string[] = [];
 
     // Build a map of all pages for cross-referencing
     const pageMap = new Map<string, WikiPage>();
@@ -1510,14 +1516,26 @@ _Chronological view of all knowledge in this wiki._
     for (const [pagePath, page] of pageMap) {
       // ── Missing frontmatter ──
       if (Object.keys(page.frontmatter).length === 0) {
-        report.issues.push({
-          severity: "warning",
-          page: pagePath,
-          message: "Missing YAML frontmatter",
-          suggestion: "Add frontmatter with title, type, tags, and sources",
-          autoFixable: true,
-          category: "structure",
-        });
+        if (applyFixes) {
+          // Auto-fix: derive title from filename, auto-classify type + tags
+          const titleFromFilename = basename(pagePath, ".md")
+            .replace(/-/g, " ")
+            .replace(/\b\w/g, c => c.toUpperCase());
+          const rawContent = `---\ntitle: ${titleFromFilename}\n---\n${page.content}`;
+          const enriched = this.autoClassifyContent(rawContent);
+          this.write(pagePath, enriched);
+          fixed++;
+          fixedPages.push(pagePath);
+        } else {
+          report.issues.push({
+            severity: "warning",
+            page: pagePath,
+            message: "Missing YAML frontmatter",
+            suggestion: "Add frontmatter with title, type, tags, and sources",
+            autoFixable: true,
+            category: "structure",
+          });
+        }
       }
 
       // ── Missing title ──
@@ -1563,11 +1581,17 @@ _Chronological view of all knowledge in this wiki._
         // O(1) basename check
         const bareLink = link.replace(/\.md$/, "");
         if (basenameToPages.has(link) || basenameToPages.has(bareLink)) continue;
+        // BM25 "did you mean?" — search for similar page names
+        const searchQuery = bareLink.replace(/-/g, " ");
+        const candidates = this.search(searchQuery, 3).map(r => r.path);
+        const suggestion = candidates.length > 0
+          ? `Did you mean: ${candidates.join(", ")}? Or create ${link}.md`
+          : `Create ${link}.md or fix the link`;
         report.issues.push({
           severity: "error",
           page: pagePath,
           message: `Broken link: [[${link}]]`,
-          suggestion: `Create ${link}.md or fix the link`,
+          suggestion,
           autoFixable: false,
           category: "broken-link",
         });
@@ -1677,49 +1701,87 @@ _Chronological view of all knowledge in this wiki._
       this.saveLintCache(lintCache);
     }
 
-    this.log("lint", "—", `Checked ${report.pagesChecked} pages + ${report.rawChecked} raw files, found ${report.issues.length} issues (${report.contradictions.length} contradictions)`);
-    return report;
+    this.log("lint", "—", `Checked ${report.pagesChecked} pages + ${report.rawChecked} raw files, found ${report.issues.length} issues (${report.contradictions.length} contradictions)${fixed > 0 ? `, auto-fixed ${fixed} pages` : ""}`);
+    return { ...report, fixed, fixedPages };
   }
 
   // ── Contradiction detection ───────────────────────────────────
 
+  /** Normalize a numeric value + unit to a canonical (value, unit) pair.
+   *  Collapses scale suffixes (million/billion/k) and ms→s so that
+   *  "1000 ms" and "1 s", or "5 billion" and "5000 million", are not
+   *  falsely reported as contradictions. */
+  private static normalizeUnit(rawValue: string, rawUnit: string): { value: number; unit: string } {
+    const v = parseFloat(rawValue);
+    const u = rawUnit.toLowerCase().trim();
+    if (u === "ms") return { value: v / 1000, unit: "s" };
+    if (u === "million") return { value: v * 1e6, unit: "count" };
+    if (u === "billion") return { value: v * 1e9, unit: "count" };
+    if (u === "k") return { value: v * 1e3, unit: "count" };
+    return { value: v, unit: u };
+  }
+
+  /** Normalize unit abbreviations in a context string so that keys
+   *  derived from "1000 ms latency" and "1 s latency" are identical. */
+  private static normalizeUnitText(text: string): string {
+    return text
+      .replace(/\bms\b/gi, "s")
+      .replace(/\bmillion\b/gi, "count")
+      .replace(/\bbillion\b/gi, "count")
+      .replace(/\bk\b/g, "count");
+  }
+
   /** Detect contradictions between pages.
    *  Looks for numeric claims, date claims, and factual statements
-   *  that conflict across pages about the same entity/topic. */
+   *  that conflict across pages about the same entity/topic.
+   *
+   *  Improvements over baseline:
+   *  - Bug fix: uses match.index instead of indexOf (correct context for repeated values)
+   *  - Unit normalization: "1000 ms" and "1 s" are not reported as contradictions
+   *  - Topic isolation: only compares pages that share a tag or link to each other
+   *  - Extended date patterns: ISO dates and "Month YYYY" in addition to bare years
+   */
   private detectContradictions(pageMap: Map<string, WikiPage>): Contradiction[] {
     const contradictions: Contradiction[] = [];
 
     // Extract claims from pages — look for patterns like "X is Y", dates, numbers
-    const claims = new Map<string, Array<{ page: string; excerpt: string; value: string }>>();
+    const claims = new Map<string, Array<{ page: string; excerpt: string; value: number; rawValue: string }>>();
 
     for (const [pagePath, page] of pageMap) {
       if (isSystemPage(pagePath)) continue;
 
-      // Extract date claims: "published in YYYY", "released YYYY", "founded YYYY"
+      // Extract date claims: "published in 2021", "released March 2021", "born 2021-03-15"
       const datePatterns = page.content.matchAll(
-        /(?:published|released|founded|created|introduced|launched|announced|born|died)\s+(?:in\s+)?(\d{4})/gi
+        /(?:published|released|founded|created|introduced|launched|announced|born|died)\s+(?:in\s+|on\s+)?(?:(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+)?(\d{4}(?:-\d{2}-\d{2})?)/gi
       );
       for (const m of datePatterns) {
-        const key = m[0]!.replace(/\d{4}/, "YEAR").toLowerCase().trim();
-        const entry = { page: pagePath, excerpt: m[0]!, value: m[1]! };
+        const year = m[1]!.slice(0, 4); // normalize ISO dates to year only for key
+        const key = m[0]!.replace(/\d{4}(?:-\d{2}-\d{2})?/, "YEAR").toLowerCase().trim();
+        const entry = { page: pagePath, excerpt: m[0]!, value: parseFloat(year), rawValue: m[1]! };
         if (!claims.has(key)) claims.set(key, []);
         claims.get(key)!.push(entry);
       }
 
       // Extract numeric claims: "achieved XX% mAP", "XX FPS", "XX parameters"
       const numericPatterns = page.content.matchAll(
-        /(\d+\.?\d*)\s*(%|fps|ms|map|ap|parameters|params|layers|million|billion|m\b|b\b|k\b)/gi
+        /(\d+\.?\d*)\s*(%|fps|ms|s\b|map|ap|parameters|params|layers|million|billion|k\b)/gi
       );
       for (const m of numericPatterns) {
-        // Context: 30 chars before and after
-        const idx = page.content.indexOf(m[0]!);
+        // Bug fix: use match.index (correct position for repeated patterns)
+        const idx = m.index ?? page.content.indexOf(m[0]!);
         const ctxStart = Math.max(0, idx - 30);
         const ctxEnd = Math.min(page.content.length, idx + m[0]!.length + 30);
         const context = page.content.slice(ctxStart, ctxEnd).replace(/\n/g, " ").trim();
 
-        // Key = normalized context without the number
-        const key = context.replace(/\d+\.?\d*/g, "N").toLowerCase().slice(0, 60);
-        const entry = { page: pagePath, excerpt: context, value: m[1]! };
+        // Key = unit-normalized context with numbers replaced by "N"
+        const key = Wiki.normalizeUnitText(context)
+          .replace(/\d+\.?\d*/g, "N")
+          .toLowerCase()
+          .slice(0, 60);
+
+        // Value = unit-normalized number for accurate comparison
+        const { value: normValue } = Wiki.normalizeUnit(m[1]!, m[2]!);
+        const entry = { page: pagePath, excerpt: context, value: normValue, rawValue: m[1]! };
         if (!claims.has(key)) claims.set(key, []);
         claims.get(key)!.push(entry);
       }
@@ -1729,7 +1791,7 @@ _Chronological view of all knowledge in this wiki._
     for (const [claimKey, entries] of claims) {
       if (entries.length < 2) continue;
 
-      // Group by page
+      // Group by page — keep only the first occurrence per page
       const byPage = new Map<string, typeof entries[0]>();
       for (const e of entries) {
         if (!byPage.has(e.page)) byPage.set(e.page, e);
@@ -1737,21 +1799,33 @@ _Chronological view of all knowledge in this wiki._
       const uniquePages = [...byPage.values()];
       if (uniquePages.length < 2) continue;
 
-      // Check if values differ
+      // Check if values differ across pairs
       for (let i = 0; i < uniquePages.length; i++) {
         for (let j = i + 1; j < uniquePages.length; j++) {
           const a = uniquePages[i]!;
           const b = uniquePages[j]!;
-          if (a.value !== b.value) {
-            contradictions.push({
-              claim: claimKey.replace(/\bn\b/gi, "?"),
-              pageA: a.page,
-              excerptA: a.excerpt,
-              pageB: b.page,
-              excerptB: b.excerpt,
-              severity: Math.abs(parseFloat(a.value) - parseFloat(b.value)) > 10 ? "error" : "warning",
-            });
-          }
+          if (a.value === b.value) continue;
+
+          // Topic isolation: only report contradictions between related pages
+          // (pages that share a tag or have a direct [[link]] between them).
+          // Unrelated pages sharing a number are almost never a real contradiction.
+          const pA = pageMap.get(a.page)!;
+          const pB = pageMap.get(b.page)!;
+          const sharedTag = pA.tags.some(t => pB.tags.includes(t));
+          const slugB = basename(b.page, ".md");
+          const slugA = basename(a.page, ".md");
+          const linkedAtoB = pA.links.includes(slugB) || pA.links.includes(b.page.replace(/\.md$/, ""));
+          const linkedBtoA = pB.links.includes(slugA) || pB.links.includes(a.page.replace(/\.md$/, ""));
+          if (!sharedTag && !linkedAtoB && !linkedBtoA) continue;
+
+          contradictions.push({
+            claim: claimKey.replace(/\bn\b/gi, "?"),
+            pageA: a.page,
+            excerptA: a.excerpt,
+            pageB: b.page,
+            excerptB: b.excerpt,
+            severity: Math.abs(a.value - b.value) > 10 ? "error" : "warning",
+          });
         }
       }
     }

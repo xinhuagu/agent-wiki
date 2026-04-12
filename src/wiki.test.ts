@@ -979,13 +979,92 @@ describe("wiki.lint", () => {
     expect(noFm).toBeDefined();
   });
 
-  it("detects contradictions between pages", () => {
+  it("detects contradictions between related pages (shared tag)", () => {
     const wiki = freshWiki();
-    wiki.write("page-a.md", "---\ntitle: YOLO Facts A\ntype: concept\n---\nYOLO was released in 2015.");
-    wiki.write("page-b.md", "---\ntitle: YOLO Facts B\ntype: concept\n---\nYOLO was released in 2018.");
+    // Pages share "yolo" tag → topic isolation allows comparison
+    wiki.write("page-a.md", "---\ntitle: YOLO Facts A\ntype: concept\ntags: [yolo]\n---\nYOLO was released in 2015.");
+    wiki.write("page-b.md", "---\ntitle: YOLO Facts B\ntype: concept\ntags: [yolo]\n---\nYOLO was released in 2018.");
     const report = wiki.lint();
-    // Should detect the date contradiction
     expect(report.contradictions.length).toBeGreaterThan(0);
+  });
+
+  it("does NOT report contradictions for unrelated pages (no shared tag/link)", () => {
+    const wiki = freshWiki();
+    // Pages have no shared tags and no links between them
+    wiki.write("alpha.md", "---\ntitle: Alpha\ntype: concept\ntags: [alpha]\n---\nAlpha was released in 2015.");
+    wiki.write("beta.md", "---\ntitle: Beta\ntype: concept\ntags: [beta]\n---\nBeta was released in 2018.");
+    const report = wiki.lint();
+    expect(report.contradictions).toHaveLength(0);
+  });
+
+  it("detects contradictions between linked pages", () => {
+    const wiki = freshWiki();
+    // page-b links to page-a → they are related
+    wiki.write("fact-a.md", "---\ntitle: Fact A\ntype: concept\ntags: [x]\n---\nFoo was released in 2015.");
+    wiki.write("fact-b.md", "---\ntitle: Fact B\ntype: concept\ntags: [y]\n---\nFoo was released in 2020. See [[fact-a]].");
+    const report = wiki.lint();
+    expect(report.contradictions.length).toBeGreaterThan(0);
+  });
+
+  it("does not flag same-value numeric claims as contradictions", () => {
+    const wiki = freshWiki();
+    wiki.write("p1.md", "---\ntitle: P1\ntype: concept\ntags: [ml]\n---\nAchieves 76% accuracy.");
+    wiki.write("p2.md", "---\ntitle: P2\ntype: concept\ntags: [ml]\n---\nAchieves 76% accuracy.");
+    const report = wiki.lint();
+    // Same value → no contradiction
+    const numericContradictions = report.contradictions.filter(c => c.claim.includes("accuracy") || c.claim.includes("%"));
+    expect(numericContradictions).toHaveLength(0);
+  });
+
+  it("normalizes units — 1000 ms vs 1 s not a contradiction", () => {
+    const wiki = freshWiki();
+    wiki.write("fast-a.md", "---\ntitle: Fast A\ntype: concept\ntags: [perf]\n---\nLatency is 1000 ms.");
+    wiki.write("fast-b.md", "---\ntitle: Fast B\ntype: concept\ntags: [perf]\n---\nLatency is 1 s.");
+    const report = wiki.lint();
+    const latencyContradictions = report.contradictions.filter(c => c.claim.includes("latenc") || c.claim.includes("s"));
+    // 1000 ms = 1 s after normalization → no contradiction
+    expect(latencyContradictions).toHaveLength(0);
+  });
+
+  it("auto-fixes missing frontmatter when apply_fixes is true", () => {
+    const wiki = freshWiki();
+    // Write a page with no frontmatter directly
+    writeFileSync(
+      join(wiki.config.wikiDir, "bare.md"),
+      "Neural networks are deep learning models used for classification."
+    );
+    const report = wiki.lint(true);
+    expect(report.fixed).toBe(1);
+    expect(report.fixedPages).toContain("bare.md");
+    // Page should now have frontmatter
+    const fixedPage = wiki.read("bare.md");
+    expect(fixedPage).not.toBeNull();
+    expect(Object.keys(fixedPage!.frontmatter).length).toBeGreaterThan(0);
+    expect(fixedPage!.title).not.toBe(""); // title injected
+  });
+
+  it("returns fixed:0 when apply_fixes is false (default)", () => {
+    const wiki = freshWiki();
+    writeFileSync(join(wiki.config.wikiDir, "bare2.md"), "Some content.");
+    const report = wiki.lint(false);
+    expect(report.fixed).toBe(0);
+    expect(report.fixedPages).toHaveLength(0);
+    // Issue still reported
+    const issue = report.issues.find(i => i.page === "bare2.md" && i.category === "structure");
+    expect(issue).toBeDefined();
+  });
+
+  it("broken link suggestion includes did-you-mean from BM25", () => {
+    const wiki = freshWiki();
+    // Create a real page that should be suggested
+    wiki.write("concept-neural-nets.md", "---\ntitle: Neural Nets\ntype: concept\ntags: [ml]\n---\nDeep learning.");
+    // Broken link that is close to existing page name
+    wiki.write("linker.md", "---\ntitle: Linker\ntype: note\n---\nSee [[concept-neural-network]].");
+    const report = wiki.lint();
+    const brokenLink = report.issues.find(i => i.category === "broken-link" && i.page === "linker.md");
+    expect(brokenLink).toBeDefined();
+    // suggestion should mention the similar existing page
+    expect(brokenLink!.suggestion).toMatch(/did you mean|concept-neural-nets/i);
   });
 
   it("checks synthesis page integrity", () => {

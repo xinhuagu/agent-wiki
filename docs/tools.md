@@ -24,7 +24,7 @@ agent-wiki exposes 18 tools through the Model Context Protocol.
 | Tool | Description |
 |------|-------------|
 | `wiki_read` | Read a page (frontmatter + Markdown). Pass `pages: [...]` to read multiple pages in one request — saves N-1 round trips vs individual reads. |
-| `wiki_write` | Create or update a page (auto-timestamps, auto-classify, auto-route to nested dirs). Triggers index rebuild. Pass `return_content: true` to get the final page content back — eliminates a follow-up `wiki_read`. |
+| `wiki_write` | Create or update a page (auto-timestamps, auto-classify, auto-route to nested dirs, auto-link). Triggers index rebuild. Pass `return_content: true` to get the final page content back — eliminates a follow-up `wiki_read`. Response includes `autoLinked` count. |
 | `wiki_delete` | Delete a page (guards system pages). Triggers index rebuild — stale indexes and empty dirs are cleaned up. |
 | `wiki_list` | List pages, filter by entity type or tag |
 | `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support. Use `type` or `tags` to filter without a separate `wiki_list` call. Optional hybrid BM25+vector mode: enable `search.hybrid: true` in `.agent-wiki.yaml`, then run `wiki_rebuild` to embed all pages. |
@@ -212,6 +212,40 @@ After setup, every `wiki_write` automatically embeds the new page — no manual 
 **Graceful degradation:** If the embedding model fails or `@xenova/transformers` is unavailable, `wiki_search` silently falls back to pure BM25 — searches never fail.
 
 **Vector index persistence:** Embeddings are cached in `wiki/.search-vectors.json`. The index is invalidated and rebuilt automatically if you change `search.model`.
+
+## Auto-Linking
+
+Every `wiki_write` automatically scans the page body for mentions of existing page titles and injects `[[slug|text]]` links:
+
+```
+Before: "We use YOLO Object Detection for inference."
+After:  "We use [[concept-yolo|YOLO Object Detection]] for inference."
+```
+
+Rules:
+- Only titles ≥ 4 characters are matched (avoids noise from short tokens)
+- Each page is linked **at most once** — first occurrence wins
+- **Longest title wins** when two candidates overlap (`YOLO Object Detection` beats `YOLO`)
+- Self-references are excluded (a page never links to itself)
+
+Skipped zones (never modified):
+- Fenced code blocks (``` or ~~~)
+- Inline code (`` `...` ``)
+- Existing `[[wiki links]]`
+- Markdown `[text](url)` links
+- Bare URLs (`https?://...`)
+
+The `autoLinked` count in the response shows how many links were injected. Link extraction (`page.links`) correctly handles `[[slug|display text]]` by stripping the display part. Word-boundary detection is Unicode-aware (`\p{L}\p{N}`) so CJK text is handled correctly.
+
+**Disable auto-linking** (per workspace):
+
+```yaml
+# .agent-wiki.yaml
+auto_link:
+  enabled: false
+```
+
+When `return_content: true`, the returned content includes the timestamps injected by the write step (accurate reflection of what is on disk).
 
 ## Auto-Classification
 

@@ -1,0 +1,58 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PAYROLL.
+       AUTHOR. AGENT-WIKI.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT EMPLOYEE-FILE ASSIGN TO "EMPLOYEE.DAT"
+               ORGANIZATION IS SEQUENTIAL.
+       DATA DIVISION.
+       FILE SECTION.
+       FD  EMPLOYEE-FILE.
+       01  EMPLOYEE-RECORD.
+           05  EMP-ID          PIC 9(5).
+           05  EMP-NAME        PIC X(30).
+           05  EMP-SALARY      PIC 9(7)V99.
+           05  EMP-DEPT        PIC X(10).
+       WORKING-STORAGE SECTION.
+       01  WS-TOTALS.
+           05  WS-TOTAL-SALARY PIC 9(9)V99 VALUE ZEROS.
+           05  WS-EMP-COUNT    PIC 9(5)    VALUE ZEROS.
+           05  WS-AVG-SALARY   PIC 9(7)V99 VALUE ZEROS.
+       01  WS-FLAGS.
+           05  WS-EOF-FLAG     PIC X       VALUE "N".
+               88  EOF-REACHED              VALUE "Y".
+       77  WS-TAX-AMOUNT       PIC 9(7)V99.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-INIT.
+           OPEN INPUT EMPLOYEE-FILE.
+           PERFORM B000-PROCESS THRU B999-PROCESS-EXIT
+               UNTIL EOF-REACHED.
+           PERFORM C000-FINALIZE.
+           CLOSE EMPLOYEE-FILE.
+           STOP RUN.
+       B000-PROCESS SECTION.
+       B100-READ.
+           READ EMPLOYEE-FILE INTO EMPLOYEE-RECORD
+               AT END
+                   MOVE "Y" TO WS-EOF-FLAG
+               NOT AT END
+                   PERFORM B200-CALCULATE
+           END-READ.
+       B200-CALCULATE.
+           ADD EMP-SALARY TO WS-TOTAL-SALARY.
+           ADD 1 TO WS-EMP-COUNT.
+           CALL "CALC-TAX" USING EMP-SALARY WS-TAX-AMOUNT.
+       B999-PROCESS-EXIT.
+           EXIT.
+       C000-FINALIZE SECTION.
+       C100-COMPUTE-AVG.
+           IF WS-EMP-COUNT > ZEROS
+               COMPUTE WS-AVG-SALARY =
+                   WS-TOTAL-SALARY / WS-EMP-COUNT
+           END-IF.
+           DISPLAY "TOTAL EMPLOYEES: " WS-EMP-COUNT.
+           DISPLAY "TOTAL SALARY:    " WS-TOTAL-SALARY.
+           DISPLAY "AVERAGE SALARY:  " WS-AVG-SALARY.
+           CALL "PRINT-REPORT" USING WS-TOTALS.

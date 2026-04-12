@@ -1323,6 +1323,112 @@ describe("wiki.rebuildIndex", () => {
     expect(index).toContain("[[cobol/index]]");
     expect(index).toContain("[[note-misc]]");
   });
+
+  it("generates multi-level nested indexes", () => {
+    const wiki = freshWiki();
+    wiki.write("lang/js/concept-closures.md", "---\ntitle: JS Closures\ntype: concept\n---\nClosures.");
+    wiki.write("lang/js/frameworks/concept-react.md", "---\ntitle: React Overview\ntype: concept\n---\nReact.");
+    wiki.write("lang/python/concept-decorators.md", "---\ntitle: Python Decorators\ntype: concept\n---\nDecorators.");
+    wiki.rebuildIndex();
+
+    // Top-level index should list "lang" topic
+    const index = readFileSync(join(wiki.config.wikiDir, "index.md"), "utf-8");
+    expect(index).toContain("3 pages");
+    expect(index).toContain("[[lang/index]]");
+    expect(index).toContain("lang (3 pages)");
+
+    // lang/index.md should list sub-topics js and python
+    const langIndex = readFileSync(join(wiki.config.wikiDir, "lang/index.md"), "utf-8");
+    expect(langIndex).toContain("3 pages");
+    expect(langIndex).toContain("## Sub-topics");
+    expect(langIndex).toContain("[[lang/js/index]]");
+    expect(langIndex).toContain("[[lang/python/index]]");
+
+    // lang/js/index.md should list sub-topic frameworks + direct page
+    const jsIndex = readFileSync(join(wiki.config.wikiDir, "lang/js/index.md"), "utf-8");
+    expect(jsIndex).toContain("2 pages");
+    expect(jsIndex).toContain("## Sub-topics");
+    expect(jsIndex).toContain("[[lang/js/frameworks/index]]");
+    expect(jsIndex).toContain("[[lang/js/concept-closures]]");
+    expect(jsIndex).toContain("JS Closures");
+
+    // lang/js/frameworks/index.md should list the React page
+    const fwIndex = readFileSync(join(wiki.config.wikiDir, "lang/js/frameworks/index.md"), "utf-8");
+    expect(fwIndex).toContain("1 pages");
+    expect(fwIndex).toContain("[[lang/js/frameworks/concept-react]]");
+    expect(fwIndex).toContain("React Overview");
+
+    // lang/python/index.md should list the decorators page
+    const pyIndex = readFileSync(join(wiki.config.wikiDir, "lang/python/index.md"), "utf-8");
+    expect(pyIndex).toContain("1 pages");
+    expect(pyIndex).toContain("[[lang/python/concept-decorators]]");
+  });
+
+  it("treats nested */index.md as system pages", () => {
+    const wiki = freshWiki();
+    wiki.write("a/b/c/page.md", "---\ntitle: Deep Page\ntype: note\n---\nDeep.");
+    wiki.rebuildIndex();
+
+    // All intermediate index files should exist
+    expect(existsSync(join(wiki.config.wikiDir, "a/index.md"))).toBe(true);
+    expect(existsSync(join(wiki.config.wikiDir, "a/b/index.md"))).toBe(true);
+    expect(existsSync(join(wiki.config.wikiDir, "a/b/c/index.md"))).toBe(true);
+
+    // Nested indexes are system pages — cannot be deleted or written to
+    expect(() => wiki.delete("a/b/index.md")).toThrow("Cannot delete system page");
+    expect(() => wiki.write("a/b/index.md", "---\ntitle: X\n---\nX")).toThrow("Cannot write to reserved path");
+  });
+
+  it("overwrites pre-existing user-authored nested index.md on rebuild", () => {
+    const wiki = freshWiki();
+    // Simulate a repo that already has a hand-written lang/js/index.md
+    // (e.g. created before upgrading to the multi-level index feature)
+    const jsDir = join(wiki.config.wikiDir, "lang/js");
+    mkdirSync(jsDir, { recursive: true });
+    writeFileSync(join(jsDir, "index.md"),
+      "---\ntitle: My Hand-Written JS Guide\ntype: concept\n---\n\nCurated content that predates the feature.\n");
+    writeFileSync(join(jsDir, "concept-closures.md"),
+      "---\ntitle: Closures\ntype: concept\n---\nClosures.\n");
+
+    // First rebuild should overwrite the legacy user-authored index
+    wiki.rebuildIndex();
+
+    const jsIndex = readFileSync(join(jsDir, "index.md"), "utf-8");
+    expect(jsIndex).not.toContain("My Hand-Written JS Guide");
+    expect(jsIndex).not.toContain("Curated content");
+    expect(jsIndex).toContain("[[lang/js/concept-closures]]");
+    expect(jsIndex).toContain("type: index");
+
+    // Subsequent rebuilds keep it consistent
+    wiki.rebuildIndex();
+    const jsIndex2 = readFileSync(join(jsDir, "index.md"), "utf-8");
+    expect(jsIndex2).toContain("[[lang/js/concept-closures]]");
+  });
+
+  it("cleans up stale indexes after deleting last page in subtree", () => {
+    const wiki = freshWiki();
+    wiki.write("lang/js/concept-js.md", "---\ntitle: JS Basics\ntype: concept\n---\nJS.");
+    wiki.write("lang/python/concept-py.md", "---\ntitle: Python Basics\ntype: concept\n---\nPython.");
+    wiki.rebuildIndex();
+
+    // Both sub-indexes should exist
+    expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(true);
+    expect(existsSync(join(wiki.config.wikiDir, "lang/python/index.md"))).toBe(true);
+
+    // Delete the only page under lang/python/
+    wiki.delete("lang/python/concept-py.md");
+    wiki.rebuildIndex();
+
+    // lang/python/ index should be gone, lang/js/ should remain
+    expect(existsSync(join(wiki.config.wikiDir, "lang/python/index.md"))).toBe(false);
+    expect(existsSync(join(wiki.config.wikiDir, "lang/python"))).toBe(false);
+    expect(existsSync(join(wiki.config.wikiDir, "lang/js/index.md"))).toBe(true);
+
+    // lang/index.md should still exist and only reference js
+    const langIndex = readFileSync(join(wiki.config.wikiDir, "lang/index.md"), "utf-8");
+    expect(langIndex).toContain("[[lang/js/index]]");
+    expect(langIndex).not.toContain("python");
+  });
 });
 
 describe("wiki.rebuildTimeline", () => {
@@ -1403,6 +1509,30 @@ describe("wiki.resolvePagePath", () => {
     wiki.write("concept-a.md", "---\ntitle: A\ntype: concept\n---\nA.");
     const resolved = wiki.resolvePagePath("new-page.md", "---\ntitle: New\n---\nContent");
     expect(resolved).toBe("new-page.md");
+  });
+
+  it("routes to nested directory via tag/title matching (deepest wins)", () => {
+    const wiki = freshWiki();
+    wiki.write("lang/js/concept-js.md", "---\ntitle: JS\ntype: concept\n---\nJS.");
+    wiki.write("lang/python/concept-py.md", "---\ntitle: Python\ntype: concept\n---\nPython.");
+    // A page about JS should route to lang/js/, not lang/
+    const resolved = wiki.resolvePagePath("js-closures.md", "---\ntitle: JS Closures\ntype: concept\n---\nJavaScript closures.");
+    expect(resolved).toBe("lang/js/js-closures.md");
+  });
+
+  it("routes to nested directory via explicit topic matching last segment", () => {
+    const wiki = freshWiki();
+    wiki.write("lang/js/concept-js.md", "---\ntitle: JS\ntype: concept\n---\nJS.");
+    // topic: "js" should match lang/js/ not create a new js/ at root
+    const resolved = wiki.resolvePagePath("new-page.md", "---\ntitle: New\ntopic: js\n---\nContent");
+    expect(resolved).toBe("lang/js/new-page.md");
+  });
+
+  it("routes via explicit topic with full nested path", () => {
+    const wiki = freshWiki();
+    wiki.write("lang/js/concept-js.md", "---\ntitle: JS\ntype: concept\n---\nJS.");
+    const resolved = wiki.resolvePagePath("new-page.md", "---\ntitle: New\ntopic: lang/js\n---\nContent");
+    expect(resolved).toBe("lang/js/new-page.md");
   });
 });
 

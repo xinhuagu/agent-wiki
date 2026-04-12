@@ -20,7 +20,7 @@
  *   - Knowledge compounds: every write improves the whole
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, statSync, copyFileSync, createWriteStream } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, rmdirSync, statSync, copyFileSync, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { join, relative, resolve, basename, extname, dirname } from "node:path";
@@ -28,7 +28,8 @@ import { createHash } from "node:crypto";
 import matter from "gray-matter";
 import yaml from "js-yaml";
 import { VERSION } from "./version.js";
-import { SearchEngine } from "./search.js";
+import { SearchEngine, type SearchResult } from "./search.js";
+import { extractText, extractDocument, guessMime } from "./extraction.js";
 import type { AtlassianConfig, ConfluenceImportResult, JiraImportResult } from "./atlassian.js";
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -137,13 +138,13 @@ export interface WikiConfig {
 // System pages that lint should treat specially
 const SYSTEM_PAGES = new Set(["index.md", "log.md", "timeline.md"]);
 
-/** Check if a page path is a system page (top-level or topic sub-index). */
+/** Check if a page path is a system page.
+ *  Root-level: index.md, log.md, timeline.md.
+ *  Nested: any * /index.md — reserved for auto-generated directory indexes. */
 function isSystemPage(pagePath: string): boolean {
-  // Normalize to forward slashes for cross-platform consistency
   const normalized = pagePath.replace(/\\/g, "/");
   if (SYSTEM_PAGES.has(normalized)) return true;
-  // Topic sub-indexes: e.g. "cobol/index.md"
-  return /^[^/]+\/index\.md$/.test(normalized);
+  return normalized.endsWith("/index.md");
 }
 
 /**
@@ -169,6 +170,84 @@ export function safePath(base: string, userPath: string): string {
     throw new Error(`Path traversal detected: "${userPath}" escapes the allowed directory`);
   }
   return resolved;
+}
+
+// ── Markdown section utilities ────────────────────────────────────
+
+export interface MarkdownSection {
+  heading: string;  // e.g. "## Installation", or "" for frontmatter/pre-heading content
+  level: number;    // 1–6, or 0 for pre-heading content
+  content: string;  // heading line + body up to next same-or-higher heading
+}
+
+/** Split markdown into sections by headings.
+ *  Correctly skips heading-like lines inside fenced code blocks (``` or ~~~).
+ *  The leading frontmatter block (--- ... ---) is returned as the first section
+ *  with heading "" and level 0. */
+export function splitSections(markdown: string): MarkdownSection[] {
+  const lines = markdown.split("\n");
+  const sections: MarkdownSection[] = [];
+  let buf: string[] = [];
+  let currentHeading = "";
+  let currentLevel = 0;
+  let inFrontmatter = false;
+  let inCodeBlock = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+
+    // Frontmatter: first line must be exactly "---"
+    if (i === 0 && line.trim() === "---") {
+      inFrontmatter = true;
+      buf.push(line);
+      continue;
+    }
+    if (inFrontmatter) {
+      buf.push(line);
+      if (line.trim() === "---" && i > 0) inFrontmatter = false;
+      continue;
+    }
+
+    // Code fence toggle (``` or ~~~, optionally with language tag)
+    if (/^(`{3,}|~{3,})/.test(line)) {
+      inCodeBlock = !inCodeBlock;
+      buf.push(line);
+      continue;
+    }
+
+    // Only detect headings outside code blocks
+    const headingMatch = !inCodeBlock && line.match(/^(#{1,6})\s+(.*)/);
+    if (headingMatch) {
+      sections.push({ heading: currentHeading, level: currentLevel, content: buf.join("\n") });
+      buf = [line];
+      currentHeading = line.trimEnd();
+      currentLevel = headingMatch[1]!.length;
+    } else {
+      buf.push(line);
+    }
+  }
+  if (buf.length > 0) {
+    sections.push({ heading: currentHeading, level: currentLevel, content: buf.join("\n") });
+  }
+  return sections;
+}
+
+/** Build a TOC string from sections. Indented relative to the shallowest heading level. */
+export function buildToc(sections: MarkdownSection[]): string {
+  const headingSections = sections.filter(s => s.heading !== "");
+  if (headingSections.length === 0) return "";
+  const minLevel = Math.min(...headingSections.map(s => s.level));
+  return headingSections
+    .map(s => "  ".repeat(s.level - minLevel) + s.heading)
+    .join("\n");
+}
+
+/** Find a section by heading text. Case-insensitive, partial match, `##` prefix optional. */
+export function findSectionByHeading(sections: MarkdownSection[], query: string): MarkdownSection | undefined {
+  const q = query.toLowerCase().replace(/^#{1,6}\s*/, "").trim();
+  return sections.find(s =>
+    s.heading.toLowerCase().replace(/^#{1,6}\s*/, "").trim().includes(q)
+  );
 }
 
 // ── Wiki Class ────────────────────────────────────────────────────
@@ -596,6 +675,29 @@ _Chronological view of all knowledge in this wiki._
   }
 
   /**
+   * Write a parsed artifact under raw/parsed/. Unlike rawAdd, these are
+   * idempotent — re-parsing the same source overwrites the previous output.
+   * A .meta.yaml sidecar is written so lint/integrity checks pass.
+   */
+  rawAddParsedArtifact(relativePath: string, content: string, opts?: { mimeType?: string; description?: string }): void {
+    const fullPath = safePath(this.config.rawDir, relativePath);
+    mkdirSync(dirname(fullPath), { recursive: true });
+    writeFileSync(fullPath, content, "utf-8");
+
+    const buf = Buffer.from(content, "utf-8");
+    const sha256 = createHash("sha256").update(buf).digest("hex");
+    const doc: RawDocument = {
+      path: relativePath,
+      downloadedAt: new Date().toISOString(),
+      sha256,
+      size: buf.length,
+      mimeType: opts?.mimeType ?? "application/json",
+      description: opts?.description ?? "Parsed artifact generated by code_parse",
+    };
+    writeFileSync(fullPath + ".meta.yaml", yaml.dump(doc, { lineWidth: 100 }));
+  }
+
+  /**
    * List all versions of a raw file, sorted by version number, with the latest marked.
    * rawVersions("report.xlsx") → { versions: [...], latest: "report_v3.xlsx" }
    */
@@ -680,7 +782,18 @@ _Chronological view of all knowledge in this wiki._
    *  For PDFs, optional `pages` parameter limits extraction to specific pages (e.g. "1-5").
    *  Image files (PNG, JPEG, GIF, WEBP, etc.) return base64-encoded data for display.
    *  Other binary files return metadata only. */
-  async rawRead(filename: string, opts?: { pages?: string }): Promise<{ content: string | null; meta: RawDocument | null; binary: boolean; note?: string; imageData?: { data: string; mimeType: string } } | null> {
+  async rawRead(filename: string, opts?: { pages?: string; sheet?: string; offset?: number; limit?: number }): Promise<{
+    content: string | null;
+    meta: RawDocument | null;
+    binary: boolean;
+    note?: string;
+    imageData?: { data: string; mimeType: string };
+    paginationMeta?: {
+      total_lines?: number; offset?: number; lines_returned?: number; truncated?: boolean; next_offset?: number | null;
+      sheet_names?: string[]; total_sheets?: number; current_sheet?: string;
+      total_slides?: number; total_pages?: number;
+    };
+  } | null> {
     const fullPath = safePath(this.config.rawDir, filename);
     if (!existsSync(fullPath)) return null;
 
@@ -699,8 +812,20 @@ _Chronological view of all knowledge in this wiki._
       || mime === "image/svg+xml";           // SVG is XML text
 
     if (isText) {
-      const content = readFileSync(fullPath, "utf-8");
-      return { content, meta, binary: false };
+      const raw = readFileSync(fullPath, "utf-8");
+      if (opts?.offset !== undefined || opts?.limit !== undefined) {
+        const lines = raw.split("\n");
+        const total_lines = lines.length;
+        const offset = Math.max(0, opts.offset ?? 0);
+        const limit = Math.min(500, Math.max(1, opts.limit ?? 200));
+        const slice = lines.slice(offset, offset + limit);
+        const truncated = offset + limit < total_lines;
+        return {
+          content: slice.join("\n"), meta, binary: false,
+          paginationMeta: { total_lines, offset, lines_returned: slice.length, truncated, next_offset: truncated ? offset + limit : null },
+        };
+      }
+      return { content: raw, meta, binary: false };
     }
 
     // Document formats — extract text via Node.js libraries
@@ -708,7 +833,58 @@ _Chronological view of all knowledge in this wiki._
     const extractable = new Set([".pdf", ".docx", ".xlsx", ".pptx", ".html", ".htm"]);
     if (extractable.has(ext)) {
       try {
-        const text = await extractTextNode(fullPath, ext === ".pdf" ? opts?.pages : undefined);
+        if (ext === ".xlsx") {
+          const result = await extractDocument(fullPath, undefined, opts?.sheet);
+          const sheetNames = result.metadata?.sheetNames ?? [];
+          const content = result.segments.map(s => `--- Sheet: ${s.source.sheet} ---\n${s.text}`).join("\n\n");
+          return {
+            content: content || "(no content)",
+            meta, binary: false,
+            paginationMeta: { sheet_names: sheetNames, total_sheets: sheetNames.length, current_sheet: opts?.sheet },
+          };
+        }
+        if (ext === ".pptx") {
+          const result = await extractDocument(fullPath, opts?.pages);
+          const totalSlides = result.metadata?.totalSlides;
+          const content = result.segments.map(s => `--- Slide ${s.source.slide} ---\n${s.text}`).join("\n\n");
+          return {
+            content: content || "(no content)",
+            meta, binary: false,
+            paginationMeta: { total_slides: totalSlides },
+          };
+        }
+        // PDF — use extractDocument to get totalPages metadata
+        if (ext === ".pdf") {
+          const result = await extractDocument(fullPath, opts?.pages);
+          const totalPages = result.metadata?.totalPages;
+          if (result.segments.length === 0 && opts?.pages) {
+            return {
+              content: `(no pages matched range "${opts.pages}" — PDF has ${totalPages ?? "?"} pages)`,
+              meta, binary: false,
+            };
+          }
+          const prefix = opts?.pages ? `[Pages ${opts.pages} of ${totalPages ?? "?"}]\n` : "";
+          const body = result.segments.map(s => s.text).join("\n\n");
+          return {
+            content: prefix + body,
+            meta, binary: false,
+            ...(opts?.pages ? { paginationMeta: { total_pages: totalPages } } : {}),
+          };
+        }
+        // DOCX / HTML — flat text extraction with optional line-based pagination
+        const text = await extractText(fullPath);
+        if (opts?.offset !== undefined || opts?.limit !== undefined) {
+          const lines = text.split("\n");
+          const total_lines = lines.length;
+          const offset = Math.max(0, opts.offset ?? 0);
+          const limit = Math.min(500, Math.max(1, opts.limit ?? 200));
+          const slice = lines.slice(offset, offset + limit);
+          const truncated = offset + limit < total_lines;
+          return {
+            content: slice.join("\n"), meta, binary: false,
+            paginationMeta: { total_lines, offset, lines_returned: slice.length, truncated, next_offset: truncated ? offset + limit : null },
+          };
+        }
         return { content: text, meta, binary: false };
       } catch (e: any) {
         const stat = statSync(fullPath);
@@ -1035,6 +1211,11 @@ _Chronological view of all knowledge in this wiki._
   /** Write (create or update) a wiki page. Content must include frontmatter.
    *  Automatically injects/updates created and updated timestamps. */
   write(pagePath: string, content: string, source?: string): void {
+    // Guard: nested */index.md paths are reserved for auto-generated directory indexes
+    if (isSystemPage(pagePath) && !SYSTEM_PAGES.has(pagePath)) {
+      throw new Error(`Cannot write to reserved path: ${pagePath}. Nested */index.md is auto-generated by wiki_rebuild.`);
+    }
+
     const fullPath = safePath(this.config.wikiDir, pagePath);
     const dir = dirname(fullPath);
     mkdirSync(dir, { recursive: true });
@@ -1066,14 +1247,14 @@ _Chronological view of all knowledge in this wiki._
   /** Resolve page path to the correct topic subdirectory.
    *  If the path already has a subdirectory, returns as-is.
    *  Otherwise, routes based on: (1) explicit `topic` frontmatter field,
-   *  (2) tag/title matching against existing topic directories. */
+   *  (2) tag/title matching against existing nested directories (deepest match wins). */
   resolvePagePath(pagePath: string, content: string): string {
     // Already in a subdirectory? Use as-is.
     if (pagePath.includes("/")) return pagePath;
 
-    // No existing topic dirs → nothing to route to
-    const topics = this.listTopicDirs();
-    if (topics.length === 0) return pagePath;
+    // No existing dirs → nothing to route to
+    const allDirs = this.listAllDirPaths();
+    if (allDirs.length === 0) return pagePath;
 
     const parsed = matter(content);
 
@@ -1081,10 +1262,22 @@ _Chronological view of all knowledge in this wiki._
     const explicitTopic = parsed.data.topic as string | undefined;
     if (explicitTopic && typeof explicitTopic === "string") {
       const normalized = explicitTopic.toLowerCase().replace(/\s+/g, "-");
+      // Exact path match first (e.g. topic: "lang/js")
+      if (allDirs.includes(normalized)) {
+        return `${normalized}/${pagePath}`;
+      }
+      // Match against last segment of each dir, prefer deepest
+      const match = allDirs
+        .filter((d) => d.split("/").pop()!.toLowerCase() === normalized)
+        .sort((a, b) => b.split("/").length - a.split("/").length)[0];
+      if (match) {
+        return `${match}/${pagePath}`;
+      }
+      // Fallback: create new directory at root
       return `${normalized}/${pagePath}`;
     }
 
-    // 2. Match tags/title against existing topic directory names
+    // 2. Match tags/title against directory names (deepest match wins)
     const classification = this.classify(content);
     const title = ((parsed.data.title as string) ?? "").toLowerCase();
     const signals = [
@@ -1092,17 +1285,22 @@ _Chronological view of all knowledge in this wiki._
       ...title.split(/[\s\-_]+/).filter(Boolean),
     ];
 
-    for (const topic of topics) {
-      const topicLower = topic.toLowerCase();
-      if (signals.some((s) => s === topicLower || s.includes(topicLower) || topicLower.includes(s))) {
-        return `${topic}/${pagePath}`;
+    // Sort dirs by depth (deepest first) so we prefer more specific matches
+    const sortedDirs = [...allDirs].sort(
+      (a, b) => b.split("/").length - a.split("/").length
+    );
+
+    for (const dirPath of sortedDirs) {
+      const dirName = dirPath.split("/").pop()!.toLowerCase();
+      if (signals.some((s) => s === dirName || s.includes(dirName) || dirName.includes(s))) {
+        return `${dirPath}/${pagePath}`;
       }
     }
 
     return pagePath;
   }
 
-  /** List existing topic subdirectories under wiki/. */
+  /** List existing topic subdirectories under wiki/ (first-level only). */
   listTopicDirs(): string[] {
     const dir = this.config.wikiDir;
     if (!existsSync(dir)) return [];
@@ -1110,6 +1308,23 @@ _Chronological view of all knowledge in this wiki._
       .filter((e) => e.isDirectory() && !e.name.startsWith("."))
       .map((e) => e.name)
       .sort();
+  }
+
+  /** List all directory paths recursively under wiki/ (relative, e.g. "lang", "lang/js"). */
+  listAllDirPaths(): string[] {
+    const result: string[] = [];
+    const walk = (dir: string, prefix: string) => {
+      if (!existsSync(dir)) return;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory() && !entry.name.startsWith(".")) {
+          const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+          result.push(relPath);
+          walk(join(dir, entry.name), relPath);
+        }
+      }
+    };
+    walk(this.config.wikiDir, "");
+    return result.sort();
   }
 
   /** Delete a wiki page. Returns true if it existed. */
@@ -1145,7 +1360,7 @@ _Chronological view of all knowledge in this wiki._
   /** BM25 search across all wiki pages with inverted index, synonym expansion,
    *  prefix/fuzzy matching, and field-weighted scoring.
    *  Index is built lazily on first search and cached until invalidated by write/delete. */
-  search(query: string, limit = 10): Array<{ path: string; score: number; snippet: string }> {
+  search(query: string, limit = 10): SearchResult[] {
     return this.searchEngine.search(query, limit);
   }
 
@@ -1702,6 +1917,38 @@ _Chronological view of all knowledge in this wiki._
       rawCount = this.rawList().length;
     } catch { /* no raw dir */ }
 
+    // Collect existing sub-indexes before rebuild so we can remove stale ones
+    const existingSubIndexes = this.listAllPages()
+      .filter((p) => p !== "index.md" && p.endsWith("/index.md"));
+
+    // Compute the set of sub-indexes that should exist based on current pages
+    const expectedSubIndexes = new Set<string>();
+    for (const pagePath of pages) {
+      const parts = pagePath.split("/");
+      for (let i = 1; i < parts.length; i++) {
+        expectedSubIndexes.add(parts.slice(0, i).join("/") + "/index.md");
+      }
+    }
+
+    // Remove stale sub-indexes (and empty parent dirs)
+    for (const staleIndex of existingSubIndexes) {
+      if (!expectedSubIndexes.has(staleIndex)) {
+        const fullPath = join(this.config.wikiDir, staleIndex);
+        if (existsSync(fullPath)) unlinkSync(fullPath);
+        // Clean up empty parent directories up to wiki root
+        let dir = dirname(fullPath);
+        const wikiRoot = resolve(this.config.wikiDir);
+        while (dir !== wikiRoot && dir.startsWith(wikiRoot)) {
+          try {
+            rmdirSync(dir); // only succeeds if empty
+            dir = dirname(dir);
+          } catch {
+            break; // not empty, stop
+          }
+        }
+      }
+    }
+
     // Partition pages into topic dirs vs root-level
     const topicPages: Record<string, string[]> = {};  // topic -> page paths
     const rootPages: string[] = [];
@@ -1822,22 +2069,34 @@ _Chronological view of all knowledge in this wiki._
     this.log("rebuild-index", "index.md", `Rebuilt index with ${pages.length} pages`);
   }
 
-  /** Rebuild a topic sub-index at {topic}/index.md. */
-  private rebuildTopicIndex(topic: string, topicPages: string[], now: string, pageCache?: Map<string, WikiPage>): void {
-    const categories: Record<string, string[]> = {};
-    for (const pagePath of topicPages) {
-      const page = pageCache?.get(pagePath) ?? this.read(pagePath);
-      if (!page) continue;
-      const type = page.type ?? "uncategorized";
-      if (!categories[type]) categories[type] = [];
-      const slug = basename(pagePath, extname(pagePath));
-      const updated = page.updated ? ` _(${page.updated.slice(0, 10)})_` : "";
-      categories[type]!.push(`- [[${topic}/${slug}]] — ${page.title}${updated}`);
+  /** Rebuild a directory sub-index at {dirPath}/index.md.
+   *  Recursively creates indexes for nested sub-directories. */
+  private rebuildTopicIndex(dirPath: string, allPages: string[], now: string, pageCache?: Map<string, WikiPage>): void {
+    // Separate into direct pages vs sub-directory pages
+    const directPages: string[] = [];
+    const subDirPages: Record<string, string[]> = {};
+    const depth = dirPath.split("/").length;
+
+    for (const pagePath of allPages) {
+      const parts = pagePath.split("/");
+      if (parts.length === depth + 1) {
+        directPages.push(pagePath);
+      } else if (parts.length > depth + 1) {
+        const subDir = parts[depth]!;
+        if (!subDirPages[subDir]) subDirPages[subDir] = [];
+        subDirPages[subDir]!.push(pagePath);
+      }
     }
 
-    const topicIndexPath = `${topic}/index.md`;
-    const existing = this.read(topicIndexPath);
-    const label = topic.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+    // Recursively build sub-directory indexes
+    for (const [subDir, subPages] of Object.entries(subDirPages)) {
+      this.rebuildTopicIndex(`${dirPath}/${subDir}`, subPages, now, pageCache);
+    }
+
+    const indexPath = `${dirPath}/index.md`;
+    const existing = this.read(indexPath);
+    const hasSubDirs = Object.keys(subDirPages).length > 0;
+    const label = dirPath.split("/").pop()!.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
     let lines = [
       "---",
@@ -1849,19 +2108,44 @@ _Chronological view of all knowledge in this wiki._
       "",
       `# ${label}`,
       "",
-      `_${topicPages.length} pages_`,
+      `_${allPages.length} pages_`,
       "",
     ];
 
-    for (const type of Object.keys(categories).sort()) {
-      const typeLabel = type.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-      lines.push(`## ${typeLabel} (${categories[type]!.length})`, "");
-      lines.push(...categories[type]!, "");
+    // List sub-directories first
+    if (hasSubDirs) {
+      lines.push("## Sub-topics", "");
+      const sortedSubDirs = Object.keys(subDirPages).sort();
+      for (const subDir of sortedSubDirs) {
+        const count = subDirPages[subDir]!.length;
+        const subLabel = subDir.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+        lines.push(`- [[${dirPath}/${subDir}/index]] — ${subLabel} (${count} pages)`);
+      }
+      lines.push("");
+    }
+
+    // List direct pages by type
+    if (directPages.length > 0) {
+      const categories: Record<string, string[]> = {};
+      for (const pagePath of directPages) {
+        const page = pageCache?.get(pagePath) ?? this.read(pagePath);
+        if (!page) continue;
+        const type = page.type ?? "uncategorized";
+        if (!categories[type]) categories[type] = [];
+        const slug = basename(pagePath, extname(pagePath));
+        const updated = page.updated ? ` _(${page.updated.slice(0, 10)})_` : "";
+        categories[type]!.push(`- [[${dirPath}/${slug}]] — ${page.title}${updated}`);
+      }
+      for (const type of Object.keys(categories).sort()) {
+        const typeLabel = type.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+        lines.push(`## ${typeLabel} (${categories[type]!.length})`, "");
+        lines.push(...categories[type]!, "");
+      }
     }
 
     lines.push("---", "", `_Last rebuilt: ${now.replace("T", " ").slice(0, 16)} UTC_`, "");
 
-    const fullPath = join(this.config.wikiDir, topicIndexPath);
+    const fullPath = join(this.config.wikiDir, indexPath);
     mkdirSync(dirname(fullPath), { recursive: true });
     writeFileSync(fullPath, lines.join("\n"));
   }
@@ -2002,213 +2286,6 @@ function listAllFiles(dir: string, root: string): string[] {
     }
   }
   return result.sort();
-}
-
-/** Parse a page range string like "1-5", "3", "1-3,7-10" into a Set of 0-based page indices. */
-function parsePageRange(pages: string, totalPages: number): Set<number> {
-  const indices = new Set<number>();
-  for (const part of pages.split(",")) {
-    const trimmed = part.trim();
-    const match = trimmed.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
-    if (!match) continue;
-    const rawStart = parseInt(match[1], 10);
-    if (rawStart > totalPages) continue; // entirely out of bounds
-    const start = Math.max(1, rawStart);
-    const end = Math.min(totalPages, match[2] ? parseInt(match[2], 10) : rawStart);
-    for (let i = start; i <= end; i++) indices.add(i - 1); // 0-based
-  }
-  return indices;
-}
-
-/** Extract text from document files using pure Node.js libraries (no Python).
- *  For PDF files, an optional `pages` parameter limits extraction to specific pages. */
-async function extractTextNode(filePath: string, pages?: string): Promise<string> {
-  const ext = extname(filePath).toLowerCase();
-
-  if (ext === ".pdf") {
-    const pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    const { readFile } = await import("fs/promises");
-    const data = new Uint8Array(await readFile(filePath));
-
-    const doc = await pdfjsLib.getDocument({ data, useSystemFonts: true }).promise;
-    const totalPages = doc.numPages; // 1-based in pdfjs
-
-    // Determine which pages to extract (1-based indices)
-    let pageIndices: number[];
-    if (pages) {
-      const wanted = parsePageRange(pages, totalPages);
-      if (wanted.size === 0) {
-        doc.destroy();
-        return `(no pages matched range "${pages}" — PDF has ${totalPages} pages)`;
-      }
-      pageIndices = [...wanted].sort((a, b) => a - b).map(i => i + 1); // 0-based → 1-based
-    } else {
-      pageIndices = Array.from({ length: totalPages }, (_, i) => i + 1);
-    }
-
-    // Extract text page by page — only getPage() for wanted pages, true O(n)
-    const parts: string[] = [];
-    for (const pageNum of pageIndices) {
-      const page = await doc.getPage(pageNum);
-      const content = await page.getTextContent();
-      let lastY: number | undefined;
-      let text = "";
-      for (const item of content.items) {
-        if (!("str" in item)) continue; // skip marked content items
-        const y = (item as any).transform[5];
-        if (lastY === y || lastY === undefined) {
-          text += (item as any).str;
-        } else {
-          text += "\n" + (item as any).str;
-        }
-        lastY = y;
-      }
-      if (text.trim()) parts.push(text);
-    }
-
-    doc.destroy();
-
-    const body = parts.join("\n\n");
-    if (pages) {
-      return `[Pages ${pages} of ${totalPages}]\n${body}`;
-    }
-    return body;
-  }
-
-  if (ext === ".docx") {
-    const mammoth = await import("mammoth");
-    const result = await mammoth.extractRawText({ path: filePath });
-    return result.value;
-  }
-
-  if (ext === ".xlsx") {
-    const XLSX = await import("xlsx");
-    const wb = XLSX.readFile(filePath);
-    const sheets: string[] = [];
-    for (const name of wb.SheetNames) {
-      const ws = wb.Sheets[name];
-      if (!ws) continue;
-      const csv = XLSX.utils.sheet_to_csv(ws);
-      if (csv.trim()) {
-        sheets.push(`--- Sheet: ${name} ---\n${csv.trim()}`);
-      }
-    }
-    return sheets.join("\n\n");
-  }
-
-  if (ext === ".pptx") {
-    const AdmZip = (await import("adm-zip")).default;
-    const zip = new AdmZip(filePath);
-    const slides: string[] = [];
-    const entries = zip.getEntries()
-      .filter(e => /^ppt\/slides\/slide\d+\.xml$/.test(e.entryName))
-      .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
-    for (const entry of entries) {
-      const xml = entry.getData().toString("utf-8");
-      // Strip XML tags, keep text content
-      const text = xml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-      if (text) {
-        const num = entry.entryName.match(/slide(\d+)/)?.[1] ?? "?";
-        slides.push(`--- Slide ${num} ---\n${text}`);
-      }
-    }
-    return slides.join("\n\n");
-  }
-
-  if (ext === ".html" || ext === ".htm") {
-    const html = readFileSync(filePath, "utf-8");
-    // Strip script/style blocks, then tags
-    const cleaned = html
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[\s\S]*?<\/style>/gi, "")
-      .replace(/<[^>]+>/g, "\n")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-    return cleaned;
-  }
-
-  throw new Error(`Unsupported document format: ${ext}`);
-}
-
-function guessMime(filename: string): string {
-  const ext = extname(filename).toLowerCase();
-  const map: Record<string, string> = {
-    // Text
-    ".md": "text/markdown",
-    ".txt": "text/plain",
-    ".html": "text/html",
-    ".htm": "text/html",
-    ".css": "text/css",
-    ".js": "text/javascript",
-    ".ts": "text/javascript",
-    ".csv": "text/csv",
-    ".xml": "text/xml",
-    ".json": "application/json",
-    ".yaml": "text/yaml",
-    ".yml": "text/yaml",
-    ".toml": "text/plain",
-    ".ini": "text/plain",
-    ".log": "text/plain",
-    ".sh": "text/x-shellscript",
-    ".py": "text/x-python",
-    ".java": "text/x-java",
-    ".c": "text/x-c",
-    ".cpp": "text/x-c++",
-    ".rs": "text/x-rust",
-    ".go": "text/x-go",
-    ".rb": "text/x-ruby",
-    ".sql": "application/sql",
-    ".r": "text/plain",
-    // Documents
-    ".pdf": "application/pdf",
-    ".rtf": "application/rtf",
-    ".epub": "application/epub+zip",
-    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".doc": "application/msword",
-    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".xls": "application/vnd.ms-excel",
-    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ".ppt": "application/vnd.ms-powerpoint",
-    // Images
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".svg": "image/svg+xml",
-    ".webp": "image/webp",
-    ".avif": "image/avif",
-    ".bmp": "image/bmp",
-    ".ico": "image/x-icon",
-    ".tiff": "image/tiff",
-    ".tif": "image/tiff",
-    // Audio
-    ".mp3": "audio/mpeg",
-    ".wav": "audio/wav",
-    ".ogg": "audio/ogg",
-    ".flac": "audio/flac",
-    ".aac": "audio/aac",
-    ".m4a": "audio/mp4",
-    // Video
-    ".mp4": "video/mp4",
-    ".webm": "video/webm",
-    ".mkv": "video/x-matroska",
-    ".mov": "video/quicktime",
-    ".avi": "video/x-msvideo",
-    // Archives
-    ".zip": "application/zip",
-    ".gz": "application/gzip",
-    ".tar": "application/x-tar",
-    ".7z": "application/x-7z-compressed",
-    ".rar": "application/x-rar-compressed",
-    ".bz2": "application/x-bzip2",
-    // Data / other
-    ".wasm": "application/wasm",
-    ".sqlite": "application/x-sqlite3",
-    ".db": "application/x-sqlite3",
-    ".parquet": "application/octet-stream",
-    ".arrow": "application/octet-stream",
-  };
-  return map[ext] ?? "application/octet-stream";
 }
 
 function formatBytes(bytes: number): string {
@@ -2486,7 +2563,7 @@ description: Distilled knowledge combining insights from multiple pages
  * Supports: *.html, *.xlsx, *.{html,css}, **\/*.html
  * Not a full glob — just enough for pattern filtering.
  */
-function matchSimpleGlob(filepath: string, pattern: string): boolean {
+export function matchSimpleGlob(filepath: string, pattern: string): boolean {
   // Handle brace expansion: *.{html,css} → [html, css]
   const braceMatch = pattern.match(/\.\{([^}]+)\}$/);
   if (braceMatch) {

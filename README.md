@@ -4,7 +4,7 @@
 
 Instead of retrieving raw fragments every query (RAG), your agent compiles, refines, and interlinks knowledge — like a team wiki that writes itself.
 
-Works with Claude Code, Cursor, Windsurf, and any MCP client. No LLM built in — your agent IS the intelligence.
+Works with Claude Code, Cursor, Windsurf, and any MCP client. Also installable as a native skill for Claude Code. No LLM built in — your agent IS the intelligence.
 
 [![npm](https://img.shields.io/npm/v/@agent-wiki/mcp-server)](https://www.npmjs.com/package/@agent-wiki/mcp-server)
 [![CI](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml)
@@ -14,11 +14,9 @@ Works with Claude Code, Cursor, Windsurf, and any MCP client. No LLM built in �
 
 ## Quick Start
 
-```bash
-npx @agent-wiki/mcp-server serve --wiki-path ./my-knowledge
-```
+### Option A: MCP Server (Cursor, Windsurf, Claude Desktop, any MCP client)
 
-Add to your MCP client config (Claude Code, Cursor, Windsurf, Claude Desktop):
+Add to your MCP client config:
 
 ```json
 {
@@ -29,6 +27,21 @@ Add to your MCP client config (Claude Code, Cursor, Windsurf, Claude Desktop):
     }
   }
 }
+```
+
+### Option B: Native Skill (Claude Code)
+
+```bash
+npm install -g @agent-wiki/mcp-server
+
+# Install as Claude Code plugin
+agent-wiki install claude-code
+```
+
+### Option C: CLI only
+
+```bash
+npx @agent-wiki/mcp-server call wiki_search '{"query": "deployment"}'
 ```
 
 That's it. Your agent now has a persistent, structured knowledge base.
@@ -48,16 +61,19 @@ That's it. Your agent now has a persistent, structured knowledge base.
 
 | Feature | Description |
 |---------|-------------|
+| **Batch Mode** | Generic `batch` tool + semantic pipelines — collapse multi-step workflows into single requests |
+| **Knowledge Pipelines** | `knowledge_ingest_batch` + `knowledge_digest_write` — end-to-end ingest/digest/write-back loop |
+| **Structured Extraction** | PDF (per-page), DOCX, XLSX (per-sheet), PPTX (per-slide) — segments with source provenance |
 | **Immutable Sources** | SHA-256 verified `raw/` layer — write-once, tamper-proof, full provenance |
 | **Knowledge Compilation** | Agent builds structured wiki pages from raw sources — not retrieve-and-forget |
 | **BM25 Search** | Field-weighted scoring, synonym expansion, fuzzy matching, CJK tokenization — zero LLM |
 | **Auto-Classification** | Zero-LLM heuristic assigns entity types and tags across 10 categories |
+| **Multi-Level Indexes** | Auto-generated `index.md` at every directory level — nested topic hierarchies with sub-topic navigation |
 | **Self-Checking Lint** | Catches contradictions, broken links, orphan pages, stale content |
 | **Atlassian Import** | One-command Confluence pages and Jira issues with full hierarchy |
 | **File Versioning** | Auto-version same-name files, query latest, list all versions |
-| **Directory Import** | Point to a folder — imports all files with optional glob filtering |
-| **Document Extraction** | PDF (with per-page access), DOCX, XLSX (multi-tab), PPTX — text extracted automatically |
-| **16 MCP Tools** | Full CRUD + search + lint + health checks |
+| **COBOL Code Analysis** | AST parser with variable tracing, call graph generation, and auto wiki pages |
+| **Skill Install** | One-command install as native skill for Claude Code and compatible clients |
 | **Git-Native** | Plain Markdown — diffable, blameable, revertable |
 
 ## Architecture
@@ -84,10 +100,19 @@ Three immutability layers, inspired by how compilers work:
 6. **Provenance matters** — Every wiki claim traces back to raw sources.
 7. **Git-native** — Plain Markdown. Every change is diffable, blameable, and revertable.
 
+## Integration
+
+| Method | Best For | Setup |
+|--------|----------|-------|
+| **MCP Server** | Cursor, Windsurf, Claude Desktop, any MCP client | Add to `.mcp.json` |
+| **Native Skill** | Claude Code (native plugin) | `agent-wiki install claude-code` |
+| **CLI** | Any agent with shell access | `agent-wiki call <tool> '{json}'` |
+
 ## Documentation
 
-- [MCP Tools (16) & Entity Types](docs/tools.md)
+- [MCP Tools (18) & Entity Types](docs/tools.md)
 - [Configuration, CLI & Security](docs/configuration.md)
+- [Request Optimization — Batch Digest, Pagination, Context Limits](docs/request-optimization.md)
 
 ## Acknowledgment
 

@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-agent-wiki exposes 16 tools through the Model Context Protocol.
+agent-wiki exposes 18 tools through the Model Context Protocol.
 
 ## Raw Layer — Immutable Sources
 
@@ -9,7 +9,7 @@ agent-wiki exposes 16 tools through the Model Context Protocol.
 | `raw_add` | Add a source document (content string, local file, or entire directory). SHA-256 hashed with `.meta.yaml` sidecar. Supports `auto_version` for same-name files and `pattern` filtering for directories. |
 | `raw_fetch` | Download from URL to raw/ (smart arXiv handling — `arxiv.org/abs/XXXX` auto-converts to PDF) |
 | `raw_list` | List all raw documents with metadata (path, source URL, hash, size) |
-| `raw_read` | Read a raw document — text/SVG return content; PDF/DOCX/XLSX/PPTX extracted automatically; other binary return metadata only. For PDFs, optional `pages` parameter (e.g. `"1-5"`, `"3,7-10"`) extracts specific pages without parsing the entire file. |
+| `raw_read` | Read a raw document — text/SVG return content; PDF/DOCX/XLSX/PPTX extracted automatically; images returned inline (<10MB); other binary return metadata only. Supports pagination to bypass the 10K char default truncation: `pages` for PDF/PPTX ranges, `sheet` for a specific XLSX sheet, `offset`+`limit` for line-based reading of DOCX and text files. Paginated responses include metadata (`total_pages`, `sheet_names`, `total_lines`, etc.) for follow-up reads. |
 | `raw_versions` | List all versions of a file with metadata, returns latest version |
 
 ## Atlassian — Confluence & Jira
@@ -24,14 +24,46 @@ agent-wiki exposes 16 tools through the Model Context Protocol.
 | Tool | Description |
 |------|-------------|
 | `wiki_read` | Read a page (frontmatter + Markdown) |
-| `wiki_write` | Create or update a page (auto-timestamps, auto-classify) |
-| `wiki_delete` | Delete a page (guards system pages) |
+| `wiki_write` | Create or update a page (auto-timestamps, auto-classify, auto-route to nested dirs). Triggers index rebuild. |
+| `wiki_delete` | Delete a page (guards system pages). Triggers index rebuild — stale indexes and empty dirs are cleaned up. |
 | `wiki_list` | List pages, filter by entity type or tag |
 | `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support |
 | `wiki_lint` | Health checks: contradictions, orphans, broken links, SHA-256 integrity |
 | `wiki_init` | Initialize a new knowledge base (creates wiki/, raw/, schemas/) |
 | `wiki_config` | Show current workspace configuration, paths, and available entity templates |
-| `wiki_rebuild` | Rebuild index.md (organized by type) and timeline.md (chronological view) |
+| `wiki_rebuild` | Rebuild all `index.md` files (multi-level directory indexes) and `timeline.md` (chronological view) |
+
+## Code Analysis — Language Plugins
+
+| Tool | Description |
+|------|-------------|
+| `code_parse` | Parse a source file from raw/ into structured code knowledge (AST, normalized model, summary). Generates wiki pages automatically. Currently supports COBOL (.cbl, .cob, .cpy). Optionally traces a variable. |
+| `code_trace_variable` | Trace all references to a variable across a parsed source file. Shows where it is read, written, or passed, grouped by section/paragraph. |
+
+The code analysis system is plugin-based with a language-agnostic `NormalizedCodeModel`:
+
+```
+raw/PAYROLL.cbl
+  → code_parse
+    → raw/parsed/cobol/PAYROLL.ast.json        (language-specific AST)
+    → raw/parsed/cobol/PAYROLL.normalized.json  (language-agnostic model)
+    → raw/parsed/cobol/PAYROLL.summary.json     (summary statistics)
+    → raw/parsed/cobol/PAYROLL.model.json       (COBOL-specific model)
+    → wiki/code-payroll.md                      (auto-generated wiki page)
+    → wiki/code-call-graph.md                   (aggregate call graph)
+```
+
+### Normalized Code Model
+
+All language plugins emit a common `NormalizedCodeModel`:
+
+| Field | Description |
+|-------|-------------|
+| `units` | Programs, classes, modules, copybooks |
+| `procedures` | Functions, methods, paragraphs, sections |
+| `symbols` | Variables, fields, constants, parameters |
+| `relations` | Calls, performs, includes, imports |
+| `diagnostics` | Warnings and errors from parsing |
 
 ### Removed Tools
 
@@ -45,6 +77,43 @@ These tools were consolidated into other tools in v0.6.0:
 | `wiki_synthesize` | Agent calls `wiki_read` on multiple pages directly |
 | `wiki_schemas` | `wiki_config` — returns entity templates alongside configuration |
 | `wiki_rebuild_index` / `wiki_rebuild_timeline` | `wiki_rebuild` — single tool rebuilds both |
+
+## Directory Structure & Auto-Generated Indexes
+
+Pages can be organized into nested directories. `wiki_rebuild` (and every `wiki_write`/`wiki_delete`) automatically generates `index.md` at each directory level.
+
+```
+wiki/
+  index.md              ← top-level hub (auto-generated)
+  log.md                ← operation log (auto-generated)
+  timeline.md           ← chronological view (auto-generated)
+  note-misc.md
+  lang/
+    index.md            ← lists js/, python/ sub-topics (auto-generated)
+    js/
+      index.md          ← lists JS pages by type (auto-generated)
+      concept-closures.md
+      concept-promises.md
+    python/
+      index.md          ← lists Python pages by type (auto-generated)
+      concept-decorators.md
+```
+
+### Reserved paths
+
+All `*/index.md` paths are **system-reserved** for auto-generated directory indexes. They cannot be created or deleted through `wiki_write` / `wiki_delete`. They are fully managed by the rebuild process.
+
+### Auto-routing
+
+`wiki_write` automatically routes root-level pages to matching nested directories:
+
+1. **Explicit `topic` field** — `topic: "js"` in frontmatter matches `lang/js/` (deepest match wins)
+2. **Tag/title matching** — title words and tags are matched against existing directory names
+3. **Deepest match wins** — `lang/js/` is preferred over `lang/` for a JS-related page
+
+### Stale cleanup
+
+When the last page in a subtree is deleted, `wiki_rebuild` removes the stale `index.md` and cleans up empty parent directories automatically.
 
 ## Entity Types
 

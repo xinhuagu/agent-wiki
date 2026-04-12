@@ -1969,6 +1969,122 @@ _Chronological view of all knowledge in this wiki._
     return { type: bestType, tags, confidence };
   }
 
+  /**
+   * Scan content body for mentions of existing page titles and inject `[[slug|text]]` links.
+   *
+   * Skipped zones (unchanged):
+   *   - Fenced code blocks (``` or ~~~)
+   *   - Inline code (`...`)
+   *   - Existing `[[wiki links]]`
+   *   - Markdown `[text](url)` links
+   *   - Bare URLs (https?://...)
+   *
+   * Rules:
+   *   - Only titles ≥ 4 chars are considered (avoids noise from short tokens)
+   *   - Each page is linked at most once — first occurrence wins
+   *   - Longest title wins when two candidates overlap
+   *   - Self-references (same slug as `selfPath`) are excluded
+   *
+   * Returns `{ content, linksAdded }`. Content is unchanged when linksAdded === 0.
+   */
+  autoLink(content: string, selfPath: string): { content: string; linksAdded: number } {
+    const parsed = matter(content);
+    const body = parsed.content;
+
+    const selfSlug = basename(selfPath, ".md");
+
+    // Build title → slug lookup from all non-system pages (excluding self)
+    const candidates: Array<{ title: string; slug: string }> = [];
+    for (const p of this.listAllPages()) {
+      if (isSystemPage(p)) continue;
+      const slug = basename(p, ".md");
+      if (slug === selfSlug) continue;
+      try {
+        const raw = readFileSync(join(this.config.wikiDir, p), "utf-8");
+        const fm = matter(raw).data;
+        const title = ((fm.title as string) ?? slug.replace(/-/g, " ")).trim();
+        if (title.length >= 4) {
+          candidates.push({ title, slug });
+        }
+      } catch {
+        // skip unreadable pages
+      }
+    }
+
+    if (candidates.length === 0) return { content, linksAdded: 0 };
+
+    // Sort longest-first so "YOLO Object Detection" beats "YOLO"
+    candidates.sort((a, b) => b.title.length - a.title.length);
+
+    // Split body into skip zones (code, existing links, urls) and safe zones
+    const SKIP_RE = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`]*`|\[\[[^\]]*\]\]|\[[^\]]*\]\([^)]*\)|https?:\/\/\S+)/g;
+    const segments: Array<{ text: string; skip: boolean }> = [];
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = SKIP_RE.exec(body)) !== null) {
+      if (m.index > last) segments.push({ text: body.slice(last, m.index), skip: false });
+      segments.push({ text: m[0], skip: true });
+      last = m.index + m[0].length;
+    }
+    if (last < body.length) segments.push({ text: body.slice(last), skip: false });
+
+    const linked = new Set<string>();
+    let linksAdded = 0;
+
+    interface SegMatch { start: number; end: number; matchText: string; slug: string }
+
+    const newSegments = segments.map(seg => {
+      if (seg.skip) return seg.text;
+      const text = seg.text;
+
+      // Collect every candidate occurrence in this segment
+      const allMatches: SegMatch[] = [];
+      for (const { title, slug } of candidates) {
+        if (linked.has(slug)) continue;
+        const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const re = new RegExp(`(?<![\\w\\[])${escaped}(?![\\w\\]])`, "gi");
+        let m2: RegExpExecArray | null;
+        while ((m2 = re.exec(text)) !== null) {
+          allMatches.push({ start: m2.index, end: m2.index + m2[0].length, matchText: m2[0], slug });
+        }
+      }
+
+      if (allMatches.length === 0) return text;
+
+      // Sort by position asc, then by match length desc (longer wins at same start)
+      allMatches.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
+
+      // Greedy selection: non-overlapping, one link per slug
+      const selected: SegMatch[] = [];
+      let lastEnd = 0;
+      const usedSlugs = new Set<string>();
+      for (const m2 of allMatches) {
+        if (m2.start < lastEnd) continue;           // overlaps a previous match
+        if (usedSlugs.has(m2.slug)) continue;       // slug already linked in this segment
+        if (linked.has(m2.slug)) continue;           // slug already linked in a prior segment
+        selected.push(m2);
+        lastEnd = m2.end;
+        usedSlugs.add(m2.slug);
+      }
+
+      if (selected.length === 0) return text;
+
+      // Apply replacements right-to-left (preserves earlier positions)
+      let result = text;
+      for (const m2 of [...selected].reverse()) {
+        linked.add(m2.slug);
+        linksAdded++;
+        result = result.slice(0, m2.start) + `[[${m2.slug}|${m2.matchText}]]` + result.slice(m2.end);
+      }
+      return result;
+    });
+
+    if (linksAdded === 0) return { content, linksAdded: 0 };
+
+    const newBody = newSegments.join("");
+    return { content: matter.stringify(newBody, parsed.data), linksAdded };
+  }
+
   /** Auto-classify and inject type/tags into content if missing.
    *  Returns the enriched content string. */
   autoClassifyContent(content: string): string {
@@ -2396,7 +2512,8 @@ _Chronological view of all knowledge in this wiki._
     const body = parsed.content.trim();
 
     const linkMatches = body.matchAll(/\[\[([^\]]+)\]\]/g);
-    const links = [...linkMatches].map((m) => m[1]!);
+    // Support [[slug|display text]] format — extract slug part only
+    const links = [...linkMatches].map((m) => m[1]!.split("|")[0]!.trim());
 
     return {
       path: pagePath,

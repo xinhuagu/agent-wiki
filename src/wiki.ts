@@ -1440,17 +1440,31 @@ _Chronological view of all knowledge in this wiki._
     this.saveVectorIndex();
   }
 
-  /** Rebuild the full vector index for all pages (used by wiki_rebuild when hybrid is on). */
-  async rebuildVectorIndex(): Promise<void> {
+  /** Rebuild the full vector index for all pages (used by wiki_rebuild when hybrid is on).
+   *  Returns counts of pages processed and pages that failed (e.g. embedding errors). */
+  async rebuildVectorIndex(): Promise<{ pagesProcessed: number; errors: number }> {
     const pages = this.listAllPages();
+    let pagesProcessed = 0;
+    let errors = 0;
     for (const pagePath of pages) {
       const page = this.read(pagePath);
       if (!page) continue;
       const text = `${page.title} ${page.tags.join(" ")} ${page.content}`.slice(0, 2000);
-      const embedding = await this.searchEngine.embedText(text);
-      this.searchEngine.updateVector(pagePath, embedding);
+      try {
+        const embedding = await this.searchEngine.embedText(text);
+        this.searchEngine.updateVector(pagePath, embedding);
+        pagesProcessed++;
+      } catch {
+        errors++;
+      }
     }
     this.saveVectorIndex();
+    return { pagesProcessed, errors };
+  }
+
+  /** Return the number of pages currently in the vector index. */
+  getVectorCount(): number {
+    return this.searchEngine.getVectorCount();
   }
 
   // ── Lint — Self-checking & error detection ────────────────────

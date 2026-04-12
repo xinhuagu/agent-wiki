@@ -245,7 +245,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "wiki_read",
         description:
-          "Read a wiki page by path. Returns frontmatter + Markdown content. " +
+          "Read one or more wiki pages. Single page: pass `page`. Multiple pages: pass `pages` array — reads all in one request, saving N-1 round trips. " +
           "RECOMMENDED WORKFLOW: (1) call without 'section' to get the TOC for large pages, " +
           "(2) use wiki_search 'section' field to jump directly to the relevant heading, " +
           "(3) call with 'section' to read only that part. " +
@@ -255,7 +255,12 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           properties: {
             page: {
               type: "string",
-              description: "Page path relative to wiki/ (e.g. 'concept-gil.md')",
+              description: "Page path relative to wiki/ (e.g. 'concept-gil.md'). Use for single-page reads.",
+            },
+            pages: {
+              type: "array",
+              items: { type: "string" },
+              description: "Array of page paths for multi-page reads. Returns an array of results in one request.",
             },
             section: {
               type: "string",
@@ -270,13 +275,13 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
               description: "Max lines to return (default: 200, max: 500).",
             },
           },
-          required: ["page"],
         },
       },
       {
         name: "wiki_write",
         description:
-          "Create or update a wiki page. Content should include YAML frontmatter (title, type, tags, sources) and Markdown body. Timestamps (created/updated) are auto-managed. Auto-routes root-level pages to matching topic subdirectories (via frontmatter `topic` field or tag matching). Wiki pages are MUTABLE — they represent compiled knowledge that improves over time.",
+          "Create or update a wiki page. Content should include YAML frontmatter (title, type, tags, sources) and Markdown body. Timestamps (created/updated) are auto-managed. Auto-routes root-level pages to matching topic subdirectories (via frontmatter `topic` field or tag matching). Wiki pages are MUTABLE — they represent compiled knowledge that improves over time. " +
+          "Set `return_content: true` to include the final written content in the response — eliminates the follow-up wiki_read call in write-then-reference workflows.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -292,6 +297,10 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             source: {
               type: "string",
               description: "Provenance — why this write is happening",
+            },
+            return_content: {
+              type: "boolean",
+              description: "If true, include the final written content in the response. Eliminates a follow-up wiki_read call. Default: false.",
             },
           },
           required: ["page", "content"],
@@ -337,7 +346,8 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           "Uses BM25 by default; switches to hybrid BM25+vector re-ranking when `search.hybrid: true` is set in " +
           ".agent-wiki.yaml (requires wiki_rebuild to build the vector index first). " +
           "Set include_content=true for simple inline content. For advanced search+read with deduplication, " +
-          "readTopN control, and per-page limits, use wiki_search_read instead.",
+          "readTopN control, and per-page limits, use wiki_search_read instead. " +
+          "Use `type` or `tags` to narrow results without a separate wiki_list call.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -348,6 +358,15 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             limit: {
               type: "number",
               description: "Max results (default: 10)",
+            },
+            type: {
+              type: "string",
+              description: "Filter results to a specific entity type (person, concept, event, artifact, code, comparison, summary, how-to, note, synthesis). Applied after BM25 ranking.",
+            },
+            tags: {
+              type: "array",
+              items: { type: "string" },
+              description: "Filter results to pages that have at least one of these tags. Applied after BM25 ranking.",
             },
             include_content: {
               type: "boolean",
@@ -865,6 +884,33 @@ export async function handleTool(
     // ═══ WIKI LAYER ═══
 
     case "wiki_read": {
+      // ── Multi-page read ──────────────────────────────────────
+      const multiPaths = args.pages as string[] | undefined;
+      if (multiPaths && multiPaths.length > 0) {
+        const readOnePage = (pagePath: string) => {
+          const p = wiki.read(pagePath);
+          if (!p) return { page: pagePath, not_found: true };
+          const fullPath = join(wiki.config.wikiDir, p.path);
+          let raw: string;
+          try { raw = readFileSync(fullPath, "utf-8"); } catch { return { page: pagePath, not_found: true }; }
+          const lines = raw.split("\n");
+          const total = lines.length;
+          const DEFAULT_LIMIT = 200;
+          const MAX_LIMIT = 500;
+          const offset2 = Math.max(0, Math.floor((args.offset as number) ?? 0));
+          const limit2 = Math.min(MAX_LIMIT, Math.max(1, Math.floor((args.limit as number) ?? DEFAULT_LIMIT)));
+          const slice = lines.slice(offset2, offset2 + limit2);
+          const truncated = offset2 + limit2 < total;
+          if (!truncated && offset2 === 0) return { page: pagePath, content: raw };
+          const toc = buildToc(splitSections(raw));
+          return { page: pagePath, content: slice.join("\n"), offset: offset2, lines_returned: slice.length, total_lines: total, truncated, next_offset: truncated ? offset2 + limit2 : null, toc: toc || null };
+        };
+        const pages2 = multiPaths.map(readOnePage);
+        return JSON.stringify({ pages: pages2, count: pages2.length }, null, 2);
+      }
+
+      // ── Single-page read (original behaviour) ───────────────
+      if (!args.page) throw new Error("wiki_read requires 'page' or 'pages'");
       const page = wiki.read(args.page as string);
       if (!page) throw new Error(`Page not found: ${args.page}`);
       const fullPath = join(wiki.config.wikiDir, page.path);
@@ -944,12 +990,16 @@ export async function handleTool(
         await wiki.updatePageVector(resolvedPage).catch(() => { /* non-fatal */ });
       }
       const classification = wiki.classify(enrichedContent);
-      return JSON.stringify({
+      const writeResult: Record<string, unknown> = {
         ok: true,
         page: resolvedPage,
         routed: resolvedPage !== args.page,
         autoClassified: { type: classification.type, tags: classification.tags, confidence: classification.confidence },
-      });
+      };
+      if (args.return_content) {
+        writeResult.content = enrichedContent;
+      }
+      return JSON.stringify(writeResult);
     }
 
     case "wiki_delete": {
@@ -973,9 +1023,23 @@ export async function handleTool(
     case "wiki_search": {
       const searchQuery = args.query as string;
       const searchLimit = (args.limit as number) ?? 10;
-      const results = wiki.config.search.hybrid
-        ? await wiki.searchHybrid(searchQuery, searchLimit)
-        : wiki.search(searchQuery, searchLimit);
+      const filterType = args.type as string | undefined;
+      const filterTags = args.tags as string[] | undefined;
+      // Fetch extra candidates so post-filter doesn't starve results
+      const fetchLimit = (filterType || filterTags?.length) ? searchLimit * 3 : searchLimit;
+      const rawResults = wiki.config.search.hybrid
+        ? await wiki.searchHybrid(searchQuery, fetchLimit)
+        : wiki.search(searchQuery, fetchLimit);
+      // Apply type / tags filters (post-ranking — BM25 scores are unaffected)
+      const results = (filterType || filterTags?.length)
+        ? rawResults.filter(r => {
+            const p = wiki.read(r.path);
+            if (!p) return false;
+            if (filterType && p.type !== filterType) return false;
+            if (filterTags?.length && !filterTags.some(t => p.tags.includes(t))) return false;
+            return true;
+          }).slice(0, searchLimit)
+        : rawResults;
       if (!args.include_content) {
         return JSON.stringify({ results, count: results.length }, null, 2);
       }

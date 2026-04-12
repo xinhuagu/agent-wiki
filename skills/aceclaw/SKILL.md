@@ -128,16 +128,46 @@ agent-wiki call wiki_lint          # Health checks
 agent-wiki call wiki_config        # Show workspace config
 ```
 
+## Request Optimization (CRITICAL)
+
+**ALWAYS minimize the number of tool calls. Each tool call costs one LLM request.**
+
+- **Looking up existing wiki pages?** Use `wiki_search` or `wiki_search_read` — NEVER use multiple `glob` calls to find pages one by one.
+- **Reading multiple pages?** Use `wiki_read` with `pages` array, or `wiki_search_read` with `readTopN` — NEVER read pages one at a time.
+- **Writing multiple pages?** Use `knowledge_digest_write` or `batch` — NEVER write pages one at a time.
+- **Multiple independent operations?** Use `batch` to combine them into one call.
+- **Importing files?** Use `knowledge_ingest_batch` for directories — NEVER import files one at a time.
+
+### Batch Operations
+```bash
+# Read multiple pages in one call
+agent-wiki call wiki_read '{"pages": ["concept-a.md", "concept-b.md", "concept-c.md"]}'
+
+# Search + read top results in one call (replaces search → glob → read loop)
+agent-wiki call wiki_search_read '{"query": "SORDI Bloomberg", "readTopN": 5}'
+
+# Write multiple digest pages in one call
+agent-wiki call knowledge_digest_write '{"pages": [{"page": "summary.md", "title": "Summary", "body": "..."}]}'
+
+# Combine any operations in one call
+agent-wiki call batch '{"operations": [{"tool": "wiki_search", "args": {"query": "SWEIO"}}, {"tool": "wiki_read", "args": {"page": "concept-x.md"}}]}'
+
+# Ingest an entire directory in one call
+agent-wiki call knowledge_ingest_batch '{"source_path": "/path/to/docs", "topic": "geos"}'
+```
+
 ## Instructions
 
 Based on $ARGUMENTS:
-1. If user asks to search or find: use `wiki_search`
-2. If user asks to read a page or document: use `wiki_read` or `raw_read`
-3. If user asks to write or update: use `wiki_write`
+1. If user asks to search or find: use `wiki_search_read` (returns content inline) or `wiki_search`
+2. If user asks to read a page or document: use `wiki_read` (supports `pages` array for multi-read) or `raw_read`
+3. If user asks to write or update: use `wiki_write` (single) or `knowledge_digest_write` (multiple with provenance)
 4. If user asks to list pages or files: use `wiki_list` or `raw_list`
 5. If user asks to import from Confluence/Jira: use `raw_import_confluence` or `raw_import_jira`
-6. **When adding ANY COBOL file (.cbl, .cob, .cpy) via `raw_add`: ALWAYS run `code_parse` immediately after.** This is mandatory — never add a COBOL file without parsing it.
-7. If user asks about code analysis or variables: use `code_parse` or `code_trace_variable`
-8. If user asks to check health: use `wiki_lint`
-9. Present results in clear, structured format
-10. Most tool outputs are JSON. Exceptions: `wiki_read` returns raw Markdown; missing-page lookups return plain text errors (non-zero exit code)
+6. If user asks to import a directory of files: use `knowledge_ingest_batch`
+7. **When adding ANY COBOL file (.cbl, .cob, .cpy) via `raw_add`: ALWAYS run `code_parse` immediately after.** This is mandatory — never add a COBOL file without parsing it.
+8. If user asks about code analysis or variables: use `code_parse` or `code_trace_variable`
+9. If user asks to check health: use `wiki_lint`
+10. **When performing multiple operations, ALWAYS use `batch` to combine them into a single call.**
+11. Present results in clear, structured format
+12. Most tool outputs are JSON. Exceptions: `wiki_read` returns raw Markdown; missing-page lookups return plain text errors (non-zero exit code)

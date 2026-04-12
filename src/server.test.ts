@@ -1702,7 +1702,6 @@ describe("knowledge_ingest_batch: semantic chunking", () => {
 // ── hybrid search: SearchEngine vector API ────────────────────────
 
 import { SearchEngine, cosineSimilarity } from "./search.js";
-import { buildIndex } from "./search.js";
 
 describe("cosineSimilarity", () => {
   it("returns 1 for identical vectors", () => {

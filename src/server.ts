@@ -113,7 +113,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       {
         name: "raw_read",
         description:
-          "Read a raw source document's content and metadata. Raw files are immutable — this is read-only. Text/SVG files return content as string; document files (PDF, DOCX, XLSX, PPTX) have text extracted automatically; other binary files (images, etc.) return metadata only. For large PDFs, use the 'pages' parameter to read specific page ranges instead of the entire document.",
+          "Read a raw source document's content and metadata. Raw files are immutable — this is read-only. Text/SVG files return content as string; document files (PDF, DOCX, XLSX, PPTX) have text extracted automatically; other binary files (images, etc.) return metadata only.\n\nPagination by format:\n- PDF: use 'pages' for page ranges (e.g. '1-5')\n- PPTX: use 'pages' for slide ranges (e.g. '1-10')\n- XLSX: use 'sheet' to read a specific sheet; response always includes 'sheet_names'\n- DOCX / text: use 'offset' + 'limit' for line-based pagination (default limit: 200)\n\nFor large documents, paginate rather than reading all at once.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -123,7 +123,19 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             },
             pages: {
               type: "string",
-              description: "Page range for PDF files (e.g. '1-5', '3', '1-3,7-10'). Only applies to PDFs. Omit to read all pages.",
+              description: "Page/slide range (e.g. '1-5', '3', '1-3,7-10'). Applies to PDF and PPTX. Omit to read all.",
+            },
+            sheet: {
+              type: "string",
+              description: "Sheet name for XLSX files. Omit to read all sheets (response always includes sheet_names list).",
+            },
+            offset: {
+              type: "number",
+              description: "Line offset for paginating text/DOCX files. Default: 0.",
+            },
+            limit: {
+              type: "number",
+              description: "Max lines to return for text/DOCX pagination. Default: 200, max: 500.",
             },
           },
           required: ["filename"],
@@ -760,6 +772,9 @@ export async function handleTool(
     case "raw_read": {
       const result = await wiki.rawRead(args.filename as string, {
         pages: args.pages as string | undefined,
+        sheet: args.sheet as string | undefined,
+        offset: args.offset as number | undefined,
+        limit: args.limit as number | undefined,
       });
       if (!result) throw new Error(`Raw file not found: ${args.filename}`);
       if (result.binary) {
@@ -777,12 +792,18 @@ export async function handleTool(
         }, null, 2);
       }
       const content = result.content!;
+      // Paginated responses (sheet/offset/pages specified) skip the 10K truncation
+      const isPaginated = result.paginationMeta !== undefined;
+      const finalContent = isPaginated
+        ? content
+        : content.length > 10000
+          ? content.slice(0, 10000) + "\n\n... (truncated, " + content.length + " chars total)"
+          : content;
       return JSON.stringify({
         meta: result.meta,
         binary: false,
-        content: content.length > 10000
-          ? content.slice(0, 10000) + "\n\n... (truncated, " + content.length + " chars total)"
-          : content,
+        content: finalContent,
+        ...(result.paginationMeta ? { pagination: result.paginationMeta } : {}),
       }, null, 2);
     }
 

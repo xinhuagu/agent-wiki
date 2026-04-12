@@ -86,6 +86,46 @@ Future queries read **1 page** instead of 15 individual reads — this is where 
 
 ---
 
+## Per-Tool Shortcuts (saves 1 request each)
+
+These save single round trips in the most common patterns:
+
+### `wiki_read` — read multiple pages at once
+
+Instead of 3 separate reads (or a verbose `batch` block):
+
+```json
+{ "tool": "wiki_read", "args": { "pages": ["concept-a.md", "concept-b.md", "concept-c.md"] } }
+```
+
+Returns an array of results. Missing pages are marked `not_found: true` rather than throwing.
+
+### `wiki_write` — get the written content back
+
+Set `return_content: true` to receive the final content inline. Eliminates a follow-up `wiki_read` in write-then-reference workflows:
+
+```json
+{ "tool": "wiki_write", "args": {
+    "page": "synthesis.md",
+    "content": "---\ntitle: Synthesis\n---\nContent...",
+    "return_content": true
+}}
+```
+
+Response includes `content` — no need to call `wiki_read` afterwards.
+
+### `wiki_search` — filter by type or tags inline
+
+Instead of `wiki_search` + manual filtering or a separate `wiki_list`:
+
+```json
+{ "tool": "wiki_search", "args": { "query": "neural networks", "type": "concept", "tags": ["ml"] } }
+```
+
+Filter is applied post-ranking — BM25 scores are unaffected. `tags` is an OR match (any tag satisfies).
+
+---
+
 ## Batch Tools
 
 The `batch` tool collapses multiple operations into a single MCP request:
@@ -98,8 +138,11 @@ The `batch` tool collapses multiple operations into a single MCP request:
 ]}}
 ```
 
-| Workflow | Without batch | With batch | Savings |
+| Workflow | Without | With shortcuts/batch | Savings |
 |----------|:---:|:---:|:---:|
+| Read 3 related pages | 3 | **1** (`wiki_read pages[]`) | 67% |
+| Write then reference | 2 | **1** (`return_content: true`) | 50% |
+| Search + filter by type | 2 | **1** (`type` param) | 50% |
 | Import 5 files | 5 | **1** | 80% |
 | Digest 5 sources into wiki | 10 | **2** | 80% |
 | Search + read top results | 6 | **1** | 83% |

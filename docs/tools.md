@@ -23,11 +23,11 @@ agent-wiki exposes 18 tools through the Model Context Protocol.
 
 | Tool | Description |
 |------|-------------|
-| `wiki_read` | Read a page (frontmatter + Markdown) |
-| `wiki_write` | Create or update a page (auto-timestamps, auto-classify, auto-route to nested dirs). Triggers index rebuild. |
+| `wiki_read` | Read a page (frontmatter + Markdown). Pass `pages: [...]` to read multiple pages in one request — saves N-1 round trips vs individual reads. |
+| `wiki_write` | Create or update a page (auto-timestamps, auto-classify, auto-route to nested dirs). Triggers index rebuild. Pass `return_content: true` to get the final page content back — eliminates a follow-up `wiki_read`. |
 | `wiki_delete` | Delete a page (guards system pages). Triggers index rebuild — stale indexes and empty dirs are cleaned up. |
 | `wiki_list` | List pages, filter by entity type or tag |
-| `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support. Optional hybrid BM25+vector mode: enable `search.hybrid: true` in `.agent-wiki.yaml`, then run `wiki_rebuild` to embed all pages. |
+| `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support. Use `type` or `tags` to filter without a separate `wiki_list` call. Optional hybrid BM25+vector mode: enable `search.hybrid: true` in `.agent-wiki.yaml`, then run `wiki_rebuild` to embed all pages. |
 | `wiki_lint` | Health checks: contradictions, orphans, broken links, SHA-256 integrity |
 | `wiki_init` | Initialize a new knowledge base (creates wiki/, raw/, schemas/) |
 | `wiki_config` | Show current workspace configuration, paths, and available entity templates |

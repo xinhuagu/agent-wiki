@@ -1841,3 +1841,147 @@ describe("SearchEngine hybrid vector API", () => {
     expect(results[0]!.path).toBe("beta.md");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// wiki_read multi-page
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("wiki_read: multi-page (pages[])", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("reads multiple pages in one call", async () => {
+    const wiki = freshWiki();
+    wiki.write("alpha.md", "---\ntitle: Alpha\ntype: concept\n---\nAlpha content.");
+    wiki.write("beta.md", "---\ntitle: Beta\ntype: concept\n---\nBeta content.");
+    const result = await handleTool(wiki, "wiki_read", { pages: ["alpha.md", "beta.md"] });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(2);
+    expect(parsed.pages).toHaveLength(2);
+    expect(parsed.pages[0].content).toContain("Alpha content.");
+    expect(parsed.pages[1].content).toContain("Beta content.");
+  });
+
+  it("marks missing pages as not_found", async () => {
+    const wiki = freshWiki();
+    wiki.write("exists.md", "---\ntitle: Exists\ntype: note\n---\nBody.");
+    const result = await handleTool(wiki, "wiki_read", { pages: ["exists.md", "missing.md"] });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(2);
+    const found = parsed.pages.find((p: any) => p.page === "exists.md");
+    const missing = parsed.pages.find((p: any) => p.page === "missing.md");
+    expect(found.content).toContain("Body.");
+    expect(missing.not_found).toBe(true);
+  });
+
+  it("single page path still works as before (backward compat)", async () => {
+    const wiki = freshWiki();
+    wiki.write("solo.md", "---\ntitle: Solo\ntype: note\n---\nSolo body.");
+    const result = await handleTool(wiki, "wiki_read", { page: "solo.md" });
+    // Small page → plain text, not JSON array
+    expect(typeof result).toBe("string");
+    expect(result as string).toContain("Solo body.");
+  });
+
+  it("throws when neither page nor pages is supplied", async () => {
+    const wiki = freshWiki();
+    await expect(handleTool(wiki, "wiki_read", {})).rejects.toThrow(/page.*pages/i);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// wiki_write return_content
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("wiki_write: return_content", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("returns content when return_content is true", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_write", {
+      page: "note-rc.md",
+      content: "---\ntitle: Return Content\ntype: note\n---\nInline body.",
+      return_content: true,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.content).toBeDefined();
+    expect(parsed.content).toContain("Inline body.");
+  });
+
+  it("does not return content by default", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_write", {
+      page: "note-no-rc.md",
+      content: "---\ntitle: No Return\ntype: note\n---\nBody.",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.content).toBeUndefined();
+  });
+
+  it("eliminates follow-up wiki_read in write-then-reference workflow", async () => {
+    const wiki = freshWiki();
+    // Before: write (1) + read (1) = 2 requests
+    // After:  write with return_content (1) = 1 request
+    const result = await handleTool(wiki, "wiki_write", {
+      page: "chain.md",
+      content: "---\ntitle: Chain\ntype: note\n---\nChained content.",
+      return_content: true,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.content).toContain("Chained content.");
+    // page path available for further reference — no separate wiki_read needed
+    expect(parsed.page).toBe("chain.md");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// wiki_search type / tags filter
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("wiki_search: type and tags filter", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("filters by type", async () => {
+    const wiki = freshWiki();
+    wiki.write("c1.md", "---\ntitle: Concept One\ntype: concept\ntags: [ml]\n---\nNeural nets.");
+    wiki.write("n1.md", "---\ntitle: Note One\ntype: note\ntags: [ml]\n---\nNeural note.");
+    const result = await handleTool(wiki, "wiki_search", { query: "neural", type: "concept" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results.every((r: any) => !r.path.startsWith("n1"))).toBe(true);
+    expect(parsed.results.some((r: any) => r.path === "c1.md")).toBe(true);
+  });
+
+  it("filters by tags (any match)", async () => {
+    const wiki = freshWiki();
+    wiki.write("p1.md", "---\ntitle: PyTorch\ntype: artifact\ntags: [python, ml]\n---\nDeep learning.");
+    wiki.write("p2.md", "---\ntitle: TensorFlow\ntype: artifact\ntags: [python, ml]\n---\nDeep learning.");
+    wiki.write("p3.md", "---\ntitle: Java Deep\ntype: artifact\ntags: [java]\n---\nDeep learning.");
+    const result = await handleTool(wiki, "wiki_search", { query: "deep learning", tags: ["python"] });
+    const parsed = JSON.parse(result as string);
+    const paths = parsed.results.map((r: any) => r.path);
+    expect(paths).toContain("p1.md");
+    expect(paths).toContain("p2.md");
+    expect(paths).not.toContain("p3.md");
+  });
+
+  it("no filter returns all matching pages", async () => {
+    const wiki = freshWiki();
+    wiki.write("a.md", "---\ntitle: A\ntype: concept\n---\nKeyword here.");
+    wiki.write("b.md", "---\ntitle: B\ntype: note\n---\nKeyword here.");
+    const result = await handleTool(wiki, "wiki_search", { query: "keyword" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results.length).toBe(2);
+  });
+
+  it("returns empty when no results match filter", async () => {
+    const wiki = freshWiki();
+    wiki.write("a.md", "---\ntitle: A\ntype: note\n---\nFoo content.");
+    const result = await handleTool(wiki, "wiki_search", { query: "foo", type: "concept" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results).toHaveLength(0);
+  });
+});

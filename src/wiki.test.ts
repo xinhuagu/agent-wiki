@@ -1348,6 +1348,40 @@ describe("wiki.autoLink", () => {
     // Should not contain the display text part
     expect(page!.links.some(l => l.includes("|"))).toBe(false);
   });
+
+  it("cache: second write is visible to subsequent autoLink calls", () => {
+    const wiki = freshWiki();
+    // First page written before any autoLink call
+    wiki.write("concept-alpha.md", "---\ntitle: Alpha System\ntags: [alpha]\n---\nBody.");
+
+    // autoLink primes the cache (O(n) build)
+    const { linksAdded: first } = wiki.autoLink(
+      "---\ntitle: T\n---\nAlpha System is key.",
+      "other.md"
+    );
+    expect(first).toBe(1);
+
+    // Write a second page — cache should be updated incrementally
+    wiki.write("concept-beta.md", "---\ntitle: Beta Framework\ntags: [beta]\n---\nBody.");
+
+    // autoLink should now pick up both pages without a full rebuild
+    const { content: out, linksAdded: second } = wiki.autoLink(
+      "---\ntitle: T\n---\nAlpha System and Beta Framework work together.",
+      "other.md"
+    );
+    expect(second).toBe(2);
+    expect(out).toContain("[[concept-alpha|Alpha System]]");
+    expect(out).toContain("[[concept-beta|Beta Framework]]");
+  });
+
+  it("config.autoLink.enabled defaults to true and is mutable", () => {
+    // The flag is enforced by the server handler (not autoLink() itself).
+    // This test verifies the config field is correctly shaped for the handler to read.
+    const wiki = freshWiki();
+    expect(wiki.config.autoLink.enabled).toBe(true);
+    wiki.config.autoLink.enabled = false;
+    expect(wiki.config.autoLink.enabled).toBe(false);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════

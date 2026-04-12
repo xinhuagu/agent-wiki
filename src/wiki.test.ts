@@ -1241,6 +1241,150 @@ describe("wiki.autoClassifyContent", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
+//  AUTO-LINK
+// ═══════════════════════════════════════════════════════════════════
+
+describe("wiki.autoLink", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("injects [[slug|text]] link for matching title", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-yolo.md", "---\ntitle: YOLO Object Detection\ntags: [yolo]\n---\nBody.");
+    const content = "---\ntitle: Survey\n---\nWe use YOLO Object Detection here.";
+    const { content: out, linksAdded } = wiki.autoLink(content, "survey.md");
+    expect(out).toContain("[[concept-yolo|YOLO Object Detection]]");
+    expect(linksAdded).toBe(1);
+  });
+
+  it("returns unchanged content when no titles match", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-yolo.md", "---\ntitle: YOLO\ntags: [yolo]\n---\nBody.");
+    const content = "---\ntitle: Survey\n---\nNo related content here.";
+    const { content: out, linksAdded } = wiki.autoLink(content, "survey.md");
+    expect(out).toBe(content);
+    expect(linksAdded).toBe(0);
+  });
+
+  it("skips self-references", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-yolo.md", "---\ntitle: YOLO Object Detection\ntags: [yolo]\n---\nBody.");
+    const content = "---\ntitle: YOLO Object Detection\n---\nThis page covers YOLO Object Detection.";
+    const { linksAdded } = wiki.autoLink(content, "concept-yolo.md");
+    expect(linksAdded).toBe(0);
+  });
+
+  it("links only the first occurrence of each slug", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-yolo.md", "---\ntitle: YOLO\ntags: [yolo]\n---\nBody.");
+    const content = "---\ntitle: Survey\n---\nYOLO is fast. YOLO is popular.";
+    const { content: out, linksAdded } = wiki.autoLink(content, "survey.md");
+    expect(linksAdded).toBe(1);
+    // Only first occurrence linked
+    const matches = [...out.matchAll(/\[\[concept-yolo\|/g)];
+    expect(matches).toHaveLength(1);
+  });
+
+  it("skips mentions inside fenced code blocks", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-yolo.md", "---\ntitle: YOLO\ntags: [yolo]\n---\nBody.");
+    const content = "---\ntitle: Survey\n---\n```\nYOLO is a model\n```";
+    const { linksAdded } = wiki.autoLink(content, "survey.md");
+    expect(linksAdded).toBe(0);
+  });
+
+  it("skips mentions inside inline code", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-yolo.md", "---\ntitle: YOLO\ntags: [yolo]\n---\nBody.");
+    const content = "---\ntitle: Survey\n---\nUse `YOLO` for detection.";
+    const { linksAdded } = wiki.autoLink(content, "survey.md");
+    expect(linksAdded).toBe(0);
+  });
+
+  it("skips mentions inside existing [[wiki links]]", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-yolo.md", "---\ntitle: YOLO\ntags: [yolo]\n---\nBody.");
+    const content = "---\ntitle: Survey\n---\nSee [[concept-yolo]] for details.";
+    const { linksAdded } = wiki.autoLink(content, "survey.md");
+    expect(linksAdded).toBe(0);
+  });
+
+  it("skips mentions inside bare URLs", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-docker.md", "---\ntitle: Docker\ntags: [docker]\n---\nBody.");
+    const content = "---\ntitle: Dev\n---\nSee https://docs.docker.com for Docker setup.";
+    const { content: out, linksAdded } = wiki.autoLink(content, "dev.md");
+    // "Docker" after the URL should be linked, but the URL itself should not be touched
+    expect(out).not.toContain("https://docs.[[");
+    // The standalone "Docker" mention should be linked
+    expect(linksAdded).toBe(1);
+  });
+
+  it("prefers longer title over shorter when both match (longest-first)", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-yolo.md", "---\ntitle: YOLO\ntags: [yolo]\n---\nBody.");
+    wiki.write("concept-yolo-full.md", "---\ntitle: YOLO Object Detection\ntags: [yolo]\n---\nBody.");
+    const content = "---\ntitle: Survey\n---\nYOLO Object Detection is key.";
+    const { content: out } = wiki.autoLink(content, "survey.md");
+    // Longer title wins — should link to the full page, not the short one
+    expect(out).toContain("[[concept-yolo-full|YOLO Object Detection]]");
+    expect(out).not.toContain("[[concept-yolo|YOLO Object Detection]]");
+  });
+
+  it("skips titles shorter than 4 chars", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-ml.md", "---\ntitle: ML\ntags: [ml]\n---\nBody.");
+    const content = "---\ntitle: Survey\n---\nML is important.";
+    const { linksAdded } = wiki.autoLink(content, "survey.md");
+    expect(linksAdded).toBe(0);
+  });
+
+  it("parsePage correctly extracts slug from [[slug|display text]] links", () => {
+    const wiki = freshWiki();
+    wiki.write("concept-yolo.md", "---\ntitle: YOLO\ntags: [yolo]\n---\nBody.");
+    wiki.write("note-survey.md", "---\ntitle: Survey\n---\nWe use [[concept-yolo|YOLO Object Detection]] daily.");
+    const page = wiki.read("note-survey.md");
+    expect(page!.links).toContain("concept-yolo");
+    // Should not contain the display text part
+    expect(page!.links.some(l => l.includes("|"))).toBe(false);
+  });
+
+  it("cache: second write is visible to subsequent autoLink calls", () => {
+    const wiki = freshWiki();
+    // First page written before any autoLink call
+    wiki.write("concept-alpha.md", "---\ntitle: Alpha System\ntags: [alpha]\n---\nBody.");
+
+    // autoLink primes the cache (O(n) build)
+    const { linksAdded: first } = wiki.autoLink(
+      "---\ntitle: T\n---\nAlpha System is key.",
+      "other.md"
+    );
+    expect(first).toBe(1);
+
+    // Write a second page — cache should be updated incrementally
+    wiki.write("concept-beta.md", "---\ntitle: Beta Framework\ntags: [beta]\n---\nBody.");
+
+    // autoLink should now pick up both pages without a full rebuild
+    const { content: out, linksAdded: second } = wiki.autoLink(
+      "---\ntitle: T\n---\nAlpha System and Beta Framework work together.",
+      "other.md"
+    );
+    expect(second).toBe(2);
+    expect(out).toContain("[[concept-alpha|Alpha System]]");
+    expect(out).toContain("[[concept-beta|Beta Framework]]");
+  });
+
+  it("config.autoLink.enabled defaults to true and is mutable", () => {
+    // The flag is enforced by the server handler (not autoLink() itself).
+    // This test verifies the config field is correctly shaped for the handler to read.
+    const wiki = freshWiki();
+    expect(wiki.config.autoLink.enabled).toBe(true);
+    wiki.config.autoLink.enabled = false;
+    expect(wiki.config.autoLink.enabled).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
 //  SYNTHESIZE
 // ═══════════════════════════════════════════════════════════════════
 

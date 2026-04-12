@@ -1910,6 +1910,19 @@ describe("wiki_write: return_content", () => {
     expect(parsed.content).toContain("Inline body.");
   });
 
+  it("return_content includes created and updated timestamps", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_write", {
+      page: "note-ts.md",
+      content: "---\ntitle: Timestamps\ntype: note\n---\nBody.",
+      return_content: true,
+    });
+    const parsed = JSON.parse(result as string);
+    // write() injects timestamps — returned content must include them
+    expect(parsed.content).toContain("created:");
+    expect(parsed.content).toContain("updated:");
+  });
+
   it("does not return content by default", async () => {
     const wiki = freshWiki();
     const result = await handleTool(wiki, "wiki_write", {
@@ -1934,6 +1947,42 @@ describe("wiki_write: return_content", () => {
     expect(parsed.content).toContain("Chained content.");
     // page path available for further reference — no separate wiki_read needed
     expect(parsed.page).toBe("chain.md");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// wiki_write auto-link
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("wiki_write: auto-link", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("injects links and reports autoLinked count", async () => {
+    const wiki = freshWiki();
+    wiki.write("concept-rust.md", "---\ntitle: Rust Language\ntype: concept\ntags: [rust]\n---\nSystems language.");
+    const result = await handleTool(wiki, "wiki_write", {
+      page: "note-perf.md",
+      content: "---\ntitle: Performance\ntype: note\n---\nRust Language is great for systems code.",
+      return_content: true,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.autoLinked).toBe(1);
+    expect(parsed.content).toContain("[[concept-rust|Rust Language]]");
+  });
+
+  it("skips auto-link when config.autoLink.enabled is false", async () => {
+    const wiki = freshWiki();
+    wiki.write("concept-rust.md", "---\ntitle: Rust Language\ntype: concept\ntags: [rust]\n---\nSystems language.");
+    wiki.config.autoLink.enabled = false;
+    const result = await handleTool(wiki, "wiki_write", {
+      page: "note-perf.md",
+      content: "---\ntitle: Performance\ntype: note\n---\nRust Language is great.",
+      return_content: true,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.autoLinked).toBe(0);
+    expect(parsed.content).not.toContain("[[");
   });
 });
 

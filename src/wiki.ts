@@ -257,6 +257,8 @@ export function findSectionByHeading(sections: MarkdownSection[], query: string)
 export class Wiki {
   readonly config: WikiConfig;
   private readonly searchEngine: SearchEngine;
+  /** Lazy cache of title→slug pairs for autoLink. Invalidated incrementally on write/delete. */
+  private titleIndexCache: Array<{ title: string; slug: string }> | null = null;
 
   /**
    * @param root — path to config root (where .agent-wiki.yaml lives)
@@ -1255,6 +1257,21 @@ _Chronological view of all knowledge in this wiki._
     writeFileSync(fullPath, finalContent.trimEnd() + "\n");
 
     this.searchEngine.invalidate();
+
+    // Incrementally update the title index cache (avoid full rebuild on next autoLink)
+    if (this.titleIndexCache !== null) {
+      const slug = basename(pagePath, ".md");
+      const title = ((parsed.data.title as string) ?? slug.replace(/-/g, " ")).trim();
+      const idx = this.titleIndexCache.findIndex(c => c.slug === slug);
+      if (idx !== -1) this.titleIndexCache.splice(idx, 1);
+      if (title.length >= 4 && !isSystemPage(pagePath)) {
+        // Insert at the correct sorted position (longest-first)
+        let insertAt = this.titleIndexCache.findIndex(c => c.title.length <= title.length);
+        if (insertAt === -1) insertAt = this.titleIndexCache.length;
+        this.titleIndexCache.splice(insertAt, 0, { title, slug });
+      }
+    }
+
     this.log("write", pagePath, `Wrote ${pagePath}${source ? ` (${source})` : ""}`);
   }
 
@@ -1351,6 +1368,14 @@ _Chronological view of all knowledge in this wiki._
     if (!existsSync(fullPath)) return false;
     unlinkSync(fullPath);
     this.searchEngine.invalidate();
+
+    // Remove from title index cache
+    if (this.titleIndexCache !== null) {
+      const slug = basename(pagePath, ".md");
+      const idx = this.titleIndexCache.findIndex(c => c.slug === slug);
+      if (idx !== -1) this.titleIndexCache.splice(idx, 1);
+    }
+
     this.log("delete", pagePath, `Deleted ${pagePath}`);
     return true;
   }
@@ -1970,6 +1995,30 @@ _Chronological view of all knowledge in this wiki._
   }
 
   /**
+   * Return the title→slug index used by autoLink, building it lazily.
+   * Results are cached in `titleIndexCache` and updated incrementally by
+   * `write()` and `delete()` — so the first call is O(n file reads) but
+   * subsequent calls are O(1) even across a batch of writes.
+   */
+  private getTitleIndex(): Array<{ title: string; slug: string }> {
+    if (this.titleIndexCache !== null) return this.titleIndexCache;
+    const candidates: Array<{ title: string; slug: string }> = [];
+    for (const p of this.listAllPages()) {
+      if (isSystemPage(p)) continue;
+      const slug = basename(p, ".md");
+      try {
+        const raw = readFileSync(join(this.config.wikiDir, p), "utf-8");
+        const fm = matter(raw).data;
+        const title = ((fm.title as string) ?? slug.replace(/-/g, " ")).trim();
+        if (title.length >= 4) candidates.push({ title, slug });
+      } catch { /* skip unreadable pages */ }
+    }
+    candidates.sort((a, b) => b.title.length - a.title.length);
+    this.titleIndexCache = candidates;
+    return this.titleIndexCache;
+  }
+
+  /**
    * Scan content body for mentions of existing page titles and inject `[[slug|text]]` links.
    *
    * Skipped zones (unchanged):
@@ -1993,28 +2042,10 @@ _Chronological view of all knowledge in this wiki._
 
     const selfSlug = basename(selfPath, ".md");
 
-    // Build title → slug lookup from all non-system pages (excluding self)
-    const candidates: Array<{ title: string; slug: string }> = [];
-    for (const p of this.listAllPages()) {
-      if (isSystemPage(p)) continue;
-      const slug = basename(p, ".md");
-      if (slug === selfSlug) continue;
-      try {
-        const raw = readFileSync(join(this.config.wikiDir, p), "utf-8");
-        const fm = matter(raw).data;
-        const title = ((fm.title as string) ?? slug.replace(/-/g, " ")).trim();
-        if (title.length >= 4) {
-          candidates.push({ title, slug });
-        }
-      } catch {
-        // skip unreadable pages
-      }
-    }
+    // Exclude self — filter from the shared (cached) index without mutating it
+    const candidates = this.getTitleIndex().filter(c => c.slug !== selfSlug);
 
     if (candidates.length === 0) return { content, linksAdded: 0 };
-
-    // Sort longest-first so "YOLO Object Detection" beats "YOLO"
-    candidates.sort((a, b) => b.title.length - a.title.length);
 
     // Split body into skip zones (code, existing links, urls) and safe zones
     const SKIP_RE = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`]*`|\[\[[^\]]*\]\]|\[[^\]]*\]\([^)]*\)|https?:\/\/\S+)/g;
@@ -2061,7 +2092,7 @@ _Chronological view of all knowledge in this wiki._
       for (const m2 of allMatches) {
         if (m2.start < lastEnd) continue;           // overlaps a previous match
         if (usedSlugs.has(m2.slug)) continue;       // slug already linked in this segment
-        if (linked.has(m2.slug)) continue;           // slug already linked in a prior segment
+        // (slugs in linked were pre-filtered when building allMatches above)
         selected.push(m2);
         lastEnd = m2.end;
         usedSlugs.add(m2.slug);

@@ -66,7 +66,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **Structured Extraction** | PDF (per-page), DOCX, XLSX (per-sheet), PPTX (per-slide) — segments with source provenance |
 | **Immutable Sources** | SHA-256 verified `raw/` layer — write-once, tamper-proof, full provenance |
 | **Knowledge Compilation** | Agent builds structured wiki pages from raw sources — not retrieve-and-forget |
-| **BM25 Search** | Field-weighted scoring, synonym expansion, fuzzy matching, CJK tokenization — zero LLM | 
+| **BM25 Search** | Field-weighted scoring, synonym expansion, fuzzy matching, CJK tokenization — zero LLM |
 | **Hybrid Search** | Optional BM25+vector re-ranking via `@xenova/transformers` — enable with one config line, no external API |
 | **Auto-Classification** | Zero-LLM heuristic assigns entity types and tags across 10 categories |
 | **Multi-Level Indexes** | Auto-generated `index.md` at every directory level — nested topic hierarchies with sub-topic navigation |

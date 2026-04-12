@@ -20,6 +20,13 @@ lint:
   check_contradictions: true
   check_integrity: true
 
+# Hybrid BM25+vector search (optional — off by default)
+search:
+  hybrid: false                   # set to true to enable semantic re-ranking
+  model: "Xenova/all-MiniLM-L6-v2"  # sentence-transformer model (~90 MB)
+  bm25_weight: 0.5                # BM25 score weight in final blend (0–1)
+  vector_weight: 0.5              # cosine similarity weight in final blend (0–1)
+
 # Atlassian integration (optional)
 atlassian:
   allowed_hosts:

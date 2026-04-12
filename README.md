@@ -67,6 +67,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **Immutable Sources** | SHA-256 verified `raw/` layer — write-once, tamper-proof, full provenance |
 | **Knowledge Compilation** | Agent builds structured wiki pages from raw sources — not retrieve-and-forget |
 | **BM25 Search** | Field-weighted scoring, synonym expansion, fuzzy matching, CJK tokenization — zero LLM |
+| **Hybrid Search** | Optional BM25+vector re-ranking via `@xenova/transformers` — enable with one config line, no external API |
 | **Auto-Classification** | Zero-LLM heuristic assigns entity types and tags across 10 categories |
 | **Multi-Level Indexes** | Auto-generated `index.md` at every directory level — nested topic hierarchies with sub-topic navigation |
 | **Self-Checking Lint** | Catches contradictions, broken links, orphan pages, stale content |
@@ -107,6 +108,29 @@ Three immutability layers, inspired by how compilers work:
 | **MCP Server** | Cursor, Windsurf, Claude Desktop, any MCP client | Add to `.mcp.json` |
 | **Native Skill** | Claude Code (native plugin) | `agent-wiki install claude-code` |
 | **CLI** | Any agent with shell access | `agent-wiki call <tool> '{json}'` |
+
+## Hybrid Search Setup
+
+Upgrade from keyword-only to semantic search with two steps:
+
+**1.** Add to `.agent-wiki.yaml`:
+
+```yaml
+search:
+  hybrid: true
+```
+
+**2.** Run `wiki_rebuild` once to embed all pages:
+
+```bash
+agent-wiki call wiki_rebuild
+```
+
+The first run downloads the `Xenova/all-MiniLM-L6-v2` model (~90 MB) from HuggingFace Hub and caches it locally. After that, every `wiki_write` automatically keeps the vector index up to date.
+
+Hybrid mode blends BM25 + cosine similarity scores. If embedding fails for any reason, search falls back to pure BM25 — queries never fail.
+
+See [Search configuration](docs/tools.md#hybrid-bm25vector-search) for weight tuning.
 
 ## Documentation
 

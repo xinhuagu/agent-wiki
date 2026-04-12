@@ -29,7 +29,7 @@ import matter from "gray-matter";
 import yaml from "js-yaml";
 import { VERSION } from "./version.js";
 import { SearchEngine, type SearchResult } from "./search.js";
-import { extractText, guessMime } from "./extraction.js";
+import { extractText, extractDocument, guessMime } from "./extraction.js";
 import type { AtlassianConfig, ConfluenceImportResult, JiraImportResult } from "./atlassian.js";
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -782,7 +782,18 @@ _Chronological view of all knowledge in this wiki._
    *  For PDFs, optional `pages` parameter limits extraction to specific pages (e.g. "1-5").
    *  Image files (PNG, JPEG, GIF, WEBP, etc.) return base64-encoded data for display.
    *  Other binary files return metadata only. */
-  async rawRead(filename: string, opts?: { pages?: string }): Promise<{ content: string | null; meta: RawDocument | null; binary: boolean; note?: string; imageData?: { data: string; mimeType: string } } | null> {
+  async rawRead(filename: string, opts?: { pages?: string; sheet?: string; offset?: number; limit?: number }): Promise<{
+    content: string | null;
+    meta: RawDocument | null;
+    binary: boolean;
+    note?: string;
+    imageData?: { data: string; mimeType: string };
+    paginationMeta?: {
+      total_lines?: number; offset?: number; lines_returned?: number; truncated?: boolean; next_offset?: number | null;
+      sheet_names?: string[]; total_sheets?: number; current_sheet?: string;
+      total_slides?: number; total_pages?: number;
+    };
+  } | null> {
     const fullPath = safePath(this.config.rawDir, filename);
     if (!existsSync(fullPath)) return null;
 
@@ -801,8 +812,20 @@ _Chronological view of all knowledge in this wiki._
       || mime === "image/svg+xml";           // SVG is XML text
 
     if (isText) {
-      const content = readFileSync(fullPath, "utf-8");
-      return { content, meta, binary: false };
+      const raw = readFileSync(fullPath, "utf-8");
+      if (opts?.offset !== undefined || opts?.limit !== undefined) {
+        const lines = raw.split("\n");
+        const total_lines = lines.length;
+        const offset = Math.max(0, opts.offset ?? 0);
+        const limit = Math.min(500, Math.max(1, opts.limit ?? 200));
+        const slice = lines.slice(offset, offset + limit);
+        const truncated = offset + limit < total_lines;
+        return {
+          content: slice.join("\n"), meta, binary: false,
+          paginationMeta: { total_lines, offset, lines_returned: slice.length, truncated, next_offset: truncated ? offset + limit : null },
+        };
+      }
+      return { content: raw, meta, binary: false };
     }
 
     // Document formats — extract text via Node.js libraries
@@ -810,7 +833,44 @@ _Chronological view of all knowledge in this wiki._
     const extractable = new Set([".pdf", ".docx", ".xlsx", ".pptx", ".html", ".htm"]);
     if (extractable.has(ext)) {
       try {
-        const text = await extractText(fullPath, ext === ".pdf" ? opts?.pages : undefined);
+        if (ext === ".xlsx") {
+          const result = await extractDocument(fullPath, undefined, opts?.sheet);
+          const sheetNames = result.metadata?.sheetNames ?? [];
+          const content = result.segments.map(s => `--- Sheet: ${s.source.sheet} ---\n${s.text}`).join("\n\n");
+          return {
+            content: content || "(no content)",
+            meta, binary: false,
+            paginationMeta: { sheet_names: sheetNames, total_sheets: sheetNames.length, current_sheet: opts?.sheet },
+          };
+        }
+        if (ext === ".pptx") {
+          const result = await extractDocument(fullPath, opts?.pages);
+          const totalSlides = result.metadata?.totalSlides;
+          const content = result.segments.map(s => `--- Slide ${s.source.slide} ---\n${s.text}`).join("\n\n");
+          return {
+            content: content || "(no content)",
+            meta, binary: false,
+            paginationMeta: { total_slides: totalSlides },
+          };
+        }
+        const pages = ext === ".pdf" ? opts?.pages : undefined;
+        const text = await extractText(fullPath, pages);
+        const paginationMeta = ext === ".pdf" ? { total_pages: undefined } : undefined;
+        if (ext === ".pdf" && opts?.pages) {
+          return { content: text, meta, binary: false, paginationMeta: { total_pages: undefined } };
+        }
+        if (opts?.offset !== undefined || opts?.limit !== undefined) {
+          const lines = text.split("\n");
+          const total_lines = lines.length;
+          const offset = Math.max(0, opts.offset ?? 0);
+          const limit = Math.min(500, Math.max(1, opts.limit ?? 200));
+          const slice = lines.slice(offset, offset + limit);
+          const truncated = offset + limit < total_lines;
+          return {
+            content: slice.join("\n"), meta, binary: false,
+            paginationMeta: { total_lines, offset, lines_returned: slice.length, truncated, next_offset: truncated ? offset + limit : null },
+          };
+        }
         return { content: text, meta, binary: false };
       } catch (e: any) {
         const stat = statSync(fullPath);

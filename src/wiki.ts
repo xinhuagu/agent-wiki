@@ -105,6 +105,25 @@ export interface TimelineEntry {
   summary: string;
 }
 
+export interface RawCoverageEntry {
+  path: string;
+  size: number;
+  mimeType?: string;
+  downloadedAt: string;
+  tags?: string[];
+  sourceUrl?: string;
+  description?: string;
+}
+
+export interface RawCoverageReport {
+  totalRaw: number;
+  coveredRaw: number;
+  uncoveredRaw: number;
+  coverageRatio: number;
+  uncovered: RawCoverageEntry[];
+  truncated: boolean;
+}
+
 export interface WikiConfig {
   /** Where the config file was loaded from (or --wiki-path). */
   configRoot: string;
@@ -799,6 +818,89 @@ _Chronological view of all knowledge in this wiki._
       }
     }
     return docs;
+  }
+
+  /** Report which raw/ files are not yet referenced by any wiki page.
+   *  Matches against frontmatter `sources` and inline `raw/...` body references.
+   *  Parsed-artifact directory `parsed/` is excluded — those are derived, not source.
+   *  URL sources are normalized (lowercased scheme+host, trailing slash stripped)
+   *  before matching against each raw's `sourceUrl`. */
+  rawCoverage(opts?: { limit?: number; sort?: "newest" | "oldest" | "largest"; tag?: string }): RawCoverageReport {
+    const raws = this.rawList().filter(r => !r.path.startsWith("parsed/"));
+    const pages = this.listAllPages();
+
+    const referencedPaths = new Set<string>();
+    const referencedUrls = new Set<string>();
+
+    const normalizePath = (s: string): string =>
+      s.trim().replace(/^\.\//, "").replace(/^raw\//, "");
+
+    const normalizeUrl = (u: string): string => {
+      try {
+        const p = new URL(u.trim());
+        let path = p.pathname;
+        if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+        // URL ctor already lowercases protocol + host per WHATWG.
+        return `${p.protocol}//${p.host}${path}${p.search}${p.hash}`;
+      } catch {
+        return u.trim();
+      }
+    };
+
+    for (const pagePath of pages) {
+      const page = this.read(pagePath);
+      if (!page) continue;
+      for (const src of page.sources) {
+        const t = src.trim();
+        if (/^https?:\/\//i.test(t)) referencedUrls.add(normalizeUrl(t));
+        else referencedPaths.add(normalizePath(t));
+      }
+      // Body references: match raw/<path> and strip trailing punctuation
+      // so "See raw/foo.pdf." captures "foo.pdf", not "foo.pdf.".
+      for (const m of page.content.matchAll(/\braw\/(\S+)/g)) {
+        const cleaned = m[1]!.replace(/[.,;:!?)\]`"'*]+$/, "");
+        if (cleaned) referencedPaths.add(cleaned);
+      }
+    }
+
+    const filtered = opts?.tag
+      ? raws.filter(r => r.tags?.includes(opts.tag!))
+      : raws;
+
+    const uncovered = filtered.filter(r => {
+      if (referencedPaths.has(r.path)) return false;
+      if (r.sourceUrl && referencedUrls.has(normalizeUrl(r.sourceUrl))) return false;
+      return true;
+    });
+
+    const sort = opts?.sort ?? "newest";
+    uncovered.sort((a, b) => {
+      if (sort === "largest") return b.size - a.size;
+      if (sort === "oldest") return a.downloadedAt.localeCompare(b.downloadedAt);
+      return b.downloadedAt.localeCompare(a.downloadedAt);
+    });
+
+    const limit = opts?.limit ?? 50;
+    const totalFiltered = filtered.length;
+    const uncoveredCount = uncovered.length;
+    const truncated = uncoveredCount > limit;
+
+    return {
+      totalRaw: totalFiltered,
+      coveredRaw: totalFiltered - uncoveredCount,
+      uncoveredRaw: uncoveredCount,
+      coverageRatio: totalFiltered > 0 ? (totalFiltered - uncoveredCount) / totalFiltered : 1,
+      uncovered: uncovered.slice(0, limit).map(r => ({
+        path: r.path,
+        size: r.size,
+        mimeType: r.mimeType,
+        downloadedAt: r.downloadedAt,
+        tags: r.tags,
+        sourceUrl: r.sourceUrl,
+        description: r.description,
+      })),
+      truncated,
+    };
   }
 
   /** Read a raw document's content and metadata.

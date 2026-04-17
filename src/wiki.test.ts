@@ -476,6 +476,18 @@ describe("rawCoverage", () => {
     expect(r.uncoveredRaw).toBe(0);
   });
 
+  it("matches URLs that differ only by trailing slash or scheme/host case", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("a.md", { content: "a", sourceUrl: "https://Example.com/Article/" });
+    wiki.rawAdd("b.md", { content: "b", sourceUrl: "https://example.com/other" });
+    wiki.write("p.md",
+      "---\ntitle: P\ntype: concept\nsources: [https://example.com/Article, HTTPS://example.com/other/]\n---\n");
+
+    const r = wiki.rawCoverage();
+    expect(r.coveredRaw).toBe(2);
+    expect(r.uncoveredRaw).toBe(0);
+  });
+
   it("excludes raw/parsed/ artifacts from coverage", () => {
     const wiki = freshWiki();
     wiki.rawAdd("source.cbl", { content: "PROGRAM-ID. X." });

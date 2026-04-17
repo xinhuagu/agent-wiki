@@ -823,7 +823,8 @@ _Chronological view of all knowledge in this wiki._
   /** Report which raw/ files are not yet referenced by any wiki page.
    *  Matches against frontmatter `sources` and inline `raw/...` body references.
    *  Parsed-artifact directory `parsed/` is excluded — those are derived, not source.
-   *  URL sources are matched against each raw's `sourceUrl`. */
+   *  URL sources are normalized (lowercased scheme+host, trailing slash stripped)
+   *  before matching against each raw's `sourceUrl`. */
   rawCoverage(opts?: { limit?: number; sort?: "newest" | "oldest" | "largest"; tag?: string }): RawCoverageReport {
     const raws = this.rawList().filter(r => !r.path.startsWith("parsed/"));
     const pages = this.listAllPages();
@@ -834,12 +835,24 @@ _Chronological view of all knowledge in this wiki._
     const normalizePath = (s: string): string =>
       s.trim().replace(/^\.\//, "").replace(/^raw\//, "");
 
+    const normalizeUrl = (u: string): string => {
+      try {
+        const p = new URL(u.trim());
+        let path = p.pathname;
+        if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+        // URL ctor already lowercases protocol + host per WHATWG.
+        return `${p.protocol}//${p.host}${path}${p.search}${p.hash}`;
+      } catch {
+        return u.trim();
+      }
+    };
+
     for (const pagePath of pages) {
       const page = this.read(pagePath);
       if (!page) continue;
       for (const src of page.sources) {
         const t = src.trim();
-        if (/^https?:\/\//i.test(t)) referencedUrls.add(t);
+        if (/^https?:\/\//i.test(t)) referencedUrls.add(normalizeUrl(t));
         else referencedPaths.add(normalizePath(t));
       }
       // Body references: match raw/<path> and strip trailing punctuation
@@ -856,7 +869,7 @@ _Chronological view of all knowledge in this wiki._
 
     const uncovered = filtered.filter(r => {
       if (referencedPaths.has(r.path)) return false;
-      if (r.sourceUrl && referencedUrls.has(r.sourceUrl)) return false;
+      if (r.sourceUrl && referencedUrls.has(normalizeUrl(r.sourceUrl))) return false;
       return true;
     });
 

@@ -71,6 +71,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **Auto-Classification** | Zero-LLM heuristic assigns entity types and tags across 10 categories |
 | **Multi-Level Indexes** | Auto-generated `index.md` at every directory level — nested topic hierarchies with sub-topic navigation |
 | **Self-Checking Lint** | Catches contradictions, broken links, orphan pages, stale content |
+| **Coverage Report** | `raw_coverage` tells the agent which raw sources have not yet been compiled into any wiki page — drives active knowledge completion |
 | **Atlassian Import** | One-command Confluence pages and Jira issues with full hierarchy |
 | **File Versioning** | Auto-version same-name files, query latest, list all versions |
 | **COBOL Code Analysis** | AST parser with variable tracing, call graph generation, and auto wiki pages |

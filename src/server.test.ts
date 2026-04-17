@@ -104,6 +104,13 @@ describe("server tool: raw_coverage", () => {
     expect(parsed.uncovered[0].path).toBe("big.txt");
     expect(parsed.truncated).toBe(true);
   });
+
+  it("rejects invalid sort value", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "raw_coverage", { sort: "random" })
+    ).rejects.toThrow(/Invalid sort/);
+  });
 });
 
 describe("server tool: wiki_write + wiki_read", () => {

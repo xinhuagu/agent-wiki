@@ -835,16 +835,18 @@ _Chronological view of all knowledge in this wiki._
       s.trim().replace(/^\.\//, "").replace(/^raw\//, "");
 
     for (const pagePath of pages) {
-      const full = join(this.config.wikiDir, pagePath);
-      if (!existsSync(full)) continue;
-      const page = this.parsePage(pagePath, readFileSync(full, "utf-8"));
+      const page = this.read(pagePath);
+      if (!page) continue;
       for (const src of page.sources) {
         const t = src.trim();
         if (/^https?:\/\//i.test(t)) referencedUrls.add(t);
         else referencedPaths.add(normalizePath(t));
       }
-      for (const m of page.content.matchAll(/\braw\/([^\s)\]`"']+)/g)) {
-        referencedPaths.add(m[1]!);
+      // Body references: match raw/<path> and strip trailing punctuation
+      // so "See raw/foo.pdf." captures "foo.pdf", not "foo.pdf.".
+      for (const m of page.content.matchAll(/\braw\/(\S+)/g)) {
+        const cleaned = m[1]!.replace(/[.,;:!?)\]`"'*]+$/, "");
+        if (cleaned) referencedPaths.add(cleaned);
       }
     }
 

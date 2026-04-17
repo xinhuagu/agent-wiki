@@ -864,9 +864,13 @@ export async function handleTool(
     }
 
     case "raw_coverage": {
+      const sortArg = args.sort;
+      if (sortArg !== undefined && sortArg !== "newest" && sortArg !== "oldest" && sortArg !== "largest") {
+        throw new Error(`Invalid sort: ${String(sortArg)}. Must be 'newest', 'oldest', or 'largest'.`);
+      }
       const report = wiki.rawCoverage({
         limit: args.limit as number | undefined,
-        sort: args.sort as "newest" | "oldest" | "largest" | undefined,
+        sort: sortArg as "newest" | "oldest" | "largest" | undefined,
         tag: args.tag as string | undefined,
       });
       return JSON.stringify(report, null, 2);

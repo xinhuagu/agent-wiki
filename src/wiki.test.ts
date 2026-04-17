@@ -454,6 +454,18 @@ describe("rawCoverage", () => {
     expect(r.uncoveredRaw).toBe(0);
   });
 
+  it("strips trailing punctuation from inline raw/ references", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("a.pdf", { content: "a" });
+    wiki.rawAdd("b.pdf", { content: "b" });
+    wiki.rawAdd("c.md", { content: "c" });
+    wiki.write("p.md",
+      "---\ntitle: P\ntype: concept\n---\nSee raw/a.pdf, raw/b.pdf. And raw/c.md:");
+
+    const r = wiki.rawCoverage();
+    expect(r.uncoveredRaw).toBe(0);
+  });
+
   it("matches by sourceUrl when frontmatter source is a URL", () => {
     const wiki = freshWiki();
     wiki.rawAdd("article.md", { content: "x", sourceUrl: "https://example.com/article" });

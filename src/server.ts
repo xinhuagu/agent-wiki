@@ -111,6 +111,29 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
         },
       },
       {
+        name: "raw_coverage",
+        description:
+          "Report which raw/ files are not yet referenced by any wiki page. Answers 'what should I compile next?' — returns uncovered files sorted by recency/size, plus overall coverage ratio. Matches frontmatter 'sources' and inline 'raw/...' body references. Parsed artifacts (raw/parsed/) are excluded.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            limit: {
+              type: "number",
+              description: "Max uncovered entries to return. Default: 50.",
+            },
+            sort: {
+              type: "string",
+              enum: ["newest", "oldest", "largest"],
+              description: "Sort order for uncovered entries. Default: 'newest'.",
+            },
+            tag: {
+              type: "string",
+              description: "Only consider raw files with this tag.",
+            },
+          },
+        },
+      },
+      {
         name: "raw_read",
         description:
           "Read a raw source document's content and metadata. Raw files are immutable — this is read-only. Text/SVG files return content as string; document files (PDF, DOCX, XLSX, PPTX) have text extracted automatically; other binary files (images, etc.) return metadata only.\n\nPagination by format:\n- PDF: use 'pages' for page ranges (e.g. '1-5')\n- PPTX: use 'pages' for slide ranges (e.g. '1-10')\n- XLSX: use 'sheet' to read a specific sheet; response always includes 'sheet_names'\n- DOCX / text: use 'offset' + 'limit' for line-based pagination (default limit: 200)\n\nFor large documents, paginate rather than reading all at once.",
@@ -838,6 +861,19 @@ export async function handleTool(
     case "raw_list": {
       const docs = wiki.rawList();
       return JSON.stringify({ documents: docs, count: docs.length }, null, 2);
+    }
+
+    case "raw_coverage": {
+      const sortArg = args.sort;
+      if (sortArg !== undefined && sortArg !== "newest" && sortArg !== "oldest" && sortArg !== "largest") {
+        throw new Error(`Invalid sort: ${String(sortArg)}. Must be 'newest', 'oldest', or 'largest'.`);
+      }
+      const report = wiki.rawCoverage({
+        limit: args.limit as number | undefined,
+        sort: sortArg as "newest" | "oldest" | "largest" | undefined,
+        tag: args.tag as string | undefined,
+      });
+      return JSON.stringify(report, null, 2);
     }
 
     case "raw_versions": {

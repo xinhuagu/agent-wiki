@@ -412,6 +412,110 @@ describe("rawList", () => {
   });
 });
 
+describe("rawCoverage", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("reports full coverage when all raw files are referenced via frontmatter", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("paper.pdf", { content: "pdf bytes" });
+    wiki.rawAdd("notes.md", { content: "notes" });
+    wiki.write("concept-x.md",
+      "---\ntitle: X\ntype: concept\nsources: [raw/paper.pdf, notes.md]\n---\nBody");
+
+    const r = wiki.rawCoverage();
+    expect(r.totalRaw).toBe(2);
+    expect(r.coveredRaw).toBe(2);
+    expect(r.uncoveredRaw).toBe(0);
+    expect(r.coverageRatio).toBe(1);
+    expect(r.uncovered).toEqual([]);
+  });
+
+  it("lists uncovered raw files", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("covered.pdf", { content: "x" });
+    wiki.rawAdd("orphan-a.pdf", { content: "y" });
+    wiki.rawAdd("orphan-b.txt", { content: "z" });
+    wiki.write("p.md", "---\ntitle: P\ntype: concept\nsources: [raw/covered.pdf]\n---\n");
+
+    const r = wiki.rawCoverage();
+    expect(r.totalRaw).toBe(3);
+    expect(r.coveredRaw).toBe(1);
+    expect(r.uncoveredRaw).toBe(2);
+    expect(r.uncovered.map(u => u.path).sort()).toEqual(["orphan-a.pdf", "orphan-b.txt"]);
+  });
+
+  it("matches inline body references to raw/", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("inline.pdf", { content: "x" });
+    wiki.write("p.md", "---\ntitle: P\ntype: concept\n---\nSee raw/inline.pdf for details.");
+
+    const r = wiki.rawCoverage();
+    expect(r.uncoveredRaw).toBe(0);
+  });
+
+  it("matches by sourceUrl when frontmatter source is a URL", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("article.md", { content: "x", sourceUrl: "https://example.com/article" });
+    wiki.write("p.md", "---\ntitle: P\ntype: concept\nsources: [https://example.com/article]\n---\n");
+
+    const r = wiki.rawCoverage();
+    expect(r.coveredRaw).toBe(1);
+    expect(r.uncoveredRaw).toBe(0);
+  });
+
+  it("excludes raw/parsed/ artifacts from coverage", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("source.cbl", { content: "PROGRAM-ID. X." });
+    // Simulate a parsed artifact by writing directly under raw/parsed/
+    const parsedDir = join(wiki.config.rawDir, "parsed", "cobol");
+    mkdirSync(parsedDir, { recursive: true });
+    writeFileSync(join(parsedDir, "X.ast.json"), "{}");
+    wiki.write("p.md", "---\ntitle: P\ntype: concept\nsources: [raw/source.cbl]\n---\n");
+
+    const r = wiki.rawCoverage();
+    expect(r.totalRaw).toBe(1);
+    expect(r.uncoveredRaw).toBe(0);
+  });
+
+  it("respects limit and sets truncated flag", () => {
+    const wiki = freshWiki();
+    for (let i = 0; i < 5; i++) wiki.rawAdd(`f${i}.txt`, { content: String(i) });
+
+    const r = wiki.rawCoverage({ limit: 2 });
+    expect(r.uncoveredRaw).toBe(5);
+    expect(r.uncovered).toHaveLength(2);
+    expect(r.truncated).toBe(true);
+  });
+
+  it("sorts by largest when requested", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("small.txt", { content: "a" });
+    wiki.rawAdd("big.txt", { content: "a".repeat(1000) });
+    wiki.rawAdd("medium.txt", { content: "a".repeat(100) });
+
+    const r = wiki.rawCoverage({ sort: "largest" });
+    expect(r.uncovered.map(u => u.path)).toEqual(["big.txt", "medium.txt", "small.txt"]);
+  });
+
+  it("filters by tag", () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("tagged.txt", { content: "x", tags: ["keep"] });
+    wiki.rawAdd("untagged.txt", { content: "y" });
+
+    const r = wiki.rawCoverage({ tag: "keep" });
+    expect(r.totalRaw).toBe(1);
+    expect(r.uncovered.map(u => u.path)).toEqual(["tagged.txt"]);
+  });
+
+  it("returns coverageRatio 1 on empty raw/", () => {
+    const wiki = freshWiki();
+    const r = wiki.rawCoverage();
+    expect(r.totalRaw).toBe(0);
+    expect(r.coverageRatio).toBe(1);
+  });
+});
+
 describe("rawRead", () => {
   beforeEach(cleanUp);
   afterEach(cleanUp);

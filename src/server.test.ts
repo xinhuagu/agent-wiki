@@ -73,6 +73,39 @@ describe("server tool: raw_verify", () => {
   });
 });
 
+describe("server tool: raw_coverage", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("returns JSON report with coverage ratio and uncovered list", async () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("seen.pdf", { content: "x" });
+    wiki.rawAdd("unseen.pdf", { content: "y" });
+    wiki.write("p.md", "---\ntitle: P\ntype: concept\nsources: [raw/seen.pdf]\n---\n");
+
+    const result = await handleTool(wiki, "raw_coverage", {});
+    const parsed = JSON.parse(result as string);
+    expect(parsed.totalRaw).toBe(2);
+    expect(parsed.coveredRaw).toBe(1);
+    expect(parsed.uncoveredRaw).toBe(1);
+    expect(parsed.coverageRatio).toBe(0.5);
+    expect(parsed.uncovered[0].path).toBe("unseen.pdf");
+    expect(parsed.truncated).toBe(false);
+  });
+
+  it("passes through limit and sort parameters", async () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("small.txt", { content: "a" });
+    wiki.rawAdd("big.txt", { content: "a".repeat(1000) });
+
+    const result = await handleTool(wiki, "raw_coverage", { limit: 1, sort: "largest" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.uncovered).toHaveLength(1);
+    expect(parsed.uncovered[0].path).toBe("big.txt");
+    expect(parsed.truncated).toBe(true);
+  });
+});
+
 describe("server tool: wiki_write + wiki_read", () => {
   beforeEach(cleanUp);
   afterEach(cleanUp);

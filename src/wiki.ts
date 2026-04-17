@@ -105,6 +105,25 @@ export interface TimelineEntry {
   summary: string;
 }
 
+export interface RawCoverageEntry {
+  path: string;
+  size: number;
+  mimeType?: string;
+  downloadedAt: string;
+  tags?: string[];
+  sourceUrl?: string;
+  description?: string;
+}
+
+export interface RawCoverageReport {
+  totalRaw: number;
+  coveredRaw: number;
+  uncoveredRaw: number;
+  coverageRatio: number;
+  uncovered: RawCoverageEntry[];
+  truncated: boolean;
+}
+
 export interface WikiConfig {
   /** Where the config file was loaded from (or --wiki-path). */
   configRoot: string;
@@ -799,6 +818,74 @@ _Chronological view of all knowledge in this wiki._
       }
     }
     return docs;
+  }
+
+  /** Report which raw/ files are not yet referenced by any wiki page.
+   *  Matches against frontmatter `sources` and inline `raw/...` body references.
+   *  Parsed-artifact directory `parsed/` is excluded — those are derived, not source.
+   *  URL sources are matched against each raw's `sourceUrl`. */
+  rawCoverage(opts?: { limit?: number; sort?: "newest" | "oldest" | "largest"; tag?: string }): RawCoverageReport {
+    const raws = this.rawList().filter(r => !r.path.startsWith("parsed/"));
+    const pages = this.listAllPages();
+
+    const referencedPaths = new Set<string>();
+    const referencedUrls = new Set<string>();
+
+    const normalizePath = (s: string): string =>
+      s.trim().replace(/^\.\//, "").replace(/^raw\//, "");
+
+    for (const pagePath of pages) {
+      const full = join(this.config.wikiDir, pagePath);
+      if (!existsSync(full)) continue;
+      const page = this.parsePage(pagePath, readFileSync(full, "utf-8"));
+      for (const src of page.sources) {
+        const t = src.trim();
+        if (/^https?:\/\//i.test(t)) referencedUrls.add(t);
+        else referencedPaths.add(normalizePath(t));
+      }
+      for (const m of page.content.matchAll(/\braw\/([^\s)\]`"']+)/g)) {
+        referencedPaths.add(m[1]!);
+      }
+    }
+
+    const filtered = opts?.tag
+      ? raws.filter(r => r.tags?.includes(opts.tag!))
+      : raws;
+
+    const uncovered = filtered.filter(r => {
+      if (referencedPaths.has(r.path)) return false;
+      if (r.sourceUrl && referencedUrls.has(r.sourceUrl)) return false;
+      return true;
+    });
+
+    const sort = opts?.sort ?? "newest";
+    uncovered.sort((a, b) => {
+      if (sort === "largest") return b.size - a.size;
+      if (sort === "oldest") return a.downloadedAt.localeCompare(b.downloadedAt);
+      return b.downloadedAt.localeCompare(a.downloadedAt);
+    });
+
+    const limit = opts?.limit ?? 50;
+    const totalFiltered = filtered.length;
+    const uncoveredCount = uncovered.length;
+    const truncated = uncoveredCount > limit;
+
+    return {
+      totalRaw: totalFiltered,
+      coveredRaw: totalFiltered - uncoveredCount,
+      uncoveredRaw: uncoveredCount,
+      coverageRatio: totalFiltered > 0 ? (totalFiltered - uncoveredCount) / totalFiltered : 1,
+      uncovered: uncovered.slice(0, limit).map(r => ({
+        path: r.path,
+        size: r.size,
+        mimeType: r.mimeType,
+        downloadedAt: r.downloadedAt,
+        tags: r.tags,
+        sourceUrl: r.sourceUrl,
+        description: r.description,
+      })),
+      truncated,
+    };
   }
 
   /** Read a raw document's content and metadata.

@@ -13,7 +13,9 @@
     "dist",
     "schemas",
     "skills",
-    ".claude-plugin"
+    ".claude-plugin",
+    "docs",
+    "architecture.svg"
   ],
   "scripts": {
     "build": "tsc",

@@ -13,9 +13,9 @@ Works with Claude Code, Cursor, Windsurf, and any MCP client. Also installable a
 [![MCP](https://img.shields.io/badge/protocol-MCP-blue)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
-### See your whole wiki live — agent-wiki's built-in 3D graph view
+### agent-wiki's built-in 3D graph view
 
-Every `.md` page is a node, every `[[wikilink]]` an edge. Save a Markdown file — the graph updates over SSE, no refresh. Selection shows the 2-hop neighborhood in lavender, edit-pulses flash cyan, index pages stand out as brighter hubs. Optional companion package (`@agent-wiki/graph-viewer`) — install once and launch with `agent-wiki web` (see [Option D](#option-d-3d-graph-viewer-optional-companion) below).
+Pages as nodes, `[[wikilinks]]` as edges, edits push live. Optional companion — see [Option D](#option-d-3d-graph-viewer-optional-companion).
 
 <p align="center">
   <img src="docs/graph-1.gif" alt="agent-wiki realtime 3D knowledge graph viewer — live-updating force-directed graph of Markdown pages and [[wikilinks]]" width="900" />

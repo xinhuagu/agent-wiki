@@ -1,6 +1,6 @@
 {
   "name": "@agent-wiki/graph-viewer",
-  "version": "0.1.1",
+  "version": "0.1.0",
   "description": "Realtime 3D knowledge graph viewer for agent-wiki. Standalone — zero runtime dependency on core.",
   "type": "module",
   "bin": {
@@ -24,7 +24,17 @@
     "3d",
     "visualization"
   ],
+  "author": "Xinhua Chen",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xinhuagu/agent-wiki.git",
+    "directory": "graph-viewer"
+  },
+  "homepage": "https://github.com/xinhuagu/agent-wiki/tree/main/graph-viewer#readme",
+  "bugs": {
+    "url": "https://github.com/xinhuagu/agent-wiki/issues"
+  },
   "publishConfig": {
     "access": "public"
   },

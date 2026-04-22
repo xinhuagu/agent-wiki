@@ -412,12 +412,32 @@ function setStatus(text, cls) {
   statusEl.className = `status ${cls ?? ""}`;
 }
 
+let statusRevertTimer = null;
+
+function setLiveStatus(newGraph, before, isFirst) {
+  const after = newGraph.nodes.length;
+  const base = `live · ${after} nodes`;
+  let msg = base;
+  if (!isFirst) {
+    const delta = after - before;
+    if (delta !== 0) msg = `${base} (${delta > 0 ? "+" : ""}${delta})`;
+    else if (pulses.size > 0) msg = `${base} · updated`;
+  }
+  setStatus(msg, "ok");
+  // Transient annotations fade back to the plain count after ~2.5s.
+  if (statusRevertTimer) clearTimeout(statusRevertTimer);
+  if (msg !== base) statusRevertTimer = setTimeout(() => setStatus(base, "ok"), 2500);
+}
+
 function connect() {
   setStatus("connecting…");
   const es = new EventSource("/api/events");
   es.addEventListener("graph", (ev) => {
-    setStatus(`live · ${currentGraph.nodes.length} → ${JSON.parse(ev.data).nodes.length} nodes`, "ok");
-    applyGraph(JSON.parse(ev.data));
+    const g = JSON.parse(ev.data);
+    const before = currentGraph.nodes.length;
+    const isFirst = !hasInitialGraph;
+    applyGraph(g);
+    setLiveStatus(g, before, isFirst);
   });
   es.addEventListener("error", () => {
     setStatus("disconnected — retrying", "err");

@@ -6,14 +6,19 @@ Instead of retrieving raw fragments every query (RAG), your agent compiles, refi
 
 Works with Claude Code, Cursor, Windsurf, and any MCP client. Also installable as a native skill for Claude Code. No LLM built in — your agent IS the intelligence.
 
-[![npm](https://img.shields.io/npm/v/@agent-wiki/mcp-server)](https://www.npmjs.com/package/@agent-wiki/mcp-server)
+[![npm core](https://img.shields.io/npm/v/@agent-wiki/mcp-server?label=%40agent-wiki%2Fmcp-server)](https://www.npmjs.com/package/@agent-wiki/mcp-server)
+[![npm graph](https://img.shields.io/npm/v/@agent-wiki/graph-viewer?label=%40agent-wiki%2Fgraph-viewer)](https://www.npmjs.com/package/@agent-wiki/graph-viewer)
 [![CI](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/protocol-MCP-blue)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
+### See your whole wiki live — agent-wiki's built-in 3D graph view
+
+Every `.md` page is a node, every `[[wikilink]]` an edge. Save a Markdown file — the graph updates over SSE, no refresh. Selection shows the 2-hop neighborhood in lavender, edit-pulses flash cyan, index pages stand out as brighter hubs. Optional companion package (`@agent-wiki/graph-viewer`) — install once and launch with `agent-wiki web` (see [Option D](#option-d-3d-graph-viewer-optional-companion) below).
+
 <p align="center">
-  <img src="docs/graph-1.gif" alt="agent-wiki realtime 3D knowledge graph viewer" width="900" />
+  <img src="docs/graph-1.gif" alt="agent-wiki realtime 3D knowledge graph viewer — live-updating force-directed graph of Markdown pages and [[wikilinks]]" width="900" />
 </p>
 
 ## Quick Start
@@ -50,16 +55,24 @@ npx @agent-wiki/mcp-server call wiki_search '{"query": "deployment"}'
 
 ### Option D: 3D Graph Viewer (optional companion)
 
-See your wiki as a realtime 3D knowledge graph — edits push live via SSE:
+See your wiki as a realtime 3D knowledge graph — edits push live via SSE.
 
 ```bash
+# Install core + graph, then launch with one command
 npm install -g @agent-wiki/mcp-server @agent-wiki/graph-viewer
 agent-wiki web --wiki-path ./wiki --open
+
+# Or zero-install
+npx @agent-wiki/graph-viewer --wiki-path ./wiki --open
 ```
 
-The graph viewer is a **separate, optional package**. Core agent-wiki does
-not depend on it — install it only if you want the visualization. See
-[graph-viewer/README.md](graph-viewer/README.md) for details.
+The graph viewer is a **separate, optional package** published as
+[`@agent-wiki/graph-viewer`](https://www.npmjs.com/package/@agent-wiki/graph-viewer).
+Core agent-wiki has **zero dependency** on it — install only if you want the
+visualization, remove any time. Heavy browser libs (3d-force-graph, three.js)
+load from a CDN and never ship with the core MCP server. See
+[graph-viewer/README.md](graph-viewer/README.md) for the full feature list and
+interaction guide.
 
 That's it. Your agent now has a persistent, structured knowledge base.
 

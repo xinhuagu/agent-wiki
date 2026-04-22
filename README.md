@@ -12,6 +12,10 @@ Works with Claude Code, Cursor, Windsurf, and any MCP client. Also installable a
 [![MCP](https://img.shields.io/badge/protocol-MCP-blue)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
+<p align="center">
+  <img src="docs/graph-1.gif" alt="agent-wiki realtime 3D knowledge graph viewer" width="900" />
+</p>
+
 ## Quick Start
 
 ### Option A: MCP Server (Cursor, Windsurf, Claude Desktop, any MCP client)

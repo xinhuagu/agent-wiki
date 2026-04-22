@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agent-wiki graph</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header id="topbar">
+      <div class="title">agent-wiki graph</div>
+      <div class="controls">
+        <label>
+          color by
+          <select id="colorMode">
+            <option value="topic">topic (dir)</option>
+            <option value="tag">primary tag</option>
+            <option value="type">type</option>
+          </select>
+        </label>
+        <label>
+          <input type="checkbox" id="hideOrphans" /> hide orphans
+        </label>
+        <label>
+          <input type="checkbox" id="hideBroken" /> hide broken
+        </label>
+        <input type="search" id="search" placeholder="search title / slug…" />
+        <button id="fit" type="button" title="zoom to fit all nodes">fit</button>
+        <span id="status" class="status">connecting…</span>
+      </div>
+    </header>
+    <main id="graph"></main>
+    <aside id="side" class="hidden">
+      <button id="closeSide" aria-label="close">×</button>
+      <h2 id="sidePath"></h2>
+      <dl id="sideMeta"></dl>
+      <div id="sideLinks"></div>
+    </aside>
+    <script>
+      // Surface unhandled errors and module load failures directly in the UI
+      // so we never again get a silent "connecting…" with nothing in console.
+      (function () {
+        function show(msg) {
+          var s = document.getElementById("status");
+          if (s) {
+            s.textContent = msg;
+            s.className = "status err";
+          }
+        }
+        window.addEventListener("error", function (ev) {
+          if (ev.filename && ev.filename.indexOf("app.js") !== -1) {
+            show("script error: " + (ev.message || "unknown") + " (see DevTools Console)");
+          } else {
+            show("resource load failed: " + (ev.target && ev.target.src || ev.message || "unknown"));
+          }
+        }, true);
+        window.addEventListener("unhandledrejection", function (ev) {
+          show("unhandled: " + (ev.reason && ev.reason.message || ev.reason || "unknown"));
+        });
+      })();
+    </script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -18,18 +18,26 @@ This package is **physically and functionally independent** from
 
 ## Quick start
 
-From the repo root, once the package is built:
+After publishing, three equivalent ways to launch:
 
 ```bash
-node graph-viewer/dist/cli.js --wiki-path ./wiki --port 4711 --open
+# 1. Through the core CLI (thin handoff — installs nothing in core, resolves
+#    and spawns this package at runtime). Needs both packages installed.
+npm install -g @agent-wiki/mcp-server @agent-wiki/graph-viewer
+agent-wiki web --wiki-path ./wiki --open
+
+# 2. Standalone binary, after installing this package:
+npm install -g @agent-wiki/graph-viewer
+agent-wiki-graph -w ./wiki
+
+# 3. Zero install:
+npx @agent-wiki/graph-viewer --wiki-path /path/to/wiki --open
 ```
 
-Or after publishing:
+From this repo before publishing, once the package is built:
 
 ```bash
-npx @agent-wiki/graph-viewer --wiki-path /path/to/wiki --open
-# or
-agent-wiki-graph -w ./wiki
+node graph-viewer/dist/cli.js -w ./wiki --port 4711 --open
 ```
 
 Then open http://localhost:4711. Editing any Markdown file under the wiki

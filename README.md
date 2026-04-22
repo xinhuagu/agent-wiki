@@ -44,6 +44,19 @@ agent-wiki install claude-code
 npx @agent-wiki/mcp-server call wiki_search '{"query": "deployment"}'
 ```
 
+### Option D: 3D Graph Viewer (optional companion)
+
+See your wiki as a realtime 3D knowledge graph — edits push live via SSE:
+
+```bash
+npm install -g @agent-wiki/mcp-server @agent-wiki/graph-viewer
+agent-wiki web --wiki-path ./wiki --open
+```
+
+The graph viewer is a **separate, optional package**. Core agent-wiki does
+not depend on it — install it only if you want the visualization. See
+[graph-viewer/README.md](graph-viewer/README.md) for details.
+
 That's it. Your agent now has a persistent, structured knowledge base.
 
 ## Why Not RAG?
@@ -77,6 +90,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **COBOL Code Analysis** | AST parser with variable tracing, call graph generation, and auto wiki pages |
 | **Skill Install** | One-command install as native skill for Claude Code and compatible clients |
 | **Git-Native** | Plain Markdown — diffable, blameable, revertable |
+| **3D Graph Viewer** | Optional companion `@agent-wiki/graph-viewer` — realtime 3D graph of pages and `[[wikilinks]]`, edits push live over SSE. Zero coupling with core. |
 
 ## Architecture
 
@@ -109,6 +123,7 @@ Three immutability layers, inspired by how compilers work:
 | **MCP Server** | Cursor, Windsurf, Claude Desktop, any MCP client | Add to `.mcp.json` |
 | **Native Skill** | Claude Code (native plugin) | `agent-wiki install claude-code` |
 | **CLI** | Any agent with shell access | `agent-wiki call <tool> '{json}'` |
+| **3D Graph Viewer** | Visual exploration of the whole wiki | `npm i -g @agent-wiki/graph-viewer` then `agent-wiki web -w ./wiki` |
 
 ## Hybrid Search Setup
 

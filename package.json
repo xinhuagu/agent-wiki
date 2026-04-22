@@ -26,7 +26,10 @@
     "prepare": "npm run build",
     "release:patch": "gh workflow run release.yml -f bump=patch",
     "release:minor": "gh workflow run release.yml -f bump=minor",
-    "release:major": "gh workflow run release.yml -f bump=major"
+    "release:major": "gh workflow run release.yml -f bump=major",
+    "release:graph:patch": "gh workflow run release-graph.yml -f bump=patch",
+    "release:graph:minor": "gh workflow run release-graph.yml -f bump=minor",
+    "release:graph:major": "gh workflow run release-graph.yml -f bump=major"
   },
   "keywords": [
     "mcp",

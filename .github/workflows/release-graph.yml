@@ -1,0 +1,81 @@
+name: Release graph-viewer
+
+# Independent release cycle for the optional @agent-wiki/graph-viewer package.
+# Tags are namespaced as `graph-viewer-v<version>` so they don't collide with
+# the core `v<version>` tags. The workflow only touches graph-viewer/* — core
+# build, tests, and version are untouched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        working-directory: graph-viewer
+        run: npm ci
+
+      - name: Build
+        working-directory: graph-viewer
+        run: npm run build
+
+      - name: Test
+        working-directory: graph-viewer
+        run: npm test
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        id: version
+        working-directory: graph-viewer
+        run: |
+          npm version ${{ inputs.bump }} --no-git-tag-version
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Commit, tag, push
+        run: |
+          git add graph-viewer/package.json graph-viewer/package-lock.json
+          git commit -m "release(graph-viewer): v${{ steps.version.outputs.version }}"
+          git tag "graph-viewer-v${{ steps.version.outputs.version }}"
+          git push --follow-tags
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: graph-viewer-v${{ steps.version.outputs.version }}
+          name: "@agent-wiki/graph-viewer v${{ steps.version.outputs.version }}"
+          generate_release_notes: true
+
+      - name: Publish to npm
+        working-directory: graph-viewer
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

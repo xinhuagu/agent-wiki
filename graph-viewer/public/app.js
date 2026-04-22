@@ -446,12 +446,31 @@ function connect() {
 }
 connect();
 
-document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && selectedId) clearSelection();
-  if (ev.key === "f" && !isTypingInInput(ev.target)) Graph.zoomToFit(600, 40);
-});
+/** Move the camera toward or away from its current look-at by a multiplicative
+ *  factor. < 1 = zoom in, > 1 = zoom out. Works regardless of the camera's
+ *  current angle because we scale its position vector along the same direction. */
+function zoomByFactor(factor) {
+  const cam = Graph.camera();
+  const p = cam.position;
+  Graph.cameraPosition({ x: p.x * factor, y: p.y * factor, z: p.z * factor }, undefined, 300);
+}
 
-document.getElementById("fit").addEventListener("click", () => Graph.zoomToFit(600, 40));
+function goHome() {
+  if (selectedId) clearSelection();
+  Graph.zoomToFit(600, 60);
+}
+
+document.getElementById("zoomOut").addEventListener("click", () => zoomByFactor(1.25));
+document.getElementById("zoomIn").addEventListener("click", () => zoomByFactor(0.8));
+document.getElementById("home").addEventListener("click", goHome);
+
+document.addEventListener("keydown", (ev) => {
+  if (isTypingInInput(ev.target)) return;
+  if (ev.key === "Escape" && selectedId) clearSelection();
+  else if (ev.key === "f" || ev.key === "h") goHome();
+  else if (ev.key === "+" || ev.key === "=") zoomByFactor(0.8);
+  else if (ev.key === "-" || ev.key === "_") zoomByFactor(1.25);
+});
 
 function isTypingInInput(el) {
   return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);

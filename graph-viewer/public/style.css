@@ -30,6 +30,16 @@ body { overflow: hidden; }
 }
 #topbar button { cursor: pointer; }
 #topbar button:hover { background: var(--panel-2); }
+#topbar .btn-group { display: inline-flex; gap: 0; }
+#topbar .btn-group button {
+  border-radius: 0;
+  padding: 4px 10px;
+  min-width: 32px;
+  text-align: center;
+  border-right-width: 0;
+}
+#topbar .btn-group button:first-child { border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
+#topbar .btn-group button:last-child { border-top-right-radius: 6px; border-bottom-right-radius: 6px; border-right-width: 1px; }
 #topbar input[type="search"] { min-width: 220px; }
 #topbar .status { font-size: 12px; color: var(--fg-dim); }
 #topbar .status.ok { color: #3fb950; }

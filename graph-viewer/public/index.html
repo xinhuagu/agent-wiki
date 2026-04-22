@@ -25,7 +25,11 @@
           <input type="checkbox" id="hideBroken" /> hide broken
         </label>
         <input type="search" id="search" placeholder="search title / slug…" />
-        <button id="fit" type="button" title="zoom to fit all nodes">fit</button>
+        <div class="btn-group">
+          <button id="zoomOut" type="button" title="zoom out (−)" aria-label="zoom out">−</button>
+          <button id="zoomIn" type="button" title="zoom in (+)" aria-label="zoom in">+</button>
+          <button id="home" type="button" title="home — fit all nodes and clear selection (f)">home</button>
+        </div>
         <span id="status" class="status">connecting…</span>
       </div>
     </header>

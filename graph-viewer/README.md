@@ -82,7 +82,8 @@ directory pushes an incremental graph update over SSE.
 | double-click (same node within 400 ms) | `zoomToFit` onto the 2-hop neighborhood |
 | drag a node | force simulation responds, node released on drop |
 | background click / `Esc` | clear selection |
-| `fit` button / `f` key | `zoomToFit` the entire graph |
+| toolbar `−` / `+` / `-` / `=` key | zoom out / in |
+| toolbar `home` / `f` or `h` key | clear selection and `zoomToFit` the graph |
 | search box | filter nodes by title or slug |
 | `color by` select | recolor palette by topic / tag / type |
 | hide orphans / hide broken | filter toggles |

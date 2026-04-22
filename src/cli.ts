@@ -14,6 +14,8 @@ import { existsSync, mkdirSync, cpSync, readFileSync, writeFileSync } from "node
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+import { createRequire } from "node:module";
+import { spawn } from "node:child_process";
 import { Wiki } from "./wiki.js";
 import { runServer, handleTool } from "./server.js";
 import { VERSION } from "./version.js";
@@ -381,6 +383,38 @@ program
       console.error("Available targets: aceclaw, claude-code");
       process.exit(1);
     }
+  });
+
+// Web — thin handoff to the optional @agent-wiki/graph-viewer package.
+// Core must not import graph-viewer statically (zero-coupling constraint), so
+// we resolve it at runtime and spawn it as a child process. If the package
+// isn't installed, print actionable install / npx instructions and exit.
+program
+  .command("web")
+  .description("Open the realtime 3D knowledge graph viewer (requires @agent-wiki/graph-viewer)")
+  .option("-w, --wiki-path <path>", "Path to the wiki directory", ".")
+  .option("-p, --port <n>", "HTTP port", "4711")
+  .option("--host <host>", "Bind host", "127.0.0.1")
+  .option("--open", "Open the browser on startup")
+  .action((opts: { wikiPath: string; port: string; host: string; open?: boolean }) => {
+    const req = createRequire(import.meta.url);
+    let cliPath: string;
+    try {
+      cliPath = req.resolve("@agent-wiki/graph-viewer/dist/cli.js");
+    } catch {
+      console.error("The 3D graph viewer is not installed.");
+      console.error("");
+      console.error("Install globally:");
+      console.error("  npm install -g @agent-wiki/graph-viewer");
+      console.error("");
+      console.error("Or run without installing:");
+      console.error(`  npx @agent-wiki/graph-viewer --wiki-path ${opts.wikiPath}`);
+      process.exit(1);
+    }
+    const args = ["--wiki-path", opts.wikiPath, "--port", opts.port, "--host", opts.host];
+    if (opts.open) args.push("--open");
+    const child = spawn(process.execPath, [cliPath, ...args], { stdio: "inherit" });
+    child.on("exit", (code) => process.exit(code ?? 0));
   });
 
 program.parse();

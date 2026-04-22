@@ -1,0 +1,42 @@
+{
+  "name": "@agent-wiki/graph-viewer",
+  "version": "0.1.0",
+  "description": "Realtime 3D knowledge graph viewer for agent-wiki. Standalone — zero runtime dependency on core.",
+  "type": "module",
+  "bin": {
+    "agent-wiki-graph": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "public"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "start": "node dist/cli.js"
+  },
+  "keywords": [
+    "agent-wiki",
+    "knowledge-graph",
+    "3d",
+    "visualization"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20.19.0 || >=22.13.0 || >=24"
+  },
+  "dependencies": {
+    "gray-matter": "^4.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.2"
+  }
+}

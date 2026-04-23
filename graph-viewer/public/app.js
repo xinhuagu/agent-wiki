@@ -103,12 +103,21 @@ function nodeSize(n) {
   return isIndex(n) ? base * 2 : base;
 }
 
+// Slug matched at word boundaries (^, /, -); title by substring. Strips ".md" suffix.
+function matchesSearch(id, title, rawQuery) {
+  const q = rawQuery.endsWith(".md") ? rawQuery.slice(0, -3) : rawQuery;
+  if (!q) return false;
+  if ((title ?? "").toLowerCase().includes(q)) return true;
+  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp("(^|[/\\-])" + escaped).test(id.toLowerCase());
+}
+
 function matchesFilter(n) {
   if (hideOrphansEl.checked && n.orphan && !n.broken) return false;
   if (hideBrokenEl.checked && n.broken) return false;
   const q = searchEl.value.trim().toLowerCase();
   if (!q) return true;
-  return n.id.toLowerCase().includes(q) || (n.title ?? "").toLowerCase().includes(q);
+  return matchesSearch(n.id, n.title, q);
 }
 
 const Graph = ForceGraph3D()(graphEl)
@@ -243,7 +252,7 @@ function applyGraph(g) {
     const q = searchEl.value.trim().toLowerCase();
     const searchPinned = q
       ? new Set(g.nodes
-          .filter((n) => visible.has(n.id) && (n.id.toLowerCase().includes(q) || (n.title ?? "").toLowerCase().includes(q)))
+          .filter((n) => visible.has(n.id) && matchesSearch(n.id, n.title, q))
           .map((n) => n.id))
       : new Set();
     let changed = true;

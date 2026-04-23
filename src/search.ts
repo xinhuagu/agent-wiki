@@ -105,8 +105,9 @@ export interface RetrievalSignal {
   low_confidence: boolean;
   /** Suggest the agent abstain (or verify carefully) rather than answering. */
   abstain_recommended: boolean;
-  /** True only when retrieval looks answer-ready on its own. For
-   *  `wiki_search_read`, callers may upgrade this after reading top pages. */
+  /** Always `false` from `evaluateRetrievalSignal` — retrieval alone is never
+   *  answer-ready. Callers that successfully read a top page with a strong
+   *  anchor (e.g. `wiki_search_read`) may flip this to `true`. */
   evidence_sufficient: boolean;
   reason: string;
   suggestion: string;

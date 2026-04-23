@@ -18,6 +18,7 @@ import {
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve, basename, extname } from "node:path";
 import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob, safePath } from "./wiki.js";
+import { evaluateRetrievalSignal } from "./search.js";
 import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
 import matter from "gray-matter";
 import { VERSION } from "./version.js";
@@ -371,6 +372,8 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           "Set include_content=true for simple inline content. For advanced search+read with deduplication, " +
           "readTopN control, and per-page limits, use wiki_search_read instead. " +
           "Use `type` or `tags` to narrow results without a separate wiki_list call. " +
+          "Each result carries `match_quality` (title/tag/slug/section anchors, body_only, fuzzy_only, query_term_coverage) and `match_reasons` so agents can distinguish strong evidence from weak matches. " +
+          "The response also includes `retrieval_signal` with `confidence` (high/medium/low/none), `abstain_recommended`, and `evidence_sufficient` — treat `abstain_recommended: true` as \"do not answer from this alone; verify or mark as a knowledge gap\". " +
           "When no results are found, returns a `knowledge_gap` field with a suggested page slug, title, type, and tags — use it to decide what to create with wiki_write.",
         inputSchema: {
           type: "object" as const,
@@ -410,7 +413,9 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           "Search wiki pages and read top results in a single call. " +
           "Combines wiki_search + wiki_read with deduplication — multiple search hits on the same page read it only once. " +
           "Returns search metadata (results) separately from page content (pages). " +
-          "Remaining unread result paths are listed in nextReads for follow-up if needed.",
+          "Remaining unread result paths are listed in nextReads for follow-up if needed. " +
+          "Each result carries `match_quality` + `match_reasons`, and the response includes a top-level `retrieval_signal` with `confidence`, `abstain_recommended`, and `evidence_sufficient`. " +
+          "`evidence_sufficient` may be upgraded after top pages are read — treat `abstain_recommended: true` as \"verify or treat as a knowledge gap\" rather than answer-ready support.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -1137,11 +1142,17 @@ export async function handleTool(
         return JSON.stringify({
           results: [],
           count: 0,
+          retrieval_signal: evaluateRetrievalSignal(results),
           knowledge_gap: buildKnowledgeGap(searchQuery, wiki, filterType),
         }, null, 2);
       }
+      const retrievalSignal = evaluateRetrievalSignal(results);
       if (!args.include_content) {
-        return JSON.stringify({ results, count: results.length }, null, 2);
+        return JSON.stringify({
+          results,
+          count: results.length,
+          retrieval_signal: retrievalSignal,
+        }, null, 2);
       }
       // Inline page content — eliminates follow-up wiki_read calls
       const inlineBudget = args.inline_budget != null ? (args.inline_budget as number) : Infinity;
@@ -1197,7 +1208,11 @@ export async function handleTool(
           return { ...r, content: null };
         }
       });
-      return JSON.stringify({ results: enriched, count: enriched.length }, null, 2);
+      return JSON.stringify({
+        results: enriched,
+        count: enriched.length,
+        retrieval_signal: retrievalSignal,
+      }, null, 2);
     }
 
     case "wiki_search_read": {
@@ -1221,9 +1236,12 @@ export async function handleTool(
           nextReads: [],
           count: 0,
           pagesRead: 0,
+          retrieval_signal: evaluateRetrievalSignal(results),
           knowledge_gap: buildKnowledgeGap(query, wiki),
         }, null, 2);
       }
+
+      const retrievalSignal = evaluateRetrievalSignal(results);
 
       // Step 2: Deduplicate — preserve score order, first occurrence wins
       const seen = new Set<string>();
@@ -1300,12 +1318,39 @@ export async function handleTool(
         }
       }
 
+      // Post-read evidence upgrade: retrieval alone never claims
+      // evidence_sufficient. If retrieval confidence is "high" or "medium"
+      // AND we successfully read at least one top page whose search result
+      // had a title/tag/slug anchor, the agent now has verifiable content
+      // in hand — promote evidence_sufficient. Low/none never upgrade.
+      const finalSignal = { ...retrievalSignal };
+      if (
+        !finalSignal.evidence_sufficient &&
+        (finalSignal.confidence === "high" || finalSignal.confidence === "medium")
+      ) {
+        const readPaths = new Set(
+          pages.filter(p => p.content != null && p.error == null).map(p => p.path as string)
+        );
+        const strongReadResult = results.find(r => {
+          if (!readPaths.has(r.path)) return false;
+          const q = r.match_quality;
+          return !!q && (q.title_hit || q.tag_hit || q.slug_hit);
+        });
+        if (strongReadResult) {
+          finalSignal.evidence_sufficient = true;
+          finalSignal.reason = finalSignal.reason
+            ? `${finalSignal.reason}; upgraded after reading a top page with a strong anchor`
+            : "Upgraded after reading a top page with a strong anchor";
+        }
+      }
+
       return JSON.stringify({
         results,
         count: results.length,
         pages,
         pagesRead: pages.length,
         nextReads,
+        retrieval_signal: finalSignal,
       }, null, 2);
     }
 

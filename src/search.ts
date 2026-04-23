@@ -72,6 +72,45 @@ export interface SearchResult {
   snippet: string;
   /** The ## heading of the section containing the best match, if any. */
   section?: string;
+  /** Per-field match signals, explaining *why* the page matched. Present when
+   *  results are produced by `searchIndex` / `SearchEngine.search`. */
+  match_quality?: MatchQuality;
+  /** Human-readable reasons the page matched (e.g. "title match", "fuzzy match"). */
+  match_reasons?: string[];
+}
+
+/** Structured match signals for a single result. Lets agents distinguish a
+ *  strong title/tag anchor from a weak body-only or fuzzy-only hit. */
+export interface MatchQuality {
+  title_hit: boolean;
+  tag_hit: boolean;
+  slug_hit: boolean;
+  /** At least one section heading in the body contains a query term. */
+  section_hit: boolean;
+  /** True if the match has no anchor in title, tag, slug, or section heading —
+   *  i.e. only body text (or frontmatter) matched. */
+  body_only: boolean;
+  /** True if the only matches are fuzzy (typo-corrected) — no exact, synonym,
+   *  phrase, or prefix hits contributed. */
+  fuzzy_only: boolean;
+  /** Fraction of original query terms (0..1) that matched the page in any form. */
+  query_term_coverage: number;
+}
+
+/** Result-set level retrieval-quality signal. Deterministic, rule-based. */
+export interface RetrievalSignal {
+  /** "high" = strong anchor + good coverage; "medium" = partial anchor;
+   *  "low" = weak/body-only/fuzzy-only or no clear leader; "none" = zero results. */
+  confidence: "high" | "medium" | "low" | "none";
+  low_confidence: boolean;
+  /** Suggest the agent abstain (or verify carefully) rather than answering. */
+  abstain_recommended: boolean;
+  /** Always `false` from `evaluateRetrievalSignal` — retrieval alone is never
+   *  answer-ready. Callers that successfully read a top page with a strong
+   *  anchor (e.g. `wiki_search_read`) may flip this to `true`. */
+  evidence_sufficient: boolean;
+  reason: string;
+  suggestion: string;
 }
 
 type FieldName = "title" | "tags" | "slug" | "frontmatter" | "body";
@@ -388,15 +427,44 @@ const FIELD_TO_TERMS_KEY: Record<FieldName, keyof SearchDoc["fields"]> = {
   body: "bodyTerms",
 };
 
-/** Score a document against query terms using field-weighted BM25. */
-export function scoreDoc(
+/** Internal breakdown returned by `scoreDocDetailed` — surfaces the scoring
+ *  signals used to populate `match_quality` on search results. */
+export interface ScoreBreakdown {
+  score: number;
+  fieldHits: Record<FieldName, boolean>;
+  /** Whether each scoring layer contributed to the score. */
+  matchLayers: {
+    bm25: boolean;       // direct postings match on an original query term
+    synonym: boolean;    // postings match via synonym expansion
+    prefix: boolean;     // prefix match in title/tag/slug
+    fuzzy: boolean;      // edit-distance match in title/tag/slug
+    phrase: boolean;     // exact phrase hit in title/slug/body
+  };
+  /** Fraction of unique original query terms that matched in any form (0..1). */
+  termCoverage: number;
+  /** True if at least one heading line in the body contains a query term. */
+  sectionHit: boolean;
+}
+
+/** Score a document against query terms using field-weighted BM25, and return
+ *  a full breakdown of which signals contributed. Also used by `searchIndex`
+ *  to populate `match_quality` on results. */
+export function scoreDocDetailed(
   doc: SearchDoc,
   queryTerms: string[],
   expandedTerms: string[],
   index: SearchIndex,
-): number {
+): ScoreBreakdown {
   let score = 0;
   const fields: FieldName[] = ["title", "tags", "slug", "frontmatter", "body"];
+
+  const fieldHits: Record<FieldName, boolean> = {
+    title: false, tags: false, slug: false, frontmatter: false, body: false,
+  };
+  const matchLayers = {
+    bm25: false, synonym: false, prefix: false, fuzzy: false, phrase: false,
+  };
+  const matchedOriginals = new Set<string>();
 
   // BM25 scoring for each term
   for (const term of expandedTerms) {
@@ -405,7 +473,10 @@ export function scoreDoc(
     const tf = docMap.get(doc.path);
     if (!tf) continue;
     const df = index.docFreq.get(term) ?? 0;
+    const isOriginal = queryTerms.includes(term);
+    const expansionPenalty = isOriginal ? 1.0 : 0.4;
 
+    let termContributed = false;
     for (const field of fields) {
       const fieldScore = bm25Field(
         tf[field],
@@ -414,9 +485,28 @@ export function scoreDoc(
         doc.lengths[field],
         index.avgFieldLength[field],
       );
-      const isOriginal = queryTerms.includes(term);
-      const expansionPenalty = isOriginal ? 1.0 : 0.4;
+      if (fieldScore > 0) {
+        fieldHits[field] = true;
+        termContributed = true;
+      }
       score += fieldScore * FIELD_WEIGHTS[field] * expansionPenalty;
+    }
+
+    if (termContributed) {
+      if (isOriginal) {
+        matchLayers.bm25 = true;
+        matchedOriginals.add(term);
+      } else {
+        matchLayers.synonym = true;
+        // Attribute the synonym hit back to the original(s) that expanded to it
+        for (const orig of queryTerms) {
+          const syns = SYNONYMS[orig];
+          if (!syns) continue;
+          for (const syn of syns) {
+            if (tokenize(syn).includes(term)) { matchedOriginals.add(orig); break; }
+          }
+        }
+      }
     }
   }
 
@@ -427,9 +517,15 @@ export function scoreDoc(
     const slugLower = doc.slug.toLowerCase();
     const bodyLower = doc.body.toLowerCase();
 
-    if (titleLower.includes(originalPhrase)) score += 8;
-    if (slugLower.includes(originalPhrase.replace(/\s+/g, "-"))) score += 6;
-    if (bodyLower.includes(originalPhrase)) score += 3;
+    if (titleLower.includes(originalPhrase)) {
+      score += 8; matchLayers.phrase = true; fieldHits.title = true;
+    }
+    if (slugLower.includes(originalPhrase.replace(/\s+/g, "-"))) {
+      score += 6; matchLayers.phrase = true; fieldHits.slug = true;
+    }
+    if (bodyLower.includes(originalPhrase)) {
+      score += 3; matchLayers.phrase = true; fieldHits.body = true;
+    }
   }
 
   // ── Bonus: all query terms present in same field ──
@@ -458,6 +554,9 @@ export function scoreDoc(
       );
       if (hasPrefix) {
         score += FIELD_WEIGHTS[field] * 0.5;
+        fieldHits[field] = true;
+        matchLayers.prefix = true;
+        matchedOriginals.add(term);
       }
     }
   }
@@ -476,11 +575,53 @@ export function scoreDoc(
       });
       if (hasFuzzy) {
         score += FIELD_WEIGHTS[field] * 0.3;
+        fieldHits[field] = true;
+        matchLayers.fuzzy = true;
+        matchedOriginals.add(term);
       }
     }
   }
 
-  return score;
+  // ── Query term coverage ──
+  const uniqueOriginals = new Set(queryTerms);
+  const termCoverage = uniqueOriginals.size > 0
+    ? matchedOriginals.size / uniqueOriginals.size
+    : 0;
+
+  // ── Section-heading hit ──
+  const sectionHit = hasSectionQueryHit(doc.body, queryTerms);
+
+  return { score, fieldHits, matchLayers, termCoverage, sectionHit };
+}
+
+/** Score a document against query terms. Thin wrapper over `scoreDocDetailed`
+ *  for call sites that only need the numeric score. */
+export function scoreDoc(
+  doc: SearchDoc,
+  queryTerms: string[],
+  expandedTerms: string[],
+  index: SearchIndex,
+): number {
+  return scoreDocDetailed(doc, queryTerms, expandedTerms, index).score;
+}
+
+/** Does any heading line in `body` contain at least one query term?
+ *  Skips headings inside fenced code blocks. Used for section-heading match
+ *  detection in retrieval quality signals. */
+function hasSectionQueryHit(body: string, queryTerms: string[]): boolean {
+  if (queryTerms.length === 0 || body.length === 0) return false;
+  const lines = body.split("\n");
+  let inCodeBlock = false;
+  for (const line of lines) {
+    if (/^(`{3,}|~{3,})/.test(line)) { inCodeBlock = !inCodeBlock; continue; }
+    if (inCodeBlock) continue;
+    if (!/^#{1,6}\s/.test(line)) continue;
+    const headingLower = line.toLowerCase();
+    for (const t of queryTerms) {
+      if (t.length > 0 && headingLower.includes(t)) return true;
+    }
+  }
+  return false;
 }
 
 // ── Fuzzy matching helpers ────────────────────────────────────────
@@ -662,19 +803,176 @@ export function searchIndex(
   for (const path of candidates) {
     const doc = index.docs.get(path);
     if (!doc) continue;
-    const score = scoreDoc(doc, queryTerms, expandedTerms, index);
-    if (score > 0) {
+    const breakdown = scoreDocDetailed(doc, queryTerms, expandedTerms, index);
+    if (breakdown.score > 0) {
       const { snippet, section } = makeSnippet(doc, queryTerms);
+      const { match_quality, match_reasons } = deriveMatchQuality(breakdown);
       results.push({
         path: doc.path,
-        score: Math.round(score * 100) / 100,
+        score: Math.round(breakdown.score * 100) / 100,
         snippet,
         section,
+        match_quality,
+        match_reasons,
       });
     }
   }
   results.sort((a, b) => b.score - a.score);
   return results.slice(0, limit);
+}
+
+/** Derive the user-facing `match_quality` + `match_reasons` from a
+ *  `ScoreBreakdown`. Pure, no index access. */
+function deriveMatchQuality(
+  breakdown: ScoreBreakdown,
+): { match_quality: MatchQuality; match_reasons: string[] } {
+  const { fieldHits, matchLayers, termCoverage, sectionHit } = breakdown;
+  const anyStructuredHit = fieldHits.title || fieldHits.tags || fieldHits.slug || sectionHit;
+  // fuzzy_only: the only contributing layer was fuzzy matching
+  const fuzzyOnly =
+    matchLayers.fuzzy &&
+    !matchLayers.bm25 &&
+    !matchLayers.synonym &&
+    !matchLayers.prefix &&
+    !matchLayers.phrase;
+
+  const match_quality: MatchQuality = {
+    title_hit: fieldHits.title,
+    tag_hit: fieldHits.tags,
+    slug_hit: fieldHits.slug,
+    section_hit: sectionHit,
+    body_only: !anyStructuredHit,
+    fuzzy_only: fuzzyOnly,
+    query_term_coverage: Math.round(termCoverage * 100) / 100,
+  };
+
+  const match_reasons: string[] = [];
+  if (match_quality.title_hit) match_reasons.push("title match");
+  if (match_quality.tag_hit) match_reasons.push("tag match");
+  if (match_quality.slug_hit) match_reasons.push("slug match");
+  if (match_quality.section_hit) match_reasons.push("section heading match");
+  if (matchLayers.phrase) match_reasons.push("exact phrase match");
+  if (matchLayers.synonym && !matchLayers.bm25) match_reasons.push("synonym-only match");
+  if (match_quality.fuzzy_only) match_reasons.push("fuzzy (typo-corrected) match only");
+  if (match_quality.body_only && !match_quality.fuzzy_only) match_reasons.push("body-only match");
+  if (match_reasons.length === 0 && fieldHits.body) match_reasons.push("body match");
+
+  return { match_quality, match_reasons };
+}
+
+// ── Retrieval quality signal ──────────────────────────────────────
+
+/** Evaluate result-set level retrieval quality. Pure, deterministic, rule-based.
+ *
+ *  Looks at the top result's `match_quality` (title/tag/slug/section anchors,
+ *  body-only and fuzzy-only flags, query term coverage) and the separation
+ *  between #1 and #2 by score. No absolute BM25 thresholds — scales aren't
+ *  stable across queries.
+ *
+ *  - "high"   → strong anchor (title/tag/slug) + ≥50% term coverage + not fuzzy-only
+ *  - "medium" → anchor is section-only or coverage is partial
+ *  - "low"    → body-only, fuzzy-only, poor coverage, or #1 doesn't clearly
+ *               outrank #2 (tight clustering is treated as ambiguity, which
+ *               demotes confidence to "low" regardless of anchor strength)
+ *  - "none"   → no results at all
+ *
+ *  `abstain_recommended` fires on "low" / "none".
+ *
+ *  `evidence_sufficient` is ALWAYS `false` here — a retrieval hit is not the
+ *  same as verified content. Only callers that successfully read a top page
+ *  with a strong anchor (e.g. `wiki_search_read`) are allowed to upgrade it. */
+export function evaluateRetrievalSignal(results: SearchResult[]): RetrievalSignal {
+  if (results.length === 0) {
+    return {
+      confidence: "none",
+      low_confidence: true,
+      abstain_recommended: true,
+      evidence_sufficient: false,
+      reason: "No matching pages were found.",
+      suggestion: "Treat this as a knowledge gap. Create a new page with wiki_write, or refine the query.",
+    };
+  }
+
+  const top = results[0]!;
+  const q = top.match_quality;
+  const reasons: string[] = [];
+
+  if (!q) {
+    // SearchResult without breakdown — be conservative
+    return {
+      confidence: "medium",
+      low_confidence: false,
+      abstain_recommended: false,
+      evidence_sufficient: false,
+      reason: "Top result has no structured match-quality data.",
+      suggestion: "Read the top-ranked pages to confirm details before citing.",
+    };
+  }
+
+  const strongField = q.title_hit || q.tag_hit || q.slug_hit;
+  let confidence: "high" | "medium" | "low";
+
+  if (strongField && q.query_term_coverage >= 0.5 && !q.fuzzy_only) {
+    confidence = "high";
+    const hits: string[] = [];
+    if (q.title_hit) hits.push("title");
+    if (q.tag_hit) hits.push("tag");
+    if (q.slug_hit) hits.push("slug");
+    reasons.push(`Top result has ${hits.join("/")} match`);
+  } else if ((strongField || q.section_hit) && !q.fuzzy_only) {
+    confidence = "medium";
+    if (!strongField && q.section_hit) {
+      reasons.push("Top result has a section-heading match but no title/tag/slug anchor");
+    } else if (q.query_term_coverage < 0.5) {
+      reasons.push(`Top result matches only ${Math.round(q.query_term_coverage * 100)}% of query terms`);
+    } else {
+      reasons.push("Top result has a partial anchor");
+    }
+  } else {
+    confidence = "low";
+    if (q.fuzzy_only) {
+      reasons.push("Top match relies on fuzzy (typo-corrected) matches only");
+    } else if (q.body_only) {
+      reasons.push("Top match is body-only — no anchor in title, tag, slug, or section heading");
+    }
+    if (q.query_term_coverage < 0.5) {
+      reasons.push(`only ${Math.round(q.query_term_coverage * 100)}% of query terms matched`);
+    }
+    if (reasons.length === 0) {
+      reasons.push("Top match has no strong field-level anchor");
+    }
+  }
+
+  // Top-1 vs top-2 separation: if results are tightly clustered, there's no
+  // clear leader — treat that as ambiguity and collapse to "low" so abstain
+  // fires, regardless of anchor strength. (Otherwise an ambiguous two-page
+  // tie between equally-anchored pages would slip through as medium and the
+  // agent would be told it's safe to answer from retrieval alone.)
+  if (results.length > 1) {
+    const second = results[1]!.score;
+    const ratio = top.score / Math.max(second, 0.01);
+    if (ratio < 1.2) {
+      reasons.push(`top result does not clearly outrank #2 (score ratio ${ratio.toFixed(2)})`);
+      confidence = "low";
+    }
+  }
+
+  const low_confidence = confidence === "low";
+  const abstain_recommended = low_confidence;
+  // Retrieval alone is never answer-ready. Callers that have read top pages
+  // (wiki_search_read) may upgrade this after verifying content.
+  const evidence_sufficient = false;
+
+  return {
+    confidence,
+    low_confidence,
+    abstain_recommended,
+    evidence_sufficient,
+    reason: reasons.join("; "),
+    suggestion: abstain_recommended
+      ? "Verify by reading the top pages, refine the query, or treat this as a knowledge gap."
+      : "Read the top-ranked pages to confirm details before citing.",
+  };
 }
 
 // ── Search Engine (cached, loader-based) ──────────────────────────

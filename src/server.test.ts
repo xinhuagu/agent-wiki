@@ -2139,3 +2139,143 @@ describe("wiki_search: knowledge_gap", () => {
     expect(parsed.knowledge_gap.suggested_page).toMatch(/^artifact-/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// wiki_search / wiki_search_read retrieval_signal + match_quality
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("wiki_search: retrieval_signal + match_quality", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("each result carries match_quality and match_reasons", async () => {
+    const wiki = freshWiki();
+    wiki.write(
+      "concept-rag.md",
+      "---\ntitle: Retrieval Augmented Generation\ntype: concept\ntags: [rag]\n---\nRAG combines retrieval with generation.",
+    );
+    const result = await handleTool(wiki, "wiki_search", { query: "retrieval augmented generation" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results[0].match_quality).toBeDefined();
+    expect(parsed.results[0].match_quality.title_hit).toBe(true);
+    expect(Array.isArray(parsed.results[0].match_reasons)).toBe(true);
+    expect(parsed.results[0].match_reasons).toContain("title match");
+  });
+
+  it("strong title match → confidence 'high' but evidence_sufficient stays false (search-only)", async () => {
+    const wiki = freshWiki();
+    wiki.write(
+      "concept-attention.md",
+      "---\ntitle: Self Attention Mechanism\ntype: concept\ntags: [attention, transformer]\n---\nScaled dot-product attention is the core of transformers.",
+    );
+    const result = await handleTool(wiki, "wiki_search", { query: "self attention mechanism" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.retrieval_signal).toBeDefined();
+    expect(parsed.retrieval_signal.confidence).toBe("high");
+    // Retrieval hit ≠ verified content. wiki_search must never declare
+    // evidence_sufficient — only wiki_search_read may, after a successful read.
+    expect(parsed.retrieval_signal.evidence_sufficient).toBe(false);
+    expect(parsed.retrieval_signal.abstain_recommended).toBe(false);
+  });
+
+  it("zero results → retrieval_signal.confidence 'none' with abstain and knowledge_gap", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_search", { query: "quantum computing" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.retrieval_signal).toBeDefined();
+    expect(parsed.retrieval_signal.confidence).toBe("none");
+    expect(parsed.retrieval_signal.abstain_recommended).toBe(true);
+    expect(parsed.knowledge_gap).toBeDefined();
+  });
+
+  it("body-only match → retrieval_signal.confidence 'low' with abstain_recommended", async () => {
+    const wiki = freshWiki();
+    // Page with the query term only in body — no title/tag/slug/section anchor
+    wiki.write(
+      "concept-misc.md",
+      "---\ntitle: Miscellaneous\ntype: concept\ntags: [general]\n---\nThis page briefly mentions webhooks in passing, but is not about them.",
+    );
+    const result = await handleTool(wiki, "wiki_search", { query: "webhooks" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results.length).toBeGreaterThan(0);
+    expect(parsed.results[0].match_quality.body_only).toBe(true);
+    expect(parsed.retrieval_signal.confidence).toBe("low");
+    expect(parsed.retrieval_signal.abstain_recommended).toBe(true);
+    expect(parsed.retrieval_signal.evidence_sufficient).toBe(false);
+  });
+
+  it("include_content path still returns retrieval_signal", async () => {
+    const wiki = freshWiki();
+    wiki.write(
+      "concept-rag.md",
+      "---\ntitle: RAG\ntype: concept\ntags: [rag]\n---\nRetrieval augmented generation.",
+    );
+    const result = await handleTool(wiki, "wiki_search", {
+      query: "rag",
+      include_content: true,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.retrieval_signal).toBeDefined();
+    expect(parsed.retrieval_signal.confidence).toBeDefined();
+  });
+});
+
+describe("wiki_search_read: retrieval_signal", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("attaches retrieval_signal to non-empty response", async () => {
+    const wiki = freshWiki();
+    wiki.write(
+      "concept-attention.md",
+      "---\ntitle: Self Attention\ntype: concept\ntags: [attention]\n---\nScaled dot-product attention.",
+    );
+    const result = await handleTool(wiki, "wiki_search_read", { query: "self attention" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.retrieval_signal).toBeDefined();
+    expect(parsed.retrieval_signal.confidence).toBe("high");
+  });
+
+  it("upgrades evidence_sufficient from false → true when a strongly-anchored top page is read", async () => {
+    const wiki = freshWiki();
+    wiki.write(
+      "concept-attention.md",
+      "---\ntitle: Self Attention\ntype: concept\ntags: [attention]\n---\nScaled dot-product attention detail.",
+    );
+    const result = await handleTool(wiki, "wiki_search_read", {
+      query: "self attention",
+      readTopN: 1,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.retrieval_signal.confidence).toBe("high");
+    expect(parsed.pagesRead).toBeGreaterThan(0);
+    expect(parsed.retrieval_signal.evidence_sufficient).toBe(true);
+    expect(parsed.retrieval_signal.reason).toMatch(/upgraded/i);
+  });
+
+  it("does NOT upgrade evidence_sufficient when retrieval confidence is 'low'", async () => {
+    const wiki = freshWiki();
+    // Body-only match → confidence "low"; even after reading the page, no upgrade.
+    wiki.write(
+      "concept-misc.md",
+      "---\ntitle: Miscellaneous\ntype: concept\ntags: [general]\n---\nThis page briefly mentions webhooks in passing.",
+    );
+    const result = await handleTool(wiki, "wiki_search_read", {
+      query: "webhooks",
+      readTopN: 1,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.retrieval_signal.confidence).toBe("low");
+    expect(parsed.retrieval_signal.abstain_recommended).toBe(true);
+    expect(parsed.retrieval_signal.evidence_sufficient).toBe(false);
+  });
+
+  it("attaches retrieval_signal to empty response alongside knowledge_gap", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_search_read", { query: "nonexistent topic zzz" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.retrieval_signal.confidence).toBe("none");
+    expect(parsed.retrieval_signal.abstain_recommended).toBe(true);
+    expect(parsed.knowledge_gap).toBeDefined();
+  });
+});

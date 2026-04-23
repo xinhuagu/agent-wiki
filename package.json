@@ -15,7 +15,9 @@
     "skills",
     ".claude-plugin",
     "docs",
-    "architecture.svg"
+    "architecture.svg",
+    "graph-viewer/dist",
+    "graph-viewer/public"
   ],
   "scripts": {
     "build": "tsc",
@@ -27,9 +29,7 @@
     "release:patch": "gh workflow run release.yml -f bump=patch",
     "release:minor": "gh workflow run release.yml -f bump=minor",
     "release:major": "gh workflow run release.yml -f bump=major",
-    "release:graph:patch": "gh workflow run release-graph.yml -f bump=patch",
-    "release:graph:minor": "gh workflow run release-graph.yml -f bump=minor",
-    "release:graph:major": "gh workflow run release-graph.yml -f bump=major"
+    "build:graph": "npm ci --prefix graph-viewer && npm run build --prefix graph-viewer"
   },
   "keywords": [
     "mcp",

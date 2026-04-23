@@ -234,6 +234,37 @@ function applyGraph(g) {
   }
 
   const visible = new Set(g.nodes.filter(matchesFilter).map((n) => n.id));
+
+  // When hiding orphans, cascade: nodes whose only connections were to orphans
+  // become visually isolated after orphan removal — hide them too.
+  // Search matches are exempt: a node the user explicitly searched for stays
+  // visible even if it becomes disconnected.
+  if (hideOrphansEl.checked) {
+    const q = searchEl.value.trim().toLowerCase();
+    const searchPinned = q
+      ? new Set(g.nodes
+          .filter((n) => visible.has(n.id) && (n.id.toLowerCase().includes(q) || (n.title ?? "").toLowerCase().includes(q)))
+          .map((n) => n.id))
+      : new Set();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const connected = new Set();
+      for (const e of g.edges) {
+        if (visible.has(e.source) && visible.has(e.target)) {
+          connected.add(e.source);
+          connected.add(e.target);
+        }
+      }
+      const toRemove = [];
+      for (const id of visible) {
+        if (!connected.has(id) && !searchPinned.has(id)) toRemove.push(id);
+      }
+      for (const id of toRemove) visible.delete(id);
+      if (toRemove.length) changed = true;
+    }
+  }
+
   const nodes = g.nodes.filter((n) => visible.has(n.id));
   const links = g.edges
     .filter((e) => visible.has(e.source) && visible.has(e.target))

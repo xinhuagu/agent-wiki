@@ -2162,7 +2162,7 @@ describe("wiki_search: retrieval_signal + match_quality", () => {
     expect(parsed.results[0].match_reasons).toContain("title match");
   });
 
-  it("strong title match → retrieval_signal.confidence 'high', evidence_sufficient true", async () => {
+  it("strong title match → confidence 'high' but evidence_sufficient stays false (search-only)", async () => {
     const wiki = freshWiki();
     wiki.write(
       "concept-attention.md",
@@ -2172,7 +2172,9 @@ describe("wiki_search: retrieval_signal + match_quality", () => {
     const parsed = JSON.parse(result as string);
     expect(parsed.retrieval_signal).toBeDefined();
     expect(parsed.retrieval_signal.confidence).toBe("high");
-    expect(parsed.retrieval_signal.evidence_sufficient).toBe(true);
+    // Retrieval hit ≠ verified content. wiki_search must never declare
+    // evidence_sufficient — only wiki_search_read may, after a successful read.
+    expect(parsed.retrieval_signal.evidence_sufficient).toBe(false);
     expect(parsed.retrieval_signal.abstain_recommended).toBe(false);
   });
 
@@ -2232,6 +2234,40 @@ describe("wiki_search_read: retrieval_signal", () => {
     const parsed = JSON.parse(result as string);
     expect(parsed.retrieval_signal).toBeDefined();
     expect(parsed.retrieval_signal.confidence).toBe("high");
+  });
+
+  it("upgrades evidence_sufficient from false → true when a strongly-anchored top page is read", async () => {
+    const wiki = freshWiki();
+    wiki.write(
+      "concept-attention.md",
+      "---\ntitle: Self Attention\ntype: concept\ntags: [attention]\n---\nScaled dot-product attention detail.",
+    );
+    const result = await handleTool(wiki, "wiki_search_read", {
+      query: "self attention",
+      readTopN: 1,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.retrieval_signal.confidence).toBe("high");
+    expect(parsed.pagesRead).toBeGreaterThan(0);
+    expect(parsed.retrieval_signal.evidence_sufficient).toBe(true);
+    expect(parsed.retrieval_signal.reason).toMatch(/upgraded/i);
+  });
+
+  it("does NOT upgrade evidence_sufficient when retrieval confidence is 'low'", async () => {
+    const wiki = freshWiki();
+    // Body-only match → confidence "low"; even after reading the page, no upgrade.
+    wiki.write(
+      "concept-misc.md",
+      "---\ntitle: Miscellaneous\ntype: concept\ntags: [general]\n---\nThis page briefly mentions webhooks in passing.",
+    );
+    const result = await handleTool(wiki, "wiki_search_read", {
+      query: "webhooks",
+      readTopN: 1,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.retrieval_signal.confidence).toBe("low");
+    expect(parsed.retrieval_signal.abstain_recommended).toBe(true);
+    expect(parsed.retrieval_signal.evidence_sufficient).toBe(false);
   });
 
   it("attaches retrieval_signal to empty response alongside knowledge_gap", async () => {

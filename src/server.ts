@@ -1318,12 +1318,16 @@ export async function handleTool(
         }
       }
 
-      // Post-read evidence upgrade: if retrieval was "medium" (a partial
-      // anchor) and we successfully read at least one top page whose search
-      // result had a title/tag/slug hit, promote evidence_sufficient — the
-      // agent now has the actual page content to verify against.
+      // Post-read evidence upgrade: retrieval alone never claims
+      // evidence_sufficient. If retrieval confidence is "high" or "medium"
+      // AND we successfully read at least one top page whose search result
+      // had a title/tag/slug anchor, the agent now has verifiable content
+      // in hand — promote evidence_sufficient. Low/none never upgrade.
       const finalSignal = { ...retrievalSignal };
-      if (!finalSignal.evidence_sufficient && finalSignal.confidence === "medium") {
+      if (
+        !finalSignal.evidence_sufficient &&
+        (finalSignal.confidence === "high" || finalSignal.confidence === "medium")
+      ) {
         const readPaths = new Set(
           pages.filter(p => p.content != null && p.error == null).map(p => p.path as string)
         );

@@ -870,12 +870,16 @@ function deriveMatchQuality(
  *
  *  - "high"   → strong anchor (title/tag/slug) + ≥50% term coverage + not fuzzy-only
  *  - "medium" → anchor is section-only or coverage is partial
- *  - "low"    → body-only, fuzzy-only, poor coverage, or #1 doesn't outrank #2
+ *  - "low"    → body-only, fuzzy-only, poor coverage, or #1 doesn't clearly
+ *               outrank #2 (tight clustering is treated as ambiguity, which
+ *               demotes confidence to "low" regardless of anchor strength)
  *  - "none"   → no results at all
  *
- *  `abstain_recommended` fires on "low" / "none". `evidence_sufficient` fires
- *  on "high" — callers that read top pages (e.g. wiki_search_read) may upgrade
- *  it independently after verifying content. */
+ *  `abstain_recommended` fires on "low" / "none".
+ *
+ *  `evidence_sufficient` is ALWAYS `false` here — a retrieval hit is not the
+ *  same as verified content. Only callers that successfully read a top page
+ *  with a strong anchor (e.g. `wiki_search_read`) are allowed to upgrade it. */
 export function evaluateRetrievalSignal(results: SearchResult[]): RetrievalSignal {
   if (results.length === 0) {
     return {
@@ -939,20 +943,24 @@ export function evaluateRetrievalSignal(results: SearchResult[]): RetrievalSigna
   }
 
   // Top-1 vs top-2 separation: if results are tightly clustered, there's no
-  // clear leader — demote confidence regardless of anchor strength.
+  // clear leader — treat that as ambiguity and collapse to "low" so abstain
+  // fires, regardless of anchor strength. (Otherwise an ambiguous two-page
+  // tie between equally-anchored pages would slip through as medium and the
+  // agent would be told it's safe to answer from retrieval alone.)
   if (results.length > 1) {
     const second = results[1]!.score;
     const ratio = top.score / Math.max(second, 0.01);
     if (ratio < 1.2) {
       reasons.push(`top result does not clearly outrank #2 (score ratio ${ratio.toFixed(2)})`);
-      if (confidence === "high") confidence = "medium";
-      else if (confidence === "medium") confidence = "low";
+      confidence = "low";
     }
   }
 
   const low_confidence = confidence === "low";
   const abstain_recommended = low_confidence;
-  const evidence_sufficient = confidence === "high";
+  // Retrieval alone is never answer-ready. Callers that have read top pages
+  // (wiki_search_read) may upgrade this after verifying content.
+  const evidence_sufficient = false;
 
   return {
     confidence,

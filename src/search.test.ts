@@ -771,7 +771,7 @@ describe("evaluateRetrievalSignal", () => {
     expect(sig.low_confidence).toBe(true);
   });
 
-  it("strong title/tag/slug anchor with full coverage → 'high'", () => {
+  it("strong title/tag/slug anchor with full coverage → 'high' (but evidence_sufficient stays false)", () => {
     const sig = evaluateRetrievalSignal([
       mkResult({
         path: "a.md", score: 10,
@@ -784,8 +784,24 @@ describe("evaluateRetrievalSignal", () => {
       mkResult({ path: "b.md", score: 2 }),
     ]);
     expect(sig.confidence).toBe("high");
-    expect(sig.evidence_sufficient).toBe(true);
+    // Retrieval alone is never answer-ready — must be upgraded by a reader.
+    expect(sig.evidence_sufficient).toBe(false);
     expect(sig.abstain_recommended).toBe(false);
+  });
+
+  it("evidence_sufficient is ALWAYS false from pure retrieval evaluation", () => {
+    const cases: SearchResult[][] = [
+      [],
+      [mkResult({ path: "a.md", score: 10, match_quality: {
+        title_hit: true, tag_hit: true, slug_hit: true,
+        section_hit: true, body_only: false, fuzzy_only: false,
+        query_term_coverage: 1.0,
+      }})],
+      [mkResult({ path: "a.md", score: 5 }), mkResult({ path: "b.md", score: 2 })],
+    ];
+    for (const results of cases) {
+      expect(evaluateRetrievalSignal(results).evidence_sufficient).toBe(false);
+    }
   });
 
   it("body-only top result → 'low' and abstain", () => {
@@ -838,7 +854,7 @@ describe("evaluateRetrievalSignal", () => {
     expect(sig.abstain_recommended).toBe(false);
   });
 
-  it("tightly clustered top results (no clear leader) demote 'high' → 'medium'", () => {
+  it("tightly clustered top results collapse confidence to 'low' and trigger abstain", () => {
     const strong = {
       title_hit: true, tag_hit: false, slug_hit: false,
       section_hit: false, body_only: false, fuzzy_only: false,
@@ -848,7 +864,11 @@ describe("evaluateRetrievalSignal", () => {
       mkResult({ path: "a.md", score: 10, match_quality: strong }),
       mkResult({ path: "b.md", score: 9.5, match_quality: strong }),
     ]);
-    expect(sig.confidence).toBe("medium");
+    // Even though both anchors are individually strong, the absence of a
+    // clear leader means retrieval is ambiguous — agent must verify.
+    expect(sig.confidence).toBe("low");
+    expect(sig.abstain_recommended).toBe(true);
+    expect(sig.low_confidence).toBe(true);
     expect(sig.reason).toMatch(/outrank/i);
   });
 

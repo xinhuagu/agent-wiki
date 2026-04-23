@@ -12,12 +12,15 @@ import {
   buildIndex,
   searchIndex,
   scoreDoc,
+  scoreDocDetailed,
   makeSnippet,
   editDistance,
   fuzzyThreshold,
   isCJK,
   cjkNgrams,
   SearchEngine,
+  evaluateRetrievalSignal,
+  type SearchResult,
 } from "./search.js";
 import type { WikiPage } from "./wiki.js";
 
@@ -649,5 +652,218 @@ describe("CJK search", () => {
       expect(results[0]!.score).toBeGreaterThan(results[results.length - 1]!.score);
       expect(results[0]!.path).toBe("concept-knowledge-base.md");
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+//  MATCH QUALITY — per-result signals
+// ═══════════════════════════════════════════════════════════════════
+
+describe("match_quality", () => {
+  const pages = [
+    makePage({
+      path: "concept-rag.md",
+      title: "Retrieval Augmented Generation",
+      type: "concept",
+      tags: ["rag", "retrieval"],
+      content:
+        "RAG combines retrieval with generation.\n\n## Architecture\n\nDetails here.\n",
+    }),
+    makePage({
+      path: "notes-misc.md",
+      title: "Miscellaneous Notes",
+      type: "note",
+      tags: ["misc"],
+      content:
+        "Assorted thoughts about retrieval appearing only in body text, with no heading anchor.",
+    }),
+    makePage({
+      path: "concept-typo.md",
+      title: "Transformers",
+      type: "concept",
+      tags: ["attention"],
+      content: "Self-attention mechanism.",
+    }),
+  ];
+  const index = buildIndex(pages);
+
+  it("title hit produces title_hit=true and title match reason", () => {
+    const results = searchIndex(index, "retrieval augmented generation");
+    const top = results[0]!;
+    expect(top.path).toBe("concept-rag.md");
+    expect(top.match_quality?.title_hit).toBe(true);
+    expect(top.match_quality?.body_only).toBe(false);
+    expect(top.match_reasons).toContain("title match");
+  });
+
+  it("body-only hit with no heading match classifies as body_only", () => {
+    const results = searchIndex(index, "assorted thoughts");
+    const hit = results.find(r => r.path === "notes-misc.md")!;
+    expect(hit.match_quality?.title_hit).toBe(false);
+    expect(hit.match_quality?.tag_hit).toBe(false);
+    expect(hit.match_quality?.slug_hit).toBe(false);
+    expect(hit.match_quality?.section_hit).toBe(false);
+    expect(hit.match_quality?.body_only).toBe(true);
+    expect(hit.match_reasons).toContain("body-only match");
+  });
+
+  it("section heading match surfaces section_hit", () => {
+    // "architecture" appears as a ## heading in concept-rag
+    const results = searchIndex(index, "architecture");
+    const hit = results.find(r => r.path === "concept-rag.md")!;
+    expect(hit.match_quality?.section_hit).toBe(true);
+    expect(hit.match_reasons).toContain("section heading match");
+  });
+
+  it("fuzzy-only match sets fuzzy_only=true", () => {
+    // "transfomers" (typo) should fuzzy-match "transformers" in title
+    const results = searchIndex(index, "transfomers");
+    const hit = results.find(r => r.path === "concept-typo.md");
+    expect(hit).toBeDefined();
+    expect(hit!.match_quality?.fuzzy_only).toBe(true);
+    expect(hit!.match_reasons).toContain("fuzzy (typo-corrected) match only");
+  });
+
+  it("query_term_coverage reflects fraction of matched terms", () => {
+    const results = searchIndex(index, "retrieval generation");
+    const top = results.find(r => r.path === "concept-rag.md")!;
+    // Both terms appear in title
+    expect(top.match_quality?.query_term_coverage).toBe(1);
+  });
+
+  it("scoreDocDetailed returns the same score as scoreDoc", () => {
+    const doc = index.docs.get("concept-rag.md")!;
+    const qt = normalizeQuery("retrieval generation");
+    const exp = expandTerms(qt);
+    const via = scoreDocDetailed(doc, qt, exp, index).score;
+    const direct = scoreDoc(doc, qt, exp, index);
+    expect(via).toBe(direct);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+//  RETRIEVAL SIGNAL — result-set level confidence
+// ═══════════════════════════════════════════════════════════════════
+
+describe("evaluateRetrievalSignal", () => {
+  function mkResult(over: Partial<SearchResult> & { path: string; score: number }): SearchResult {
+    return {
+      snippet: "",
+      match_quality: {
+        title_hit: false,
+        tag_hit: false,
+        slug_hit: false,
+        section_hit: false,
+        body_only: false,
+        fuzzy_only: false,
+        query_term_coverage: 1,
+      },
+      match_reasons: [],
+      ...over,
+    };
+  }
+
+  it("zero results → confidence 'none' and abstain", () => {
+    const sig = evaluateRetrievalSignal([]);
+    expect(sig.confidence).toBe("none");
+    expect(sig.abstain_recommended).toBe(true);
+    expect(sig.evidence_sufficient).toBe(false);
+    expect(sig.low_confidence).toBe(true);
+  });
+
+  it("strong title/tag/slug anchor with full coverage → 'high'", () => {
+    const sig = evaluateRetrievalSignal([
+      mkResult({
+        path: "a.md", score: 10,
+        match_quality: {
+          title_hit: true, tag_hit: true, slug_hit: false,
+          section_hit: false, body_only: false, fuzzy_only: false,
+          query_term_coverage: 1.0,
+        },
+      }),
+      mkResult({ path: "b.md", score: 2 }),
+    ]);
+    expect(sig.confidence).toBe("high");
+    expect(sig.evidence_sufficient).toBe(true);
+    expect(sig.abstain_recommended).toBe(false);
+  });
+
+  it("body-only top result → 'low' and abstain", () => {
+    const sig = evaluateRetrievalSignal([
+      mkResult({
+        path: "a.md", score: 3,
+        match_quality: {
+          title_hit: false, tag_hit: false, slug_hit: false,
+          section_hit: false, body_only: true, fuzzy_only: false,
+          query_term_coverage: 1.0,
+        },
+      }),
+    ]);
+    expect(sig.confidence).toBe("low");
+    expect(sig.abstain_recommended).toBe(true);
+    expect(sig.evidence_sufficient).toBe(false);
+    expect(sig.reason).toMatch(/body-only/i);
+  });
+
+  it("fuzzy-only top result → 'low' and abstain", () => {
+    const sig = evaluateRetrievalSignal([
+      mkResult({
+        path: "a.md", score: 3,
+        match_quality: {
+          title_hit: true, tag_hit: false, slug_hit: false,
+          section_hit: false, body_only: false, fuzzy_only: true,
+          query_term_coverage: 1.0,
+        },
+      }),
+    ]);
+    expect(sig.confidence).toBe("low");
+    expect(sig.abstain_recommended).toBe(true);
+    expect(sig.reason).toMatch(/fuzzy/i);
+  });
+
+  it("section_hit only (no title/tag/slug) → 'medium'", () => {
+    const sig = evaluateRetrievalSignal([
+      mkResult({
+        path: "a.md", score: 5,
+        match_quality: {
+          title_hit: false, tag_hit: false, slug_hit: false,
+          section_hit: true, body_only: false, fuzzy_only: false,
+          query_term_coverage: 1.0,
+        },
+      }),
+      mkResult({ path: "b.md", score: 1 }),
+    ]);
+    expect(sig.confidence).toBe("medium");
+    expect(sig.evidence_sufficient).toBe(false);
+    expect(sig.abstain_recommended).toBe(false);
+  });
+
+  it("tightly clustered top results (no clear leader) demote 'high' → 'medium'", () => {
+    const strong = {
+      title_hit: true, tag_hit: false, slug_hit: false,
+      section_hit: false, body_only: false, fuzzy_only: false,
+      query_term_coverage: 1.0,
+    };
+    const sig = evaluateRetrievalSignal([
+      mkResult({ path: "a.md", score: 10, match_quality: strong }),
+      mkResult({ path: "b.md", score: 9.5, match_quality: strong }),
+    ]);
+    expect(sig.confidence).toBe("medium");
+    expect(sig.reason).toMatch(/outrank/i);
+  });
+
+  it("low query_term_coverage on body-only match triggers 'low'", () => {
+    const sig = evaluateRetrievalSignal([
+      mkResult({
+        path: "a.md", score: 2,
+        match_quality: {
+          title_hit: false, tag_hit: false, slug_hit: false,
+          section_hit: false, body_only: true, fuzzy_only: false,
+          query_term_coverage: 0.25,
+        },
+      }),
+    ]);
+    expect(sig.confidence).toBe("low");
+    expect(sig.reason).toMatch(/25%/);
   });
 });

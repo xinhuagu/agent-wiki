@@ -1,6 +1,6 @@
 {
   "name": "@agent-wiki/graph-viewer",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Realtime 3D knowledge graph viewer for agent-wiki. Standalone — zero runtime dependency on core.",
   "type": "module",
   "bin": {

@@ -234,6 +234,29 @@ function applyGraph(g) {
   }
 
   const visible = new Set(g.nodes.filter(matchesFilter).map((n) => n.id));
+
+  // When hiding orphans, cascade: nodes whose only connections were to orphans
+  // become visually isolated after orphan removal — hide them too.
+  if (hideOrphansEl.checked) {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const connected = new Set();
+      for (const e of g.edges) {
+        if (visible.has(e.source) && visible.has(e.target)) {
+          connected.add(e.source);
+          connected.add(e.target);
+        }
+      }
+      const toRemove = [];
+      for (const id of visible) {
+        if (!connected.has(id)) toRemove.push(id);
+      }
+      for (const id of toRemove) visible.delete(id);
+      if (toRemove.length) changed = true;
+    }
+  }
+
   const nodes = g.nodes.filter((n) => visible.has(n.id));
   const links = g.edges
     .filter((e) => visible.has(e.source) && visible.has(e.target))

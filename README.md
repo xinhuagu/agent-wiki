@@ -6,8 +6,7 @@ Instead of retrieving raw fragments every query (RAG), your agent compiles, refi
 
 Works with Claude Code, Cursor, Windsurf, and any MCP client. Also installable as a native skill for Claude Code. No LLM built in — your agent IS the intelligence.
 
-[![npm core](https://img.shields.io/npm/v/@agent-wiki/mcp-server?label=%40agent-wiki%2Fmcp-server)](https://www.npmjs.com/package/@agent-wiki/mcp-server)
-[![npm graph](https://img.shields.io/npm/v/@agent-wiki/graph-viewer?label=%40agent-wiki%2Fgraph-viewer)](https://www.npmjs.com/package/@agent-wiki/graph-viewer)
+[![npm](https://img.shields.io/npm/v/@agent-wiki/mcp-server?label=%40agent-wiki%2Fmcp-server)](https://www.npmjs.com/package/@agent-wiki/mcp-server)
 [![CI](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/protocol-MCP-blue)](https://modelcontextprotocol.io)
@@ -15,7 +14,7 @@ Works with Claude Code, Cursor, Windsurf, and any MCP client. Also installable a
 
 ### agent-wiki's built-in 3D graph view
 
-Pages as nodes, `[[wikilinks]]` as edges, edits push live. Optional companion — see [Option D](#option-d-3d-graph-viewer-optional-companion).
+Pages as nodes, `[[wikilinks]]` as edges, edits push live — included in the main package.
 
 <p align="center">
   <img src="docs/graph-1.gif" alt="agent-wiki realtime 3D knowledge graph viewer — live-updating force-directed graph of Markdown pages and [[wikilinks]]" width="900" />
@@ -53,24 +52,16 @@ agent-wiki install claude-code
 npx @agent-wiki/mcp-server call wiki_search '{"query": "deployment"}'
 ```
 
-### Option D: 3D Graph Viewer (optional companion)
+### Option D: 3D Graph Viewer
 
-See your wiki as a realtime 3D knowledge graph — edits push live via SSE.
+See your wiki as a realtime 3D knowledge graph — edits push live via SSE. Included in the main package, no separate install needed.
 
 ```bash
-# Install core + graph, then launch with one command
-npm install -g @agent-wiki/mcp-server @agent-wiki/graph-viewer
+npm install -g @agent-wiki/mcp-server
 agent-wiki web --wiki-path ./wiki --open
-
-# Or zero-install
-npx @agent-wiki/graph-viewer --wiki-path ./wiki --open
 ```
 
-The graph viewer is a **separate, optional package** published as
-[`@agent-wiki/graph-viewer`](https://www.npmjs.com/package/@agent-wiki/graph-viewer).
-Core agent-wiki has **zero dependency** on it — install only if you want the
-visualization, remove any time. Heavy browser libs (3d-force-graph, three.js)
-load from a CDN and never ship with the core MCP server. See
+Heavy browser libs (3d-force-graph, three.js) load from a CDN at runtime. See
 [graph-viewer/README.md](graph-viewer/README.md) for the full feature list and
 interaction guide.
 
@@ -107,7 +98,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **COBOL Code Analysis** | AST parser with variable tracing, call graph generation, and auto wiki pages |
 | **Skill Install** | One-command install as native skill for Claude Code and compatible clients |
 | **Git-Native** | Plain Markdown — diffable, blameable, revertable |
-| **3D Graph Viewer** | Optional companion `@agent-wiki/graph-viewer` — realtime 3D graph of pages and `[[wikilinks]]`, edits push live over SSE. Zero coupling with core. |
+| **3D Graph Viewer** | Built-in — realtime 3D graph of pages and `[[wikilinks]]`, edits push live over SSE. Run `agent-wiki web`. |
 
 ## Architecture
 
@@ -140,7 +131,7 @@ Three immutability layers, inspired by how compilers work:
 | **MCP Server** | Cursor, Windsurf, Claude Desktop, any MCP client | Add to `.mcp.json` |
 | **Native Skill** | Claude Code (native plugin) | `agent-wiki install claude-code` |
 | **CLI** | Any agent with shell access | `agent-wiki call <tool> '{json}'` |
-| **3D Graph Viewer** | Visual exploration of the whole wiki | `npm i -g @agent-wiki/graph-viewer` then `agent-wiki web -w ./wiki` |
+| **3D Graph Viewer** | Visual exploration of the whole wiki | `agent-wiki web -w ./wiki` |
 
 ## Hybrid Search Setup
 

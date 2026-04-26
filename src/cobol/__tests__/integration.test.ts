@@ -159,4 +159,99 @@ describe("COBOL MCP tools integration", () => {
     const missingMeta = verifyResults.filter((r) => r.status === "missing-meta");
     expect(missingMeta).toEqual([]);
   });
+
+  describe("deferred graph rebuild (O(N) batch path)", () => {
+    it("skipGraphRebuild prevents knowledge-graph.json and system-map.md generation", async () => {
+      const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+      wiki.rawAdd("PAYROLL.cbl", { content: source });
+
+      // Parse with graph rebuild skipped
+      const result = await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" }, { skipGraphRebuild: true });
+      const parsed = JSON.parse(result as string);
+
+      // Core parse artifacts still written
+      expect(parsed.artifacts).toContain("raw/parsed/cobol/PAYROLL.model.json");
+      expect(existsSync(join(tmp, "raw", "parsed", "cobol", "PAYROLL.model.json"))).toBe(true);
+
+      // Graph artifacts NOT written
+      expect(parsed.artifacts).not.toContain("raw/parsed/cobol/knowledge-graph.json");
+      expect(parsed.knowledgeGraph).toBeUndefined();
+      expect(existsSync(join(tmp, "raw", "parsed", "cobol", "knowledge-graph.json"))).toBe(false);
+      expect(parsed.wikiPages).not.toContain("cobol/system-map.md");
+    });
+
+    it("batch code_parse defers graph rebuild to end — single rebuild for N files", async () => {
+      const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+      const invoiceSrc = readFileSync(join(FIXTURES, "INVOICE.cbl"), "utf-8");
+      const dateUtilsSrc = readFileSync(join(FIXTURES, "DATE-UTILS.cpy"), "utf-8");
+      wiki.rawAdd("PAYROLL.cbl", { content: payrollSrc });
+      wiki.rawAdd("INVOICE.cbl", { content: invoiceSrc });
+      wiki.rawAdd("DATE-UTILS.cpy", { content: dateUtilsSrc });
+
+      // Batch parse all three — graph rebuild deferred to end
+      const result = await handleTool(wiki, "batch", {
+        operations: [
+          { tool: "code_parse", args: { path: "PAYROLL.cbl" } },
+          { tool: "code_parse", args: { path: "INVOICE.cbl" } },
+          { tool: "code_parse", args: { path: "DATE-UTILS.cpy" } },
+        ],
+      });
+      const batch = JSON.parse(result as string);
+
+      // All 3 parses succeeded
+      expect(batch.count).toBe(3);
+      for (const r of batch.results) {
+        expect(r.error).toBeUndefined();
+      }
+
+      // Per-parse results should NOT include graph artifacts (deferred)
+      for (const r of batch.results) {
+        expect(r.result.knowledgeGraph).toBeUndefined();
+        expect(r.result.artifacts).not.toContain("raw/parsed/cobol/knowledge-graph.json");
+      }
+
+      // But the deferred rebuild at end of batch should have produced the graph
+      const graphPath = join(tmp, "raw", "parsed", "cobol", "knowledge-graph.json");
+      expect(existsSync(graphPath)).toBe(true);
+      const graph = JSON.parse(readFileSync(graphPath, "utf-8"));
+
+      // Graph contains all 3 parsed files
+      const nodeIds = graph.nodes.map((n: { id: string }) => n.id);
+      expect(nodeIds).toContain("program:PAYROLL");
+      expect(nodeIds).toContain("program:INVOICE");
+      expect(nodeIds).toContain("copybook:DATE-UTILS");
+
+      // System map wiki page exists
+      const systemMap = join(tmp, "wiki", "cobol", "system-map.md");
+      expect(existsSync(systemMap)).toBe(true);
+    });
+
+    it("wiki_rebuild regenerates knowledge graph from existing parsed artifacts", async () => {
+      const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+      const invoiceSrc = readFileSync(join(FIXTURES, "INVOICE.cbl"), "utf-8");
+      wiki.rawAdd("PAYROLL.cbl", { content: payrollSrc });
+      wiki.rawAdd("INVOICE.cbl", { content: invoiceSrc });
+
+      // Parse both with graph rebuild skipped
+      await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" }, { skipGraphRebuild: true });
+      await handleTool(wiki, "code_parse", { path: "INVOICE.cbl" }, { skipGraphRebuild: true });
+
+      // No graph yet
+      const graphPath = join(tmp, "raw", "parsed", "cobol", "knowledge-graph.json");
+      expect(existsSync(graphPath)).toBe(false);
+
+      // Explicit wiki_rebuild triggers graph generation
+      const rebuildResult = await handleTool(wiki, "wiki_rebuild", {});
+      const rebuildParsed = JSON.parse(rebuildResult as string);
+      expect(rebuildParsed.ok).toBe(true);
+      expect(rebuildParsed.message).toContain("Knowledge graph");
+
+      // Graph now exists with both programs
+      expect(existsSync(graphPath)).toBe(true);
+      const graph = JSON.parse(readFileSync(graphPath, "utf-8"));
+      const nodeIds = graph.nodes.map((n: { id: string }) => n.id);
+      expect(nodeIds).toContain("program:PAYROLL");
+      expect(nodeIds).toContain("program:INVOICE");
+    });
+  });
 });

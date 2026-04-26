@@ -43,7 +43,21 @@ export interface GraphNode {
   id: string;
   /** Node type */
   kind: NodeKind;
-  /** Source file this node was extracted from */
+  /**
+   * Whether this node was backed by a parsed source artifact.
+   *
+   * - `true`  — created from a parsed source file (has sourceFile + metadata).
+   * - `false` — placeholder created from a CALL/COPY/EXEC reference whose
+   *             target was never parsed.  Downstream consumers MUST treat
+   *             unresolved nodes as uncertain — they represent references,
+   *             not verified artifacts.
+   *
+   * Defaults to `false` when omitted (placeholder semantics).
+   * The builder promotes a placeholder to resolved when a source-backed
+   * addNode() call supplies the same id with `resolved: true`.
+   */
+  resolved?: boolean;
+  /** Source file this node was extracted from (undefined for placeholders) */
   sourceFile?: string;
   /** Additional metadata (language, division count, etc.) */
   metadata?: Record<string, unknown>;
@@ -102,6 +116,8 @@ export class KnowledgeGraphBuilder {
   // ---- nodes --------------------------------------------------------------
 
   addNode(node: GraphNode): this {
+    // Default resolved to false (placeholder) when omitted
+    const resolved = node.resolved ?? false;
     const existing = this.nodes.get(node.id);
     if (existing) {
       // Merge metadata — don't overwrite, extend
@@ -109,8 +125,13 @@ export class KnowledgeGraphBuilder {
       if (node.sourceFile && !existing.sourceFile) {
         existing.sourceFile = node.sourceFile;
       }
+      // Promote: if the new node is resolved, upgrade the existing one.
+      // A placeholder (resolved=false) that later gets parsed becomes resolved.
+      if (resolved && !existing.resolved) {
+        existing.resolved = true;
+      }
     } else {
-      this.nodes.set(node.id, { ...node });
+      this.nodes.set(node.id, { ...node, resolved });
     }
     return this;
   }
@@ -224,12 +245,87 @@ export class KnowledgeGraphBuilder {
       }
     }
 
+    // Validate: surface unresolved nodes as diagnostics.
+    // Nodes with resolved=false were created as placeholders from CALL/COPY
+    // targets that were never backed by a parsed source file.  Collect the
+    // referencing edges so the diagnostic carries provenance.
+    for (const [id, node] of this.nodes) {
+      if (!node.resolved) {
+        const referencingEdges = this.edges.filter((e) => e.to === id);
+        const referrers = referencingEdges.map((e) => e.from).join(", ");
+        const firstRef = referencingEdges[0];
+        this.diagnostics.push({
+          severity: "warning",
+          message: `Unresolved ${node.kind} "${id}" — referenced by [${referrers}] but never parsed from source`,
+          sourceFile: firstRef?.evidence.sourceFile,
+          line: firstRef?.evidence.line,
+        });
+      }
+    }
+
     return {
       nodes: new Map(this.nodes),
       edges: [...this.edges],
       diagnostics: [...this.diagnostics],
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Canonical ID resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip COBOL source file extensions to produce the logical name.
+ *
+ * Design decision: the canonical node id for any COBOL artifact is its
+ * **logical name without file extension**.  This matches how COBOL itself
+ * resolves references — `COPY DATE-UTILS` refers to the logical name, not
+ * a filename.  By normalising here we guarantee that:
+ *
+ *   1. A parsed copybook (DATE-UTILS.cpy → "DATE-UTILS") and a COPY
+ *      reference (COPY DATE-UTILS → "DATE-UTILS") resolve to the SAME node.
+ *   2. Programs with a PROGRAM-ID always use that id (already extension-free).
+ *   3. Programs whose PROGRAM-ID is missing fall back to the filename
+ *      stripped of its extension, consistent with copybook handling.
+ *
+ * Supported extensions: .cbl, .cob, .cpy (case-insensitive).
+ */
+export function stripSourceExtension(filename: string): string {
+  return filename.replace(/\.(cpy|cbl|cob)$/i, "");
+}
+
+/**
+ * Compute the canonical graph node id for a COBOL code model.
+ *
+ * - If programId is set (normal .cbl with PROGRAM-ID): use it as-is.
+ * - Otherwise (standalone copybook, or .cbl missing PROGRAM-ID): strip
+ *   the file extension from sourceFile to get the logical name.
+ */
+export function resolveCanonicalId(model: { programId: string; sourceFile: string }): string {
+  return model.programId || stripSourceExtension(model.sourceFile);
+}
+
+/**
+ * Build a namespaced canonical node ID.
+ *
+ * Format: `kind:LOGICAL-NAME` (lowercase kind prefix).
+ * Examples: "program:PAYROLL", "copybook:DATE-UTILS", "dataset:EMP-FILE"
+ *
+ * Prevents identity collisions between node kinds that share a logical name
+ * and makes the kind immediately visible in serialized/displayed graphs.
+ */
+export function canonicalNodeId(kind: NodeKind, logicalName: string): string {
+  return `${kind.toLowerCase()}:${logicalName}`;
+}
+
+/**
+ * Extract the display label (logical name without kind prefix) from a
+ * canonical node ID.  Returns the input unchanged if no prefix is present.
+ */
+export function displayLabel(canonicalId: string): string {
+  const i = canonicalId.indexOf(":");
+  return i >= 0 ? canonicalId.substring(i + 1) : canonicalId;
 }
 
 // ---------------------------------------------------------------------------
@@ -247,13 +343,16 @@ export function populateGraphFromCobol(
   models: CobolCodeModel[],
 ): void {
   for (const model of models) {
-    const programId = model.programId || model.sourceFile;
-    const isCopybook = model.sourceFile.toLowerCase().endsWith(".cpy");
+    const logicalName = resolveCanonicalId(model);
+    const isCpy = model.sourceFile.toLowerCase().endsWith(".cpy");
+    const nodeKind: NodeKind = isCpy ? "Copybook" : "Program";
+    const nodeId = canonicalNodeId(nodeKind, logicalName);
 
-    // Add program/copybook node
+    // Add program/copybook node — resolved: true because we parsed the source
     builder.addNode({
-      id: programId,
-      kind: isCopybook ? "Copybook" : "Program",
+      id: nodeId,
+      kind: nodeKind,
+      resolved: true,
       sourceFile: model.sourceFile,
       metadata: {
         divisions: model.divisions.map((d) => d.name),
@@ -268,15 +367,16 @@ export function populateGraphFromCobol(
       const target = call.target;
       const isDynamic = !target.match(/^[A-Z0-9][-A-Z0-9]*$/i) || target.startsWith("WS-");
       const confidence: ConfidenceLevel = isDynamic ? "inferred-high" : "deterministic";
+      const targetId = canonicalNodeId("Program", target);
 
-      // Ensure target node exists (may be unresolved)
-      if (!builder.hasNode(target)) {
-        builder.addNode({ id: target, kind: "Program" });
+      // Ensure target node exists — placeholder (resolved=false) until its source is parsed
+      if (!builder.hasNode(targetId)) {
+        builder.addNode({ id: targetId, kind: "Program", resolved: false });
       }
 
       builder.addEdge({
-        from: programId,
-        to: target,
+        from: nodeId,
+        to: targetId,
         kind: "CALLS",
         confidence,
         evidence: {
@@ -292,14 +392,16 @@ export function populateGraphFromCobol(
 
     // COPY edges → COPIES
     for (const copy of model.copies) {
-      // Ensure copybook node exists
-      if (!builder.hasNode(copy.copybook)) {
-        builder.addNode({ id: copy.copybook, kind: "Copybook" });
+      const copybookId = canonicalNodeId("Copybook", copy.copybook);
+
+      // Ensure copybook node exists — placeholder (resolved=false) until its source is parsed
+      if (!builder.hasNode(copybookId)) {
+        builder.addNode({ id: copybookId, kind: "Copybook", resolved: false });
       }
 
       builder.addEdge({
-        from: programId,
-        to: copy.copybook,
+        from: nodeId,
+        to: copybookId,
         kind: "COPIES",
         confidence: "deterministic",
         evidence: {
@@ -313,17 +415,20 @@ export function populateGraphFromCobol(
 
     // File definitions → Dataset nodes + READS_WRITES edges
     for (const fd of model.fileDefinitions) {
-      if (!builder.hasNode(fd.fd)) {
+      const datasetId = canonicalNodeId("Dataset", fd.fd);
+
+      if (!builder.hasNode(datasetId)) {
         builder.addNode({
-          id: fd.fd,
+          id: datasetId,
           kind: "Dataset",
+          resolved: false,
           metadata: { recordName: fd.recordName },
         });
       }
 
       builder.addEdge({
-        from: programId,
-        to: fd.fd,
+        from: nodeId,
+        to: datasetId,
         kind: "READS_WRITES",
         confidence: "deterministic",
         evidence: {
@@ -385,11 +490,12 @@ export function toMermaid(graph: KnowledgeGraph): string {
   // Node declarations
   for (const [id, node] of graph.nodes) {
     const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const shape = node.kind === "Program" ? `[${id}]`
-      : node.kind === "Copybook" ? `([${id}])`
-      : node.kind === "Dataset" ? `[(${id})]`
-      : node.kind === "Job" ? `{{${id}}}`
-      : `(${id})`;
+    const label = displayLabel(id);
+    const shape = node.kind === "Program" ? `[${label}]`
+      : node.kind === "Copybook" ? `([${label}])`
+      : node.kind === "Dataset" ? `[(${label})]`
+      : node.kind === "Job" ? `{{${label}}}`
+      : `(${label})`;
     lines.push(`  ${safeId}${shape}`);
   }
 
@@ -441,9 +547,10 @@ export function toDot(graph: KnowledgeGraph): string {
   // Nodes
   for (const [id, node] of graph.nodes) {
     const safeId = `"${id}"`;
+    const label = displayLabel(id);
     const shape = shapes[node.kind] || "box";
     const color = colors[node.kind] || "#ccc";
-    lines.push(`  ${safeId} [shape=${shape}, style=filled, fillcolor="${color}", label="${id}"];`);
+    lines.push(`  ${safeId} [shape=${shape}, style=filled, fillcolor="${color}", label="${label}"];`);
   }
 
   // Edges

@@ -163,6 +163,16 @@ export interface CodeAnalysisPlugin {
    * Return null to skip.
    */
   rebuildAggregatePages?(parsedDir: string): Array<{ path: string; content: string }>;
+  /**
+   * Optional: build a cross-file knowledge graph from all previously parsed
+   * models.  Returns a serialised graph (persisted as JSON artifact) and any
+   * wiki pages derived from it (e.g. system-map, diagnostics).
+   * Called after each code_parse with the raw/parsed/<lang>/ directory path.
+   */
+  buildKnowledgeGraph?(parsedDir: string): {
+    serialized: unknown;
+    wikiPages: Array<{ path: string; content: string }>;
+  } | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -201,6 +201,22 @@ describe("populateGraphFromCobol", () => {
     expect(ds.kind).toBe("Dataset");
   });
 
+  it("FD-backed Dataset nodes are resolved and emit no diagnostics", () => {
+    const builder = new KnowledgeGraphBuilder();
+    populateGraphFromCobol(builder, [modelFor("PAYROLL.cbl")]);
+    const graph = builder.build();
+
+    // FD EMPLOYEE-FILE is extracted from parsed source → must be resolved
+    const ds = graph.nodes.get("dataset:EMPLOYEE-FILE")!;
+    expect(ds.resolved).toBe(true);
+
+    // No unresolved-target diagnostic for FD-backed datasets
+    const datasetDiags = graph.diagnostics.filter((d) =>
+      d.message.toLowerCase().includes("employee-file")
+    );
+    expect(datasetDiags).toHaveLength(0);
+  });
+
   it("creates Copybook node with canonical namespaced ID (no extension)", () => {
     const builder = new KnowledgeGraphBuilder();
     populateGraphFromCobol(builder, [modelFor("DATE-UTILS.cpy")]);

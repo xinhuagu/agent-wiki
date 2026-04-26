@@ -421,9 +421,15 @@ export function populateGraphFromCobol(
         builder.addNode({
           id: datasetId,
           kind: "Dataset",
-          resolved: false,
+          resolved: true, // FD-backed: extracted from parsed source
           metadata: { recordName: fd.recordName },
         });
+      } else {
+        // Promote to resolved if previously created as placeholder
+        const existing = builder.getNode(datasetId);
+        if (existing && !existing.resolved) {
+          existing.resolved = true;
+        }
       }
 
       builder.addEdge({

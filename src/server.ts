@@ -1357,15 +1357,10 @@ export async function handleTool(
     // wiki_schemas removed — merged into wiki_config
 
     case "wiki_rebuild": {
-      // Read all pages once into cache — avoids double I/O on slow filesystems
-      // (e.g. OneDrive cloud storage where each readFileSync has network latency).
-      const pageCache = wiki.buildPageCache();
-      wiki.rebuildIndex(pageCache);
-      // Yield event loop so MCP transport can respond to client pings.
-      await new Promise((r) => setImmediate(r));
-      wiki.rebuildTimeline(pageCache);
-
-      // Rebuild code knowledge graphs for all registered plugins
+      // Rebuild code knowledge graphs for all registered plugins FIRST,
+      // so that generated pages (system-map.md, call-graph.md) are included
+      // in the index and timeline built afterwards.  This matches the batch
+      // handler ordering (graph pages → index/timeline).
       let graphStats: { plugins: number; nodes: number; edges: number } | undefined;
       for (const plugin of listPlugins()) {
         const parsedDir = join(wiki.config.rawDir, "parsed", plugin.id);
@@ -1396,6 +1391,14 @@ export async function handleTool(
           }
         }
       }
+
+      // Now build page cache AFTER graph pages are written, so they are
+      // included in the index and timeline.
+      const pageCache = wiki.buildPageCache();
+      wiki.rebuildIndex(pageCache);
+      // Yield event loop so MCP transport can respond to client pings.
+      await new Promise((r) => setImmediate(r));
+      wiki.rebuildTimeline(pageCache);
 
       // Rebuild vector index if hybrid search is enabled
       let vectorStats: { pagesProcessed: number; errors: number } | undefined;
@@ -1857,6 +1860,7 @@ export async function handleTool(
           if (GRAPH_REBUILD_TOOLS.has(op.tool)) {
             needsGraphRebuild = true;
             needsRebuild = true; // graph pages are wiki pages
+            needsTimeline = true; // graph pages have timestamps → must appear in timeline
           }
 
           if (typeof result === "string") {

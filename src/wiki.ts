@@ -20,7 +20,7 @@
  *   - Knowledge compounds: every write improves the whole
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, rmdirSync, statSync, copyFileSync, createWriteStream } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, rmdirSync, statSync, copyFileSync, createWriteStream, appendFileSync } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { join, relative, resolve, basename, extname, dirname } from "node:path";
@@ -818,6 +818,13 @@ _Chronological view of all knowledge in this wiki._
       }
     }
     return docs;
+  }
+
+  /** Fast count of raw files (skips YAML/meta parsing — O(readdir) only).
+   *  Used by rebuildIndex where only the count is needed. */
+  rawCount(): number {
+    if (!existsSync(this.config.rawDir)) return 0;
+    return countNonMetaFiles(this.config.rawDir);
   }
 
   /** Report which raw/ files are not yet referenced by any wiki page.
@@ -2345,16 +2352,19 @@ _Chronological view of all knowledge in this wiki._
   }
 
   rebuildIndex(pageCache?: Map<string, WikiPage>): void {
-    const pages = pageCache
-      ? [...pageCache.keys()]
-      : this.listAllPages().filter((p) => !isSystemPage(p));
+    // Single listAllPages() call — reused for both content pages and stale sub-index cleanup
+    const allPages = pageCache
+      ? [...pageCache.keys(), ...this.listAllPages().filter((p) => isSystemPage(p))]
+      : this.listAllPages();
+    const pages = allPages.filter((p) => !isSystemPage(p));
     let rawCount = 0;
     try {
-      rawCount = this.rawList().length;
+      rawCount = this.rawCount();
     } catch { /* no raw dir */ }
 
     // Collect existing sub-indexes before rebuild so we can remove stale ones
-    const existingSubIndexes = this.listAllPages()
+    // (uses allPages from above — no extra listAllPages() traversal)
+    const existingSubIndexes = allPages
       .filter((p) => p !== "index.md" && p.endsWith("/index.md"));
 
     // Compute the set of sub-indexes that should exist based on current pages
@@ -2679,8 +2689,8 @@ _Chronological view of all knowledge in this wiki._
     const entry = `| ${now} | ${operation} | ${page} | ${summary} |\n`;
 
     if (existsSync(logPath)) {
-      const content = readFileSync(logPath, "utf-8");
-      writeFileSync(logPath, content + entry);
+      // Append-only — O(1) instead of O(file-size) read+write
+      appendFileSync(logPath, entry);
     } else {
       const header =
         "---\ntitle: Operation Log\ntype: log\n---\n\n" +
@@ -2723,6 +2733,21 @@ function listAllFiles(dir: string, root: string): string[] {
     }
   }
   return result.sort();
+}
+
+/** Recursively count files excluding .meta.yaml sidecars (fast — no stat/read). */
+function countNonMetaFiles(dir: string): number {
+  let count = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      count += countNonMetaFiles(full);
+    } else if (!entry.name.endsWith(".meta.yaml")) {
+      count++;
+    }
+  }
+  return count;
 }
 
 function formatBytes(bytes: number): string {

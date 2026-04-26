@@ -13,6 +13,7 @@ import { traceVariable as cobolTraceVariable } from "./variable-tracer.js";
 import { generateProgramPage, generateCopybookPage, generateCallGraphPage } from "./wiki-gen.js";
 import type { CobolAST, DataItemNode } from "./types.js";
 import type { CobolCodeModel } from "./extractors.js";
+import { resolveCanonicalId, canonicalNodeId } from "./graph.js";
 import type {
   CodeAnalysisPlugin,
   NormalizedCodeModel,
@@ -57,8 +58,9 @@ function flattenDataItems(items: DataItemNode[], parent?: string): CodeSymbol[] 
 // ---------------------------------------------------------------------------
 
 function cobolToNormalized(cobolModel: CobolCodeModel): NormalizedCodeModel {
+  const canonicalId = resolveCanonicalId(cobolModel);
   const units: CodeUnit[] = [{
-    name: cobolModel.programId || cobolModel.sourceFile,
+    name: canonicalId,
     kind: isCopybook(cobolModel.sourceFile) ? "copybook" : "program",
     language: "COBOL",
     sourceFile: cobolModel.sourceFile,
@@ -106,7 +108,7 @@ function cobolToNormalized(cobolModel: CobolCodeModel): NormalizedCodeModel {
   for (const c of cobolModel.copies) {
     relations.push({
       type: "include",
-      from: cobolModel.programId || cobolModel.sourceFile,
+      from: canonicalId,
       to: c.copybook,
       loc: c.loc,
       metadata: c.replacing ? { replacing: c.replacing } : undefined,

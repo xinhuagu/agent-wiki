@@ -13,7 +13,16 @@ import { traceVariable as cobolTraceVariable } from "./variable-tracer.js";
 import { generateProgramPage, generateCopybookPage, generateCallGraphPage } from "./wiki-gen.js";
 import type { CobolAST, DataItemNode } from "./types.js";
 import type { CobolCodeModel } from "./extractors.js";
-import { resolveCanonicalId, canonicalNodeId } from "./graph.js";
+import {
+  resolveCanonicalId,
+  canonicalNodeId,
+  KnowledgeGraphBuilder,
+  populateGraphFromCobol,
+  serializeGraph,
+  toMermaid,
+  displayLabel,
+} from "./graph.js";
+import type { SerializedGraph, GraphNode } from "./graph.js";
 import type {
   CodeAnalysisPlugin,
   NormalizedCodeModel,
@@ -195,4 +204,174 @@ export const cobolPlugin: CodeAnalysisPlugin = {
     if (models.length === 0) return [];
     return [generateCallGraphPage(models)];
   },
+
+  buildKnowledgeGraph(parsedDir: string): {
+    serialized: SerializedGraph;
+    wikiPages: Array<{ path: string; content: string }>;
+  } | null {
+    if (!existsSync(parsedDir)) return null;
+    const models: CobolCodeModel[] = [];
+    for (const file of readdirSync(parsedDir)) {
+      if (!file.endsWith(".model.json")) continue;
+      try {
+        models.push(JSON.parse(readFileSync(join(parsedDir, file), "utf-8")));
+      } catch {
+        // Skip malformed files
+      }
+    }
+    if (models.length === 0) return null;
+
+    const builder = new KnowledgeGraphBuilder();
+    populateGraphFromCobol(builder, models);
+    const graph = builder.build();
+    const serialized = serializeGraph(graph);
+
+    // Generate system-map wiki page
+    const wikiPages: Array<{ path: string; content: string }> = [];
+    wikiPages.push(generateSystemMapPage(serialized));
+
+    return { serialized, wikiPages };
+  },
 };
+
+// ---------------------------------------------------------------------------
+// System map wiki page — generated from the knowledge graph
+// ---------------------------------------------------------------------------
+
+function generateSystemMapPage(graph: SerializedGraph): { path: string; content: string } {
+  const lines: string[] = [];
+
+  // Frontmatter
+  lines.push("---");
+  lines.push('title: "COBOL System Map"');
+  lines.push("type: synthesis");
+  lines.push("tags: [cobol, system-map, knowledge-graph]");
+  const sourceFiles = graph.nodes
+    .filter((n) => n.sourceFile)
+    .map((n) => `"raw/${n.sourceFile}"`);
+  lines.push(`sources: [${sourceFiles.join(", ")}]`);
+  lines.push("---");
+  lines.push("");
+
+  // Summary
+  const resolved = graph.nodes.filter((n) => n.resolved);
+  const unresolved = graph.nodes.filter((n) => !n.resolved);
+  const byKind = (nodes: typeof graph.nodes) => {
+    const m = new Map<string, number>();
+    for (const n of nodes) m.set(n.kind, (m.get(n.kind) ?? 0) + 1);
+    return m;
+  };
+
+  lines.push("## Overview");
+  lines.push("");
+  lines.push(`| Metric | Count |`);
+  lines.push(`|--------|-------|`);
+  lines.push(`| Total nodes | ${graph.nodes.length} |`);
+  lines.push(`| Resolved (source-backed) | ${resolved.length} |`);
+  lines.push(`| Unresolved (external references) | ${unresolved.length} |`);
+  lines.push(`| Edges | ${graph.edges.length} |`);
+  lines.push(`| Diagnostics | ${graph.diagnostics.length} |`);
+  lines.push("");
+
+  // Nodes by kind
+  const kindCounts = byKind(graph.nodes);
+  lines.push("## Nodes by Kind");
+  lines.push("");
+  lines.push("| Kind | Total | Resolved | Unresolved |");
+  lines.push("|------|-------|----------|------------|");
+  for (const kind of ["Program", "Copybook", "Dataset", "Job", "Step"]) {
+    const total = kindCounts.get(kind) ?? 0;
+    if (total === 0) continue;
+    const res = graph.nodes.filter((n) => n.kind === kind && n.resolved).length;
+    lines.push(`| ${kind} | ${total} | ${res} | ${total - res} |`);
+  }
+  lines.push("");
+
+  // Programs table
+  const programs = graph.nodes.filter((n) => n.kind === "Program");
+  if (programs.length > 0) {
+    lines.push("## Programs");
+    lines.push("");
+    lines.push("| Program | Source | Calls | Copies | Datasets | Status |");
+    lines.push("|---------|--------|-------|--------|----------|--------|");
+    for (const p of programs) {
+      const label = displayLabel(p.id);
+      const calls = graph.edges.filter((e) => e.from === p.id && e.kind === "CALLS").length;
+      const copies = graph.edges.filter((e) => e.from === p.id && e.kind === "COPIES").length;
+      const datasets = graph.edges.filter((e) => e.from === p.id && e.kind === "READS_WRITES").length;
+      const status = p.resolved ? "✅ resolved" : "⚠️ unresolved";
+      const source = p.sourceFile ?? "—";
+      lines.push(`| ${label} | ${source} | ${calls} | ${copies} | ${datasets} | ${status} |`);
+    }
+    lines.push("");
+  }
+
+  // Copybooks table
+  const copybooks = graph.nodes.filter((n) => n.kind === "Copybook");
+  if (copybooks.length > 0) {
+    lines.push("## Copybooks");
+    lines.push("");
+    lines.push("| Copybook | Used by | Status |");
+    lines.push("|----------|---------|--------|");
+    for (const c of copybooks) {
+      const label = displayLabel(c.id);
+      const usedBy = graph.edges
+        .filter((e) => e.to === c.id && e.kind === "COPIES")
+        .map((e) => displayLabel(e.from));
+      const status = c.resolved ? "✅ resolved" : "⚠️ unresolved";
+      lines.push(`| ${label} | ${usedBy.join(", ") || "—"} | ${status} |`);
+    }
+    lines.push("");
+  }
+
+  // Datasets table
+  const datasets = graph.nodes.filter((n) => n.kind === "Dataset");
+  if (datasets.length > 0) {
+    lines.push("## Datasets");
+    lines.push("");
+    lines.push("| Dataset | Accessed by | Status |");
+    lines.push("|---------|-------------|--------|");
+    for (const d of datasets) {
+      const label = displayLabel(d.id);
+      const accessedBy = graph.edges
+        .filter((e) => e.to === d.id && e.kind === "READS_WRITES")
+        .map((e) => displayLabel(e.from));
+      const status = d.resolved ? "✅ resolved" : "⚠️ unresolved";
+      lines.push(`| ${label} | ${accessedBy.join(", ") || "—"} | ${status} |`);
+    }
+    lines.push("");
+  }
+
+  // Confidence distribution
+  const confCounts = new Map<string, number>();
+  for (const e of graph.edges) {
+    confCounts.set(e.confidence, (confCounts.get(e.confidence) ?? 0) + 1);
+  }
+  if (graph.edges.length > 0) {
+    lines.push("## Edge Confidence");
+    lines.push("");
+    lines.push("| Confidence | Count |");
+    lines.push("|------------|-------|");
+    for (const level of ["deterministic", "inferred-high", "inferred-low"]) {
+      const count = confCounts.get(level) ?? 0;
+      if (count > 0) lines.push(`| ${level} | ${count} |`);
+    }
+    lines.push("");
+  }
+
+  // Diagnostics
+  if (graph.diagnostics.length > 0) {
+    lines.push("## Diagnostics");
+    lines.push("");
+    for (const d of graph.diagnostics) {
+      const loc = d.sourceFile ? ` (${d.sourceFile}${d.line ? `:${d.line}` : ""})` : "";
+      lines.push(`- **${d.severity}**: ${d.message}${loc}`);
+    }
+    lines.push("");
+  }
+
+  return {
+    path: "cobol/system-map.md",
+    content: lines.join("\n"),
+  };
+}

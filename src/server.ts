@@ -490,6 +490,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
         name: "wiki_rebuild",
         description:
           "Rebuild the index.md and timeline.md from all wiki pages. If topic subdirectories exist, generates per-topic sub-indexes and a top-level hub. Otherwise groups pages by type with counts and dates. " +
+          "Also rebuilds code knowledge graphs (call-graph, system-map, knowledge-graph.json) from all parsed artifacts. " +
           "When `search.hybrid: true` is enabled, also rebuilds the vector index (embeds all pages for semantic re-ranking). This downloads the embedding model (~90 MB) on first run.",
         inputSchema: {
           type: "object" as const,
@@ -784,6 +785,8 @@ function sanitizeTopic(raw: string): string {
 export interface HandleToolOpts {
   /** When true, wiki_write/wiki_delete skip rebuildIndex (batch rebuilds once at end). */
   skipRebuild?: boolean;
+  /** When true, code_parse skips aggregate + graph rebuild (batch rebuilds once at end). */
+  skipGraphRebuild?: boolean;
 }
 
 /**
@@ -1354,22 +1357,62 @@ export async function handleTool(
     // wiki_schemas removed — merged into wiki_config
 
     case "wiki_rebuild": {
-      // Read all pages once into cache — avoids double I/O on slow filesystems
-      // (e.g. OneDrive cloud storage where each readFileSync has network latency).
+      // Rebuild code knowledge graphs for all registered plugins FIRST,
+      // so that generated pages (system-map.md, call-graph.md) are included
+      // in the index and timeline built afterwards.  This matches the batch
+      // handler ordering (graph pages → index/timeline).
+      let graphStats: { plugins: number; nodes: number; edges: number } | undefined;
+      for (const plugin of listPlugins()) {
+        const parsedDir = join(wiki.config.rawDir, "parsed", plugin.id);
+        if (plugin.rebuildAggregatePages) {
+          for (const page of plugin.rebuildAggregatePages(parsedDir)) {
+            wiki.write(page.path, page.content);
+          }
+        }
+        if (plugin.buildKnowledgeGraph) {
+          const graphResult = plugin.buildKnowledgeGraph(parsedDir);
+          if (graphResult) {
+            wiki.rawAddParsedArtifact(
+              `parsed/${plugin.id}/knowledge-graph.json`,
+              JSON.stringify(graphResult.serialized, null, 2),
+            );
+            for (const page of graphResult.wikiPages) {
+              wiki.write(page.path, page.content);
+            }
+            const ser = graphResult.serialized as {
+              nodes?: unknown[];
+              edges?: unknown[];
+            };
+            graphStats = {
+              plugins: (graphStats?.plugins ?? 0) + 1,
+              nodes: ser.nodes?.length ?? 0,
+              edges: ser.edges?.length ?? 0,
+            };
+          }
+        }
+      }
+
+      // Now build page cache AFTER graph pages are written, so they are
+      // included in the index and timeline.
       const pageCache = wiki.buildPageCache();
       wiki.rebuildIndex(pageCache);
       // Yield event loop so MCP transport can respond to client pings.
       await new Promise((r) => setImmediate(r));
       wiki.rebuildTimeline(pageCache);
+
       // Rebuild vector index if hybrid search is enabled
       let vectorStats: { pagesProcessed: number; errors: number } | undefined;
       if (wiki.config.search.hybrid) {
         vectorStats = await wiki.rebuildVectorIndex().catch(() => undefined);
       }
-      const rebuildMsg = vectorStats
-        ? `Index and timeline rebuilt. Vector index: ${vectorStats.pagesProcessed} pages embedded${vectorStats.errors > 0 ? `, ${vectorStats.errors} errors` : ""}.`
-        : "Index and timeline rebuilt";
-      return JSON.stringify({ ok: true, message: rebuildMsg });
+      const parts: string[] = ["Index and timeline rebuilt"];
+      if (graphStats) {
+        parts.push(`Knowledge graph: ${graphStats.nodes} nodes, ${graphStats.edges} edges`);
+      }
+      if (vectorStats) {
+        parts.push(`Vector index: ${vectorStats.pagesProcessed} pages embedded${vectorStats.errors > 0 ? `, ${vectorStats.errors} errors` : ""}`);
+      }
+      return JSON.stringify({ ok: true, message: parts.join(". ") + "." });
     }
 
     // wiki_classify removed — wiki_write auto-classifies
@@ -1414,7 +1457,8 @@ export async function handleTool(
       }
 
       // Rebuild aggregate pages (e.g. call graph) from all parsed models
-      if (plugin.rebuildAggregatePages) {
+      // Skipped when called from batch — batch rebuilds once at end.
+      if (plugin.rebuildAggregatePages && !opts?.skipGraphRebuild) {
         const parsedDir = join(wiki.config.rawDir, "parsed", lang);
         const aggPages = plugin.rebuildAggregatePages(parsedDir);
         for (const page of aggPages) {
@@ -1439,6 +1483,35 @@ export async function handleTool(
         artifacts.push(`raw/parsed/${lang}/${stem}.model.json`);
       }
 
+      // Build knowledge graph from all parsed models
+      // Skipped when called from batch — batch rebuilds once at end.
+      let graphSummary: Record<string, unknown> | undefined;
+      if (plugin.buildKnowledgeGraph && !opts?.skipGraphRebuild) {
+        const parsedDir = join(wiki.config.rawDir, "parsed", lang);
+        const graphResult = plugin.buildKnowledgeGraph(parsedDir);
+        if (graphResult) {
+          wiki.rawAddParsedArtifact(
+            `parsed/${lang}/knowledge-graph.json`,
+            JSON.stringify(graphResult.serialized, null, 2),
+          );
+          artifacts.push(`raw/parsed/${lang}/knowledge-graph.json`);
+          for (const page of graphResult.wikiPages) {
+            wiki.write(page.path, page.content);
+            writtenPages.push(page.path);
+          }
+          const ser = graphResult.serialized as {
+            nodes?: unknown[];
+            edges?: unknown[];
+            diagnostics?: unknown[];
+          };
+          graphSummary = {
+            nodes: ser.nodes?.length ?? 0,
+            edges: ser.edges?.length ?? 0,
+            diagnostics: ser.diagnostics?.length ?? 0,
+          };
+        }
+      }
+
       const output: Record<string, unknown> = {
         summary,
         normalizedModel: {
@@ -1452,6 +1525,9 @@ export async function handleTool(
       };
       if (variableTrace) {
         output.variableTrace = variableTrace;
+      }
+      if (graphSummary) {
+        output.knowledgeGraph = graphSummary;
       }
       return JSON.stringify(output, null, 2);
     }
@@ -1747,8 +1823,11 @@ export async function handleTool(
 
       // Tools whose per-call rebuildIndex should be deferred to end of batch
       const REBUILD_TOOLS = new Set(["wiki_write", "wiki_delete"]);
+      // Tools whose per-call graph/aggregate rebuild should be deferred
+      const GRAPH_REBUILD_TOOLS = new Set(["code_parse"]);
       let needsRebuild = false;
       let needsTimeline = false;
+      let needsGraphRebuild = false;
 
       const results: Array<Record<string, unknown>> = [];
       for (const op of ops) {
@@ -1764,7 +1843,9 @@ export async function handleTool(
           continue;
         }
         try {
-          const opOpts: HandleToolOpts = REBUILD_TOOLS.has(op.tool) ? { skipRebuild: true } : {};
+          const opOpts: HandleToolOpts = {};
+          if (REBUILD_TOOLS.has(op.tool)) opOpts.skipRebuild = true;
+          if (GRAPH_REBUILD_TOOLS.has(op.tool)) opOpts.skipGraphRebuild = true;
           const result = await handleTool(wiki, op.tool, op.args ?? {}, opOpts);
 
           if (REBUILD_TOOLS.has(op.tool)) {
@@ -1775,6 +1856,11 @@ export async function handleTool(
               const parsed = JSON.parse(typeof result === "string" ? result : "{}");
               if (parsed.ok) needsRebuild = true;
             }
+          }
+          if (GRAPH_REBUILD_TOOLS.has(op.tool)) {
+            needsGraphRebuild = true;
+            needsRebuild = true; // graph pages are wiki pages
+            needsTimeline = true; // graph pages have timestamps → must appear in timeline
           }
 
           if (typeof result === "string") {
@@ -1789,6 +1875,30 @@ export async function handleTool(
           }
         } catch (err) {
           results.push({ tool: op.tool, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
+      // Deferred graph rebuild: run once at end of batch for all plugins that parsed files
+      if (needsGraphRebuild) {
+        for (const plugin of listPlugins()) {
+          const parsedDir = join(wiki.config.rawDir, "parsed", plugin.id);
+          if (plugin.rebuildAggregatePages) {
+            for (const page of plugin.rebuildAggregatePages(parsedDir)) {
+              wiki.write(page.path, page.content);
+            }
+          }
+          if (plugin.buildKnowledgeGraph) {
+            const graphResult = plugin.buildKnowledgeGraph(parsedDir);
+            if (graphResult) {
+              wiki.rawAddParsedArtifact(
+                `parsed/${plugin.id}/knowledge-graph.json`,
+                JSON.stringify(graphResult.serialized, null, 2),
+              );
+              for (const page of graphResult.wikiPages) {
+                wiki.write(page.path, page.content);
+              }
+            }
+          }
         }
       }
 

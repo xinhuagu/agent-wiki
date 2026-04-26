@@ -1439,6 +1439,34 @@ export async function handleTool(
         artifacts.push(`raw/parsed/${lang}/${stem}.model.json`);
       }
 
+      // Build knowledge graph from all parsed models
+      let graphSummary: Record<string, unknown> | undefined;
+      if (plugin.buildKnowledgeGraph) {
+        const parsedDir = join(wiki.config.rawDir, "parsed", lang);
+        const graphResult = plugin.buildKnowledgeGraph(parsedDir);
+        if (graphResult) {
+          wiki.rawAddParsedArtifact(
+            `parsed/${lang}/knowledge-graph.json`,
+            JSON.stringify(graphResult.serialized, null, 2),
+          );
+          artifacts.push(`raw/parsed/${lang}/knowledge-graph.json`);
+          for (const page of graphResult.wikiPages) {
+            wiki.write(page.path, page.content);
+            writtenPages.push(page.path);
+          }
+          const ser = graphResult.serialized as {
+            nodes?: unknown[];
+            edges?: unknown[];
+            diagnostics?: unknown[];
+          };
+          graphSummary = {
+            nodes: ser.nodes?.length ?? 0,
+            edges: ser.edges?.length ?? 0,
+            diagnostics: ser.diagnostics?.length ?? 0,
+          };
+        }
+      }
+
       const output: Record<string, unknown> = {
         summary,
         normalizedModel: {
@@ -1452,6 +1480,9 @@ export async function handleTool(
       };
       if (variableTrace) {
         output.variableTrace = variableTrace;
+      }
+      if (graphSummary) {
+        output.knowledgeGraph = graphSummary;
       }
       return JSON.stringify(output, null, 2);
     }

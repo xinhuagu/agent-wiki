@@ -253,5 +253,57 @@ describe("COBOL MCP tools integration", () => {
       expect(nodeIds).toContain("program:PAYROLL");
       expect(nodeIds).toContain("program:INVOICE");
     });
+
+    it("wiki_rebuild includes graph pages in index.md and timeline.md", async () => {
+      const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+      wiki.rawAdd("PAYROLL.cbl", { content: payrollSrc });
+
+      // Parse with graph rebuild skipped — no graph pages yet
+      await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" }, { skipGraphRebuild: true });
+      expect(existsSync(join(tmp, "wiki", "cobol", "system-map.md"))).toBe(false);
+      expect(existsSync(join(tmp, "wiki", "cobol", "call-graph.md"))).toBe(false);
+
+      // Single wiki_rebuild should generate graph pages AND include them in index/timeline
+      await handleTool(wiki, "wiki_rebuild", {});
+
+      // Graph pages exist
+      expect(existsSync(join(tmp, "wiki", "cobol", "system-map.md"))).toBe(true);
+      expect(existsSync(join(tmp, "wiki", "cobol", "call-graph.md"))).toBe(true);
+
+      // Graph pages are under cobol/, so they appear in the topic sub-index
+      const cobolIndex = readFileSync(join(tmp, "wiki", "cobol", "index.md"), "utf-8");
+      expect(cobolIndex).toContain("system-map");
+      expect(cobolIndex).toContain("call-graph");
+      // Top-level index should reference the cobol topic
+      const index = readFileSync(join(tmp, "wiki", "index.md"), "utf-8");
+      expect(index).toContain("cobol");
+
+      // Timeline includes the freshly generated graph pages
+      const timeline = readFileSync(join(tmp, "wiki", "timeline.md"), "utf-8");
+      expect(timeline).toContain("COBOL System Map");
+      expect(timeline).toContain("COBOL Call Graph");
+    });
+
+    it("batch code_parse rebuilds timeline with graph pages", async () => {
+      const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+      wiki.rawAdd("PAYROLL.cbl", { content: payrollSrc });
+
+      // Batch with a single code_parse — deferred graph rebuild should trigger timeline
+      const batchOps = [{ tool: "code_parse", args: { path: "PAYROLL.cbl" } }];
+      await handleTool(wiki, "batch", { operations: batchOps });
+
+      // Graph pages exist
+      expect(existsSync(join(tmp, "wiki", "cobol", "system-map.md"))).toBe(true);
+      expect(existsSync(join(tmp, "wiki", "cobol", "call-graph.md"))).toBe(true);
+
+      // Index includes graph pages
+      const index = readFileSync(join(tmp, "wiki", "index.md"), "utf-8");
+      expect(index).toContain("cobol");
+
+      // Timeline includes graph pages — this is the regression test
+      const timeline = readFileSync(join(tmp, "wiki", "timeline.md"), "utf-8");
+      expect(timeline).toContain("COBOL System Map");
+      expect(timeline).toContain("COBOL Call Graph");
+    });
   });
 });

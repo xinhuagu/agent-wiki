@@ -414,12 +414,80 @@ Adoption metrics:
 - add retrieval evidence and abstain signals for compiler-generated knowledge
 - build modernization-oriented summary pages and reports
 
-## Open Questions
+## Open Questions (Resolved)
 
-- should JCL live inside the COBOL plugin family or become its own plugin?
-- what is the minimum viable graph schema for cross-artifact impact analysis?
-- how should inferred relationships be labeled and scored?
-- when should summaries be generated automatically versus on demand?
+### 1. Should JCL live inside the COBOL plugin family or become its own plugin?
+
+**Decision: Independent plugin.**
+
+JCL is a job/batch orchestration layer; COBOL is a program logic layer — their
+concerns are fundamentally different. The only shared surface is cross-references
+(job step → program), which are modeled as graph edges (`EXECUTES`) rather than
+internal plugin coupling. This keeps each plugin focused:
+
+- `cobol` plugin: parse programs, copybooks, sections, variables, CALL graph
+- `jcl` plugin: parse jobs, steps, DD statements, dataset references, proc includes
+
+Cross-artifact links are resolved at the **graph layer**, not inside either plugin.
+
+### 2. What is the minimum viable graph schema for cross-artifact impact analysis?
+
+**Decision: 5 node types + 4 edge types.**
+
+Nodes:
+
+| Node Type   | Source        | Example                        |
+|-------------|---------------|--------------------------------|
+| `Program`   | COBOL parser  | GS029C, GS627C                |
+| `Copybook`  | COBOL parser  | WSGESCOM, TABELLE665           |
+| `Job`       | JCL parser    | NIGHTLY-SETTLE                 |
+| `Step`      | JCL parser    | STEP010                        |
+| `Dataset`   | JCL parser    | HLQ.PROD.TRANS.FILE            |
+
+Edges:
+
+| Edge Type      | From → To         | Source              |
+|----------------|-------------------|---------------------|
+| `CALLS`        | Program → Program | CALL statement      |
+| `COPIES`       | Program → Copybook| COPY statement      |
+| `EXECUTES`     | Step → Program    | EXEC PGM=           |
+| `READS/WRITES` | Step → Dataset    | DD statement (DISP) |
+
+Field-level lineage (column → column) is deferred to Phase 3.
+
+### 3. How should inferred relationships be labeled and scored?
+
+**Decision: Three-tier confidence model with provenance.**
+
+| Confidence Level   | Meaning                                         | Example                                      |
+|--------------------|------------------------------------------------|----------------------------------------------|
+| `deterministic`    | Parsed directly from source — no inference      | `CALL 'GS029C'` → static call edge          |
+| `inferred-high`    | Dynamic but target is resolvable/unique         | `CALL WS-PGM` where WS-PGM is set once      |
+| `inferred-low`     | Heuristic match, naming convention, or guess    | Variable name similarity across copybooks    |
+
+Every edge carries two metadata fields:
+- `confidence`: one of the three tiers above
+- `evidence`: source file + line number (or reasoning trace for inferred)
+
+Wiki pages and graph views surface confidence visually — `inferred-low` edges
+are rendered as dashed lines with a warning indicator.
+
+### 4. When should summaries be generated automatically versus on demand?
+
+**Decision: Deterministic facts auto-generate; business interpretation on demand.**
+
+| Category                | Generation | Method        | Label           |
+|-------------------------|------------|---------------|-----------------|
+| Program structure       | Automatic  | Parser        | `deterministic` |
+| Call graph / copy tree  | Automatic  | Parser        | `deterministic` |
+| Variable trace          | Automatic  | Parser        | `deterministic` |
+| Section control flow    | Automatic  | Parser        | `deterministic` |
+| Business purpose        | On demand  | LLM synthesis | `synthesized`   |
+| Migration risk summary  | On demand  | LLM synthesis | `synthesized`   |
+
+Auto-generated pages are idempotent — re-running the compiler on the same source
+produces identical output. On-demand summaries are explicitly labeled
+`synthesized` in frontmatter and body, so consumers always know the provenance.
 
 ## Decision
 

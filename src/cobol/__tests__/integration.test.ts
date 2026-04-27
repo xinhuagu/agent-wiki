@@ -74,6 +74,53 @@ describe("COBOL MCP tools integration", () => {
     expect(parsed.references.length).toBeGreaterThan(0);
   });
 
+  it("code_impact reports affected programs for a resolved copybook", async () => {
+    const invoiceSrc = readFileSync(join(FIXTURES, "INVOICE.cbl"), "utf-8");
+    const dateUtilsSrc = readFileSync(join(FIXTURES, "DATE-UTILS.cpy"), "utf-8");
+    wiki.rawAdd("INVOICE.cbl", { content: invoiceSrc });
+    wiki.rawAdd("DATE-UTILS.cpy", { content: dateUtilsSrc });
+
+    await handleTool(wiki, "code_parse", { path: "INVOICE.cbl" });
+    await handleTool(wiki, "code_parse", { path: "DATE-UTILS.cpy" });
+
+    const result = await handleTool(wiki, "code_impact", {
+      node_id: "DATE-UTILS",
+      kind: "copybook",
+    });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.source.node_id).toBe("copybook:DATE-UTILS");
+    expect(parsed.source.resolved).toBe(true);
+    expect(parsed.summary.affectedNodes).toBeGreaterThanOrEqual(1);
+    expect(parsed.impactedByDepth).toHaveLength(1);
+    expect(parsed.impactedByDepth[0].depth).toBe(1);
+    expect(parsed.impactedByDepth[0].nodes.some((n: { node_id: string }) => n.node_id === "program:INVOICE")).toBe(true);
+    const invoice = parsed.impactedByDepth[0].nodes.find((n: { node_id: string }) => n.node_id === "program:INVOICE");
+    expect(invoice.resolved).toBe(true);
+    expect(invoice.via.some((e: { relationship: string; to: string }) => e.relationship === "COPIES" && e.to === "copybook:DATE-UTILS")).toBe(true);
+  });
+
+  it("code_impact works for unresolved source nodes and marks downstream warnings", async () => {
+    const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+    wiki.rawAdd("PAYROLL.cbl", { content: payrollSrc });
+
+    await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" });
+
+    const result = await handleTool(wiki, "code_impact", {
+      node_id: "program:CALC-TAX",
+    });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.source.node_id).toBe("program:CALC-TAX");
+    expect(parsed.source.resolved).toBe(false);
+    expect(parsed.impactedByDepth).toHaveLength(1);
+    const level1 = parsed.impactedByDepth[0];
+    expect(level1.nodes.some((n: { node_id: string }) => n.node_id === "program:PAYROLL")).toBe(true);
+    const payroll = level1.nodes.find((n: { node_id: string }) => n.node_id === "program:PAYROLL");
+    expect(payroll.via.some((e: { relationship: string; to: string }) => e.relationship === "CALLS" && e.to === "program:CALC-TAX")).toBe(true);
+    expect(parsed.diagnostics.some((d: { message: string }) => d.message.includes("program:CALC-TAX"))).toBe(true);
+  });
+
   it("code_parse succeeds with a .cpy copybook", async () => {
     const source = readFileSync(join(FIXTURES, "DATE-UTILS.cpy"), "utf-8");
     wiki.rawAdd("DATE-UTILS.cpy", { content: source });
@@ -150,6 +197,91 @@ describe("COBOL MCP tools integration", () => {
       .rejects.toThrow(/Unsupported file type/);
   });
 
+  it("code_impact fails clearly when no compiled graph exists", async () => {
+    await expect(handleTool(wiki, "code_impact", { node_id: "program:PAYROLL" }))
+      .rejects.toThrow(/Compiled knowledge graph not found/);
+  });
+
+  it("code_impact does not include diagnostics for prefix-overlapping node ids", async () => {
+    wiki.rawAddParsedArtifact("parsed/cobol/knowledge-graph.json", JSON.stringify({
+      nodes: [
+        { id: "program:PAY", kind: "Program", resolved: true, sourceFile: "PAY.cbl" },
+        { id: "program:PAYROLL", kind: "Program", resolved: true, sourceFile: "PAYROLL.cbl" },
+      ],
+      edges: [],
+      diagnostics: [
+        {
+          severity: "warning",
+          message: 'Unresolved Program "program:PAYROLL" — referenced by [program:INVOICE] but never parsed from source',
+          sourceFile: "INVOICE.cbl",
+          line: 15,
+        },
+      ],
+    }, null, 2));
+
+    const result = await handleTool(wiki, "code_impact", { node_id: "program:PAY" });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.source.node_id).toBe("program:PAY");
+    expect(parsed.diagnostics).toEqual([]);
+  });
+
+  it("code_impact keeps diagnostics for dataset ids with dots and underscores", async () => {
+    wiki.rawAddParsedArtifact("parsed/cobol/knowledge-graph.json", JSON.stringify({
+      nodes: [
+        { id: "dataset:HLQ.PROD_TRANS.FILE", kind: "Dataset", resolved: true, sourceFile: "JOB001.jcl" },
+      ],
+      edges: [],
+      diagnostics: [
+        {
+          severity: "warning",
+          message: 'Unresolved Dataset "dataset:HLQ.PROD_TRANS.FILE" — referenced by [program:PAYROLL] but never parsed from source',
+          sourceFile: "PAYROLL.cbl",
+          line: 27,
+        },
+      ],
+    }, null, 2));
+
+    const result = await handleTool(wiki, "code_impact", { node_id: "dataset:HLQ.PROD_TRANS.FILE" });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.source.node_id).toBe("dataset:HLQ.PROD_TRANS.FILE");
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0].message).toContain("dataset:HLQ.PROD_TRANS.FILE");
+  });
+
+  it("code_parse and code_impact work for nested source paths", async () => {
+    const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+    wiki.rawAdd("nested/PAYROLL.cbl", { content: source });
+
+    const parseResult = await handleTool(wiki, "code_parse", { path: "nested/PAYROLL.cbl" });
+    const parseParsed = JSON.parse(parseResult as string);
+    expect(parseParsed.knowledgeGraph).toBeDefined();
+    expect(parseParsed.knowledgeGraph.nodes).toBeGreaterThan(0);
+
+    const impactResult = await handleTool(wiki, "code_impact", { node_id: "program:CALC-TAX" });
+    const impactParsed = JSON.parse(impactResult as string);
+    expect(impactParsed.impactedByDepth[0].nodes.some((n: { node_id: string }) => n.node_id === "program:PAYROLL")).toBe(true);
+  });
+
+  it("wiki_rebuild emits deterministic call-graph source order for nested models", async () => {
+    const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+    const invoiceSrc = readFileSync(join(FIXTURES, "INVOICE.cbl"), "utf-8");
+    wiki.rawAdd("nested/PAYROLL.cbl", { content: payrollSrc });
+    wiki.rawAdd("INVOICE.cbl", { content: invoiceSrc });
+
+    await handleTool(wiki, "code_parse", { path: "nested/PAYROLL.cbl" }, { skipGraphRebuild: true });
+    await handleTool(wiki, "code_parse", { path: "INVOICE.cbl" }, { skipGraphRebuild: true });
+    await handleTool(wiki, "wiki_rebuild", {});
+
+    const callGraph = readFileSync(join(tmp, "wiki", "cobol", "call-graph.md"), "utf-8");
+    const invoiceIdx = callGraph.indexOf("  - raw/INVOICE.cbl");
+    const nestedIdx = callGraph.indexOf("  - raw/nested/PAYROLL.cbl");
+    expect(invoiceIdx).toBeGreaterThan(-1);
+    expect(nestedIdx).toBeGreaterThan(-1);
+    expect(invoiceIdx).toBeLessThan(nestedIdx);
+  });
+
   it("parsed artifacts pass lint integrity checks (no missing-meta)", async () => {
     const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
     wiki.rawAdd("PAYROLL.cbl", { content: source });
@@ -224,6 +356,29 @@ describe("COBOL MCP tools integration", () => {
       // System map wiki page exists
       const systemMap = join(tmp, "wiki", "cobol", "system-map.md");
       expect(existsSync(systemMap)).toBe(true);
+    });
+
+    it("batch code_parse followed by code_impact sees freshly rebuilt graph", async () => {
+      const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+      wiki.rawAdd("PAYROLL.cbl", { content: payrollSrc });
+
+      const result = await handleTool(wiki, "batch", {
+        operations: [
+          { tool: "code_parse", args: { path: "PAYROLL.cbl" } },
+          { tool: "code_impact", args: { node_id: "program:CALC-TAX" } },
+        ],
+      });
+      const batch = JSON.parse(result as string);
+
+      expect(batch.count).toBe(2);
+      expect(batch.results[0].error).toBeUndefined();
+      expect(batch.results[1].error).toBeUndefined();
+      expect(batch.results[1].result.source.node_id).toBe("program:CALC-TAX");
+      expect(batch.results[1].result.impactedByDepth).toHaveLength(1);
+      expect(batch.results[1].result.impactedByDepth[0].nodes.some((n: { node_id: string }) => n.node_id === "program:PAYROLL")).toBe(true);
+
+      const graphPath = join(tmp, "raw", "parsed", "cobol", "knowledge-graph.json");
+      expect(existsSync(graphPath)).toBe(true);
     });
 
     it("wiki_rebuild regenerates knowledge graph from existing parsed artifacts", async () => {

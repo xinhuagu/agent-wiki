@@ -7,6 +7,7 @@ import {
   KnowledgeGraphBuilder,
   populateGraphFromCobol,
   canonicalNodeId,
+  resolveCanonicalId,
   displayLabel,
   serializeGraph,
   deserializeGraph,
@@ -44,6 +45,11 @@ describe("canonicalNodeId / displayLabel", () => {
     expect(displayLabel("program:PAYROLL")).toBe("PAYROLL");
     expect(displayLabel("copybook:DATE-UTILS")).toBe("DATE-UTILS");
     expect(displayLabel("BARE-NAME")).toBe("BARE-NAME");
+  });
+
+  it("strips directory components when deriving logical ids from source paths", () => {
+    expect(resolveCanonicalId({ programId: "", sourceFile: "nested/DATE-UTILS.cpy" })).toBe("DATE-UTILS");
+    expect(resolveCanonicalId({ programId: "", sourceFile: "src/legacy/PAYROLL.cbl" })).toBe("PAYROLL");
   });
 });
 
@@ -95,6 +101,22 @@ describe("KnowledgeGraphBuilder", () => {
     expect(graph.diagnostics.length).toBeGreaterThanOrEqual(1);
     const msgs = graph.diagnostics.map((d) => d.message);
     expect(msgs.some((m) => m.includes("UNKNOWN"))).toBe(true);
+  });
+
+  it("build is idempotent and does not duplicate validation diagnostics", () => {
+    const b = new KnowledgeGraphBuilder();
+    b.addNode({ id: "program:A", kind: "Program", resolved: true });
+    b.addEdge({
+      from: "program:A", to: "program:UNKNOWN",
+      kind: "CALLS",
+      confidence: "deterministic",
+      evidence: { sourceFile: "A.cbl", line: 5 },
+    });
+
+    const first = b.build();
+    const second = b.build();
+    expect(second.diagnostics).toEqual(first.diagnostics);
+    expect(second.diagnostics).toHaveLength(first.diagnostics.length);
   });
 
   it("computes dependentsOf and dependenciesOf", () => {
@@ -240,6 +262,29 @@ describe("populateGraphFromCobol", () => {
 // ---------------------------------------------------------------------------
 
 describe("copybook identity merging", () => {
+  it("nested .cpy path still resolves to the same canonical copybook node", () => {
+    const nestedCopybook = {
+      ...modelFor("DATE-UTILS.cpy"),
+      sourceFile: "nested/DATE-UTILS.cpy",
+    };
+    const builder = new KnowledgeGraphBuilder();
+    populateGraphFromCobol(builder, [
+      modelFor("INVOICE.cbl"),
+      nestedCopybook,
+    ]);
+    const graph = builder.build();
+
+    expect(graph.nodes.has("copybook:DATE-UTILS")).toBe(true);
+    expect(graph.nodes.has("copybook:nested/DATE-UTILS")).toBe(false);
+    const dateNodes = Array.from(graph.nodes.values()).filter((n) => n.id.includes("DATE-UTILS"));
+    expect(dateNodes).toHaveLength(1);
+    expect(dateNodes[0].id).toBe("copybook:DATE-UTILS");
+    const copyEdge = graph.edges.find(
+      (e) => e.from === "program:INVOICE" && e.to === "copybook:DATE-UTILS" && e.kind === "COPIES",
+    );
+    expect(copyEdge).toBeDefined();
+  });
+
   it(".cpy parsed FIRST → COPY reference reuses the same node", () => {
     const builder = new KnowledgeGraphBuilder();
     populateGraphFromCobol(builder, [

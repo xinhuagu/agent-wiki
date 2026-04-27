@@ -173,6 +173,18 @@ export interface CodeAnalysisPlugin {
     serialized: unknown;
     wikiPages: Array<{ path: string; content: string }>;
   } | null;
+  /**
+   * Optional: build additional machine-readable derived artifacts from all
+   * previously parsed models of this language (e.g. lineage JSON, summary
+   * tables) plus any wiki pages derived from them.
+   * Artifact paths are relative to raw/parsed/<lang>/.
+   */
+  buildDerivedArtifacts?(parsedDir: string): {
+    artifacts: Array<{ path: string; content: string }>;
+    wikiPages: Array<{ path: string; content: string }>;
+    staleArtifacts?: string[];
+    staleWikiPages?: string[];
+  } | null;
 }
 
 // ---------------------------------------------------------------------------

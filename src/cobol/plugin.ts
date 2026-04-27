@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { parse } from "./parser.js";
 import { extractModel, generateSummary } from "./extractors.js";
 import { traceVariable as cobolTraceVariable } from "./variable-tracer.js";
+import { buildFieldLineage, generateFieldLineagePage } from "./field-lineage.js";
 import { generateProgramPage, generateCopybookPage, generateCallGraphPage } from "./wiki-gen.js";
 import type { CobolAST, DataItemNode } from "./types.js";
 import type { CobolCodeModel } from "./extractors.js";
@@ -246,6 +247,51 @@ export const cobolPlugin: CodeAnalysisPlugin = {
     wikiPages.push(generateSystemMapPage(serialized));
 
     return { serialized, wikiPages };
+  },
+
+  buildDerivedArtifacts(parsedDir: string): {
+    artifacts: Array<{ path: string; content: string }>;
+    wikiPages: Array<{ path: string; content: string }>;
+    staleArtifacts?: string[];
+    staleWikiPages?: string[];
+  } | null {
+    if (!existsSync(parsedDir)) {
+      return {
+        artifacts: [],
+        wikiPages: [],
+        staleArtifacts: ["field-lineage.json"],
+        staleWikiPages: ["cobol/field-lineage.md"],
+      };
+    }
+    const models = loadCobolModels(parsedDir);
+    if (models.length === 0) {
+      return {
+        artifacts: [],
+        wikiPages: [],
+        staleArtifacts: ["field-lineage.json"],
+        staleWikiPages: ["cobol/field-lineage.md"],
+      };
+    }
+
+    const lineage = buildFieldLineage(models);
+    if (!lineage) {
+      return {
+        artifacts: [],
+        wikiPages: [],
+        staleArtifacts: ["field-lineage.json"],
+        staleWikiPages: ["cobol/field-lineage.md"],
+      };
+    }
+
+    return {
+      artifacts: [{
+        path: "field-lineage.json",
+        content: JSON.stringify(lineage, null, 2),
+      }],
+      wikiPages: [generateFieldLineagePage(lineage)],
+      staleArtifacts: ["field-lineage.json"],
+      staleWikiPages: ["cobol/field-lineage.md"],
+    };
   },
 };
 

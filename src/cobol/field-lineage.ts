@@ -30,7 +30,7 @@ export interface SerializedInferredFieldParticipant {
 
 export interface SerializedInferredFieldEvidence {
   pictureMatch: boolean;
-  usageMatch: boolean;
+  usageEvidence: "explicit-match" | "both-missing";
   levelMatch: boolean;
   qualifiedNameMatch: "exact";
   parentContextMatch: "exact" | "suffix" | "top-level";
@@ -49,11 +49,17 @@ export interface SerializedInferredFieldLineageEntry {
 
 export interface SerializedFieldLineage {
   summary: {
-    copybooks: number;
-    programs: number;
-    deterministic: number;
-    inferredHighConfidence: number;
-    inferredAmbiguous: number;
+    deterministic: {
+      copybooks: number;
+      programs: number;
+      fields: number;
+    };
+    inferred: {
+      copybooks: number;
+      programs: number;
+      highConfidence: number;
+      ambiguous: number;
+    };
   };
   copybookUsage: Array<{
     copybookId: string;
@@ -263,7 +269,7 @@ function buildInferredEntry(
   const rationaleParts = [
     "Same field name",
     evidence.pictureMatch ? "matching PIC" : undefined,
-    evidence.usageMatch ? "matching USAGE" : undefined,
+    evidence.usageEvidence === "explicit-match" ? "matching USAGE" : undefined,
     evidence.levelMatch ? `same level ${ordered.left.level}` : undefined,
     evidence.parentContextMatch === "exact"
       ? "matching parent structure"
@@ -417,7 +423,13 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
 
         const pictureMatch = normalizePicture(left.field.picture) !== ""
           && normalizePicture(left.field.picture) === normalizePicture(right.field.picture);
-        const usageMatch = normalizeUsage(left.field.usage) === normalizeUsage(right.field.usage);
+        const leftUsage = normalizeUsage(left.field.usage);
+        const rightUsage = normalizeUsage(right.field.usage);
+        const usageEvidence = leftUsage !== "" && leftUsage === rightUsage
+          ? "explicit-match"
+          : leftUsage === "" && rightUsage === ""
+            ? "both-missing"
+            : null;
         const levelMatch = left.field.level === right.field.level;
         const qualifiedNameMatch = qualifiedSuffix(left.field.qualifiedName) === qualifiedSuffix(right.field.qualifiedName)
           ? "exact"
@@ -427,7 +439,7 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
           left.field.siblings.filter((sibling) => right.field.siblings.includes(sibling))
         );
 
-        if (!pictureMatch || !usageMatch || !levelMatch || qualifiedNameMatch !== "exact" || parentContextMatch === "none") {
+        if (!pictureMatch || !usageEvidence || !levelMatch || qualifiedNameMatch !== "exact" || parentContextMatch === "none") {
           continue;
         }
         if (parentContextMatch === "top-level" && siblingOverlap.length === 0) {
@@ -445,7 +457,7 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
           rightPrograms: right.programs,
           evidence: {
             pictureMatch,
-            usageMatch,
+            usageEvidence,
             levelMatch,
             qualifiedNameMatch,
             parentContextMatch,
@@ -538,13 +550,28 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
     }))
     .filter((entry) => entry.programs.length > 0);
 
+  const inferredCopybookIds = new Set<string>();
+  const inferredProgramIds = new Set<string>();
+  for (const entry of [...inferredHighConfidence, ...inferredAmbiguous]) {
+    inferredCopybookIds.add(entry.left.copybook.id);
+    inferredCopybookIds.add(entry.right.copybook.id);
+    for (const program of entry.left.programs) inferredProgramIds.add(program.id);
+    for (const program of entry.right.programs) inferredProgramIds.add(program.id);
+  }
+
   return {
     summary: {
-      copybooks: participatingCopybookIds.size,
-      programs: participatingProgramIds.size,
-      deterministic: sortedDeterministic.length,
-      inferredHighConfidence: inferredHighConfidence.length,
-      inferredAmbiguous: inferredAmbiguous.length,
+      deterministic: {
+        copybooks: participatingCopybookIds.size,
+        programs: participatingProgramIds.size,
+        fields: sortedDeterministic.length,
+      },
+      inferred: {
+        copybooks: inferredCopybookIds.size,
+        programs: inferredProgramIds.size,
+        highConfidence: inferredHighConfidence.length,
+        ambiguous: inferredAmbiguous.length,
+      },
     },
     copybookUsage,
     deterministic: sortedDeterministic,
@@ -584,11 +611,13 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
   lines.push("");
   lines.push("| Metric | Count |");
   lines.push("|--------|-------|");
-  lines.push(`| Parsed copybooks with deterministic consumers | ${lineage.summary.copybooks} |`);
-  lines.push(`| Programs participating in deterministic lineage | ${lineage.summary.programs} |`);
-  lines.push(`| Deterministic shared fields | ${lineage.summary.deterministic} |`);
-  lines.push(`| Inferred high-confidence candidates | ${lineage.summary.inferredHighConfidence} |`);
-  lines.push(`| Inferred ambiguous candidates | ${lineage.summary.inferredAmbiguous} |`);
+  lines.push(`| Deterministic copybooks | ${lineage.summary.deterministic.copybooks} |`);
+  lines.push(`| Deterministic programs | ${lineage.summary.deterministic.programs} |`);
+  lines.push(`| Deterministic shared fields | ${lineage.summary.deterministic.fields} |`);
+  lines.push(`| Inferred copybooks | ${lineage.summary.inferred.copybooks} |`);
+  lines.push(`| Inferred programs | ${lineage.summary.inferred.programs} |`);
+  lines.push(`| Inferred high-confidence candidates | ${lineage.summary.inferred.highConfidence} |`);
+  lines.push(`| Inferred ambiguous candidates | ${lineage.summary.inferred.ambiguous} |`);
   lines.push("");
 
   lines.push("## Copybook Usage");

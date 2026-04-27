@@ -169,7 +169,7 @@ describe("COBOL MCP tools integration", () => {
     expect(existsSync(pagePath)).toBe(true);
 
     const lineage = JSON.parse(readFileSync(lineagePath, "utf-8"));
-    expect(lineage.summary.deterministic).toBeGreaterThan(0);
+    expect(lineage.summary.deterministic.fields).toBeGreaterThan(0);
     expect(lineage.deterministic.some((entry: { fieldName: string }) => entry.fieldName === "ZIP-CODE")).toBe(true);
     expect(readFileSync(pagePath, "utf-8")).toContain("CUSTOMER-REC");
   });
@@ -223,8 +223,10 @@ describe("COBOL MCP tools integration", () => {
     const lineagePath = join(tmp, "raw", "parsed", "cobol", "field-lineage.json");
     const pagePath = join(tmp, "wiki", "cobol", "field-lineage.md");
     const lineage = JSON.parse(readFileSync(lineagePath, "utf-8"));
-    expect(lineage.summary.deterministic).toBe(0);
-    expect(lineage.summary.inferredHighConfidence).toBeGreaterThan(0);
+    expect(lineage.summary.deterministic.fields).toBe(0);
+    expect(lineage.summary.inferred.highConfidence).toBeGreaterThan(0);
+    expect(lineage.summary.inferred.copybooks).toBe(2);
+    expect(lineage.summary.inferred.programs).toBe(2);
     expect(lineage.inferredHighConfidence.some((entry: { fieldName: string }) => entry.fieldName === "CUSTOMER-ID")).toBe(true);
     expect(readFileSync(pagePath, "utf-8")).toContain("Inferred Cross-Copybook Candidates");
   });
@@ -606,7 +608,7 @@ describe("COBOL MCP tools integration", () => {
       expect(existsSync(lineagePath)).toBe(true);
       expect(existsSync(pagePath)).toBe(true);
       const lineage = JSON.parse(readFileSync(lineagePath, "utf-8"));
-      expect(lineage.summary.deterministic).toBeGreaterThan(0);
+      expect(lineage.summary.deterministic.fields).toBeGreaterThan(0);
     });
 
     it("wiki_rebuild removes stale field-lineage outputs when lineage no longer exists", async () => {

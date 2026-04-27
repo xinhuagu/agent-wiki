@@ -79,14 +79,16 @@ describe("COBOL field lineage", () => {
     ]);
 
     expect(lineage).not.toBeNull();
-    expect(lineage!.summary.deterministic).toBe(0);
-    expect(lineage!.summary.inferredHighConfidence).toBeGreaterThan(0);
+    expect(lineage!.summary.deterministic.fields).toBe(0);
+    expect(lineage!.summary.inferred.highConfidence).toBeGreaterThan(0);
     const customerId = lineage!.inferredHighConfidence.find((entry) => entry.fieldName === "CUSTOMER-ID");
     expect(customerId).toBeDefined();
     expect(customerId!.left.copybook.id).toBe("copybook:CUSTOMER-A");
     expect(customerId!.right.copybook.id).toBe("copybook:CUSTOMER-B");
     expect(customerId!.evidence.parentContextMatch).toBe("top-level");
     expect(customerId!.evidence.siblingOverlap).toContain("CUSTOMER-NAME");
+    expect(customerId!.evidence.usageEvidence).toBe("both-missing");
+    expect(customerId!.rationale).not.toContain("matching USAGE");
   });
 
   it("does not infer same-name fields when structural context differs", () => {
@@ -117,8 +119,8 @@ describe("COBOL field lineage", () => {
     ]);
 
     expect(lineage).not.toBeNull();
-    expect(lineage!.summary.inferredHighConfidence).toBe(0);
-    expect(lineage!.summary.inferredAmbiguous).toBeGreaterThan(0);
+    expect(lineage!.summary.inferred.highConfidence).toBe(0);
+    expect(lineage!.summary.inferred.ambiguous).toBeGreaterThan(0);
     const customerId = lineage!.inferredAmbiguous.find((entry) => entry.fieldName === "CUSTOMER-ID");
     expect(customerId).toBeDefined();
     expect(customerId!.evidence.competingMatches).toBeGreaterThan(0);
@@ -148,7 +150,7 @@ describe("COBOL field lineage", () => {
     ]);
 
     expect(lineage).not.toBeNull();
-    expect(lineage!.summary.programs).toBe(2);
+    expect(lineage!.summary.deterministic.programs).toBe(2);
     expect(lineage!.copybookUsage.map((entry) => entry.copybookId)).toEqual([
       "copybook:CUSTOMER-REC",
     ]);
@@ -168,7 +170,7 @@ describe("COBOL field lineage", () => {
     ]);
 
     expect(lineage).not.toBeNull();
-    expect(lineage!.summary.programs).toBe(2);
+    expect(lineage!.summary.deterministic.programs).toBe(2);
     expect(lineage!.copybookUsage).toHaveLength(1);
     expect(lineage!.copybookUsage[0]!.programs.map((program) => program.id)).toEqual([
       "program:ORDERA",
@@ -209,7 +211,7 @@ describe("COBOL field lineage", () => {
     ]);
 
     expect(lineage).not.toBeNull();
-    expect(lineage!.summary.programs).toBe(4);
+    expect(lineage!.summary.deterministic.programs).toBe(4);
     const customerUsage = lineage!.copybookUsage.find((entry) => entry.copybookId === "copybook:CUSTOMER-REC");
     const altUsage = lineage!.copybookUsage.find((entry) => entry.copybookId === "copybook:ALT-REC");
     expect(customerUsage?.programs.map((program) => program.id)).toEqual([

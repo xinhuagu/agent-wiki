@@ -283,17 +283,28 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
     return null;
   }
 
+  const allEntries = [...sortedDeterministic, ...sortedHighConfidence, ...sortedAmbiguous];
   const participatingCopybookIds = new Set<string>();
   const participatingProgramIds = new Set<string>();
-  for (const entry of [...sortedDeterministic, ...sortedHighConfidence, ...sortedAmbiguous]) {
+  const participatingProgramsByCopybook = new Map<string, Set<string>>();
+  for (const entry of allEntries) {
     for (const copybook of entry.copybooks) participatingCopybookIds.add(copybook.id);
     for (const program of entry.programs) participatingProgramIds.add(program.id);
+    for (const copybook of entry.copybooks) {
+      const programIds = participatingProgramsByCopybook.get(copybook.id) ?? new Set<string>();
+      for (const program of entry.programs) {
+        programIds.add(program.id);
+      }
+      participatingProgramsByCopybook.set(copybook.id, programIds);
+    }
   }
   const copybookUsage = rawCopybookUsage
     .filter((entry) => participatingCopybookIds.has(entry.copybookId))
     .map((entry) => ({
       ...entry,
-      programs: entry.programs.filter((program) => participatingProgramIds.has(program.id)),
+      programs: entry.programs.filter((program) =>
+        participatingProgramsByCopybook.get(entry.copybookId)?.has(program.id) ?? false
+      ),
     }))
     .filter((entry) => entry.programs.length > 0);
 

@@ -152,6 +152,52 @@ describe("COBOL field lineage", () => {
     ]);
   });
 
+  it("copybook usage filters programs per copybook, not by global participation", () => {
+    const altCopybook = `
+       01  ALT-REC.
+           05  ALT-ID            PIC X(6).
+`;
+    const orderA = model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl");
+    const orderB = model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl");
+    const orderCSource = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERC.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       COPY ALT-REC.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+    const orderC = model(orderCSource, "ORDERC.cbl");
+    orderC.copies[0]!.replacing = ["CUSTOMER-ID", "CLIENT-ID"];
+    const orderD = model(program("ORDERD", "ALT-REC"), "ORDERD.cbl");
+
+    const lineage = buildFieldLineage([
+      model(sharedCopybook, "CUSTOMER-REC.cpy"),
+      model(altCopybook, "ALT-REC.cpy"),
+      orderA,
+      orderB,
+      orderC,
+      orderD,
+    ]);
+
+    expect(lineage).not.toBeNull();
+    expect(lineage!.summary.programs).toBe(4);
+    const customerUsage = lineage!.copybookUsage.find((entry) => entry.copybookId === "copybook:CUSTOMER-REC");
+    const altUsage = lineage!.copybookUsage.find((entry) => entry.copybookId === "copybook:ALT-REC");
+    expect(customerUsage?.programs.map((program) => program.id)).toEqual([
+      "program:ORDERA",
+      "program:ORDERB",
+    ]);
+    expect(altUsage?.programs.map((program) => program.id)).toEqual([
+      "program:ORDERC",
+      "program:ORDERD",
+    ]);
+  });
+
   it("does not conflate parsed copybooks that share the same basename", () => {
     const billingCommon = `
        01  BILLING-COMMON.

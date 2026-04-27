@@ -139,6 +139,56 @@ describe("code-analysis plugin system", () => {
       expect(model.relations.some((r) => r.type === "cics-transaction" && r.to === "C001")).toBe(true);
       expect(model.relations.some((r) => r.type === "cics-map" && r.to === "CUSTMAP")).toBe(true);
     });
+
+    it("keeps multi-line EXEC SQL blocks intact when the SQL verb is also a COBOL verb", () => {
+      const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SQLDELETE.
+       PROCEDURE DIVISION.
+       MAIN.
+           EXEC SQL
+               DELETE FROM CUSTOMER_TABLE
+           END-EXEC.
+           GOBACK.
+`;
+      const ast = cobolPlugin.parse(source, "SQLDELETE.cbl");
+      const cobolModel = extractModel(ast as ReturnType<typeof parse>);
+      const model = cobolPlugin.normalize(ast) as NormalizedCodeModel;
+
+      expect(cobolModel.db2References).toHaveLength(1);
+      expect(cobolModel.db2References[0]).toMatchObject({
+        operation: "DELETE",
+        tables: ["CUSTOMER_TABLE"],
+      });
+      expect(model.relations.some((r) => r.type === "db2-table" && r.to === "CUSTOMER_TABLE")).toBe(true);
+    });
+
+    it("normalizes CICS FILE references from multi-line EXEC blocks", () => {
+      const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CICSFILE.
+       PROCEDURE DIVISION.
+       MAIN.
+           EXEC CICS
+               READ
+               FILE('CUSFILE')
+               MAP('CUSMAP')
+           END-EXEC.
+           GOBACK.
+`;
+      const ast = cobolPlugin.parse(source, "CICSFILE.cbl");
+      const cobolModel = extractModel(ast as ReturnType<typeof parse>);
+      const model = cobolPlugin.normalize(ast) as NormalizedCodeModel;
+
+      expect(cobolModel.cicsReferences).toHaveLength(1);
+      expect(cobolModel.cicsReferences[0]).toMatchObject({
+        command: "READ",
+        file: "CUSFILE",
+        map: "CUSMAP",
+      });
+      expect(model.relations.some((r) => r.type === "cics-file" && r.to === "CUSFILE")).toBe(true);
+      expect(model.relations.some((r) => r.type === "cics-map" && r.to === "CUSMAP")).toBe(true);
+    });
   });
 
   describe("NormalizedCodeModel from copybook", () => {

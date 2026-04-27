@@ -194,6 +194,15 @@ function cobolToNormalized(cobolModel: CobolCodeModel): NormalizedCodeModel {
         metadata: { command: cics.command },
       });
     }
+    if (cics.file) {
+      relations.push({
+        type: "cics-file",
+        from: canonicalId,
+        to: cics.file,
+        loc: cics.loc,
+        metadata: { command: cics.command },
+      });
+    }
   }
   for (const access of cobolModel.fileAccesses) {
     relations.push({

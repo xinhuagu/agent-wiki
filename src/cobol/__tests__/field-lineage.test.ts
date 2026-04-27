@@ -61,7 +61,7 @@ describe("COBOL field lineage", () => {
     expect(zipCode!.linkage).toBe("deterministic");
   });
 
-  it("marks same-name same-type fields across different copybooks as high-confidence", () => {
+  it("does not infer same-name same-type fields across different copybooks", () => {
     const lineage = buildFieldLineage([
       model(customerA, "CUSTOMER-A.cpy"),
       model(customerB, "CUSTOMER-B.cpy"),
@@ -69,18 +69,10 @@ describe("COBOL field lineage", () => {
       model(program("BILLINGB", "CUSTOMER-B"), "BILLINGB.cbl"),
     ]);
 
-    expect(lineage).not.toBeNull();
-    const customerId = lineage!.highConfidence.find((entry) => entry.fieldName === "CUSTOMER-ID");
-    expect(customerId).toBeDefined();
-    expect(customerId!.copybooks.map((copybook) => copybook.id)).toEqual([
-      "copybook:CUSTOMER-A",
-      "copybook:CUSTOMER-B",
-    ]);
-    expect(customerId!.pictures).toEqual(["X(10)"]);
-    expect(customerId!.linkage).toBe("high-confidence");
+    expect(lineage).toBeNull();
   });
 
-  it("marks conflicting field-name collisions across copybooks as ambiguous", () => {
+  it("does not infer conflicting field-name collisions across copybooks", () => {
     const lineage = buildFieldLineage([
       model(customerA, "CUSTOMER-A.cpy"),
       model(legacyCustomer, "LEGACY-CUSTOMER.cpy"),
@@ -88,15 +80,7 @@ describe("COBOL field lineage", () => {
       model(program("LEGACYB", "LEGACY-CUSTOMER"), "LEGACYB.cbl"),
     ]);
 
-    expect(lineage).not.toBeNull();
-    const customerId = lineage!.ambiguous.find((entry) => entry.fieldName === "CUSTOMER-ID");
-    expect(customerId).toBeDefined();
-    expect(customerId!.copybooks.map((copybook) => copybook.id)).toEqual([
-      "copybook:CUSTOMER-A",
-      "copybook:LEGACY-CUSTOMER",
-    ]);
-    expect(customerId!.pictures).toEqual(["9(8)", "X(10)"]);
-    expect(customerId!.linkage).toBe("ambiguous");
+    expect(lineage).toBeNull();
   });
 
   it("does not treat COPY REPLACING consumers as deterministic shared lineage", () => {
@@ -113,7 +97,7 @@ describe("COBOL field lineage", () => {
     expect(lineage).toBeNull();
   });
 
-  it("summary counts only programs that actually participate in lineage", () => {
+  it("summary counts only programs that actually participate in deterministic lineage", () => {
     const lineage = buildFieldLineage([
       model(sharedCopybook, "CUSTOMER-REC.cpy"),
       model(customerB, "CUSTOMER-B.cpy"),
@@ -123,9 +107,8 @@ describe("COBOL field lineage", () => {
     ]);
 
     expect(lineage).not.toBeNull();
-    expect(lineage!.summary.programs).toBe(3);
+    expect(lineage!.summary.programs).toBe(2);
     expect(lineage!.copybookUsage.map((entry) => entry.copybookId)).toEqual([
-      "copybook:CUSTOMER-B",
       "copybook:CUSTOMER-REC",
     ]);
   });
@@ -234,8 +217,8 @@ describe("COBOL field lineage", () => {
     expect(page.path).toBe("cobol/field-lineage.md");
     expect(page.content).toContain("COBOL Field Lineage");
     expect(page.content).toContain("Shared Copybook-Backed Fields");
-    expect(page.content).toContain("High-Confidence Candidates");
-    expect(page.content).toContain("Ambiguous Collisions");
+    expect(page.content).not.toContain("High-Confidence Candidates");
+    expect(page.content).not.toContain("Ambiguous Collisions");
     expect(page.content).toContain("CUSTOMER-REC");
   });
 });

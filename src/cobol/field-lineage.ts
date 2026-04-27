@@ -193,13 +193,11 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
   }
 
   const deterministic: SerializedFieldLineageEntry[] = [];
-  const candidateFields: Array<FlattenedField & { programs: FieldConsumer[] }> = [];
 
   for (const usage of rawCopybookUsage) {
     const fields = flattenedByCopybook.get(usage.copybookId) ?? [];
     const exactPrograms = usage.programs.filter((program) => !program.replacing || program.replacing.length === 0);
     for (const field of fields) {
-      candidateFields.push({ ...field, programs: exactPrograms });
       if (exactPrograms.length < 2) continue;
       deterministic.push(buildEntry(
         "deterministic",
@@ -210,80 +208,18 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
     }
   }
 
-  const highConfidence: SerializedFieldLineageEntry[] = [];
-  const bySignature = new Map<string, Array<FlattenedField & { programs: FieldConsumer[] }>>();
-  for (const field of candidateFields) {
-    const signature = [
-      field.fieldName.toUpperCase(),
-      field.picture?.toUpperCase() ?? "",
-      field.usage?.toUpperCase() ?? "",
-    ].join("|");
-    const list = bySignature.get(signature) ?? [];
-    list.push(field);
-    bySignature.set(signature, list);
-  }
-  for (const fields of bySignature.values()) {
-    const copybooks = sortUnique(fields.map((field) => field.copybookId));
-    const programs = [...new Map(
-      fields.flatMap((field) => field.programs)
-        .map((program) => [`${program.id}@${program.sourceFile}`, program])
-    ).values()];
-    const hasTypeEvidence = fields.some((field) => Boolean(field.picture) || Boolean(field.usage));
-    if (copybooks.length < 2 || programs.length < 2 || !hasTypeEvidence) continue;
-    highConfidence.push(buildEntry(
-      "high-confidence",
-      fields,
-      programs,
-      "Same field name and PIC/USAGE observed across different copybooks used by different programs."
-    ));
-  }
-
-  const ambiguous: SerializedFieldLineageEntry[] = [];
-  const byFieldName = new Map<string, Array<FlattenedField & { programs: FieldConsumer[] }>>();
-  for (const field of candidateFields) {
-    const key = field.fieldName.toUpperCase();
-    const list = byFieldName.get(key) ?? [];
-    list.push(field);
-    byFieldName.set(key, list);
-  }
-  for (const fields of byFieldName.values()) {
-    const copybooks = sortUnique(fields.map((field) => field.copybookId));
-    if (copybooks.length < 2) continue;
-    const variants = sortUnique(fields.map((field) => [
-      field.picture?.toUpperCase() ?? "",
-      field.usage?.toUpperCase() ?? "",
-    ].join("|")));
-    const programs = [...new Map(
-      fields.flatMap((field) => field.programs)
-        .map((program) => [`${program.id}@${program.sourceFile}`, program])
-    ).values()];
-    if (variants.length < 2 || programs.length < 2) continue;
-    ambiguous.push(buildEntry(
-      "ambiguous",
-      fields,
-      programs,
-      "Same field name appears with conflicting PIC/USAGE across different copybooks."
-    ));
-  }
-
   const sortedDeterministic = deterministic.sort((a, b) =>
     a.copybooks[0]!.id.localeCompare(b.copybooks[0]!.id) ||
     a.qualifiedNames[0]!.localeCompare(b.qualifiedNames[0]!)
   );
-  const sortedHighConfidence = highConfidence.sort((a, b) =>
-    a.fieldName.localeCompare(b.fieldName) ||
-    a.copybooks[0]!.id.localeCompare(b.copybooks[0]!.id)
-  );
-  const sortedAmbiguous = ambiguous.sort((a, b) =>
-    a.fieldName.localeCompare(b.fieldName) ||
-    a.copybooks[0]!.id.localeCompare(b.copybooks[0]!.id)
-  );
+  const sortedHighConfidence: SerializedFieldLineageEntry[] = [];
+  const sortedAmbiguous: SerializedFieldLineageEntry[] = [];
 
-  if (sortedDeterministic.length === 0 && sortedHighConfidence.length === 0 && sortedAmbiguous.length === 0) {
+  if (sortedDeterministic.length === 0) {
     return null;
   }
 
-  const allEntries = [...sortedDeterministic, ...sortedHighConfidence, ...sortedAmbiguous];
+  const allEntries = [...sortedDeterministic];
   const participatingCopybookIds = new Set<string>();
   const participatingProgramIds = new Set<string>();
   const participatingProgramsByCopybook = new Map<string, Set<string>>();
@@ -353,8 +289,6 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
   lines.push(`| Parsed copybooks with consumers | ${lineage.summary.copybooks} |`);
   lines.push(`| Programs participating | ${lineage.summary.programs} |`);
   lines.push(`| Deterministic shared fields | ${lineage.summary.deterministic} |`);
-  lines.push(`| High-confidence candidates | ${lineage.summary.highConfidence} |`);
-  lines.push(`| Ambiguous collisions | ${lineage.summary.ambiguous} |`);
   lines.push("");
 
   lines.push("## Copybook Usage");
@@ -376,37 +310,6 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
     for (const entry of lineage.deterministic) {
       lines.push(
         `| ${formatCopybooks(entry.copybooks)} | ${entry.fieldName} | ${entry.qualifiedNames.join("<br>")} | ${formatPrograms(entry.programs)} | ${entry.pictures.join(", ") || "—"} | ${entry.linkage} |`
-      );
-    }
-  }
-  lines.push("");
-
-  lines.push("## High-Confidence Candidates");
-  lines.push("");
-  if (lineage.highConfidence.length === 0) {
-    lines.push("No high-confidence cross-copybook candidates found.");
-  } else {
-    lines.push("| Field | Copybooks | Programs | PIC | Rationale |");
-    lines.push("|-------|-----------|----------|-----|-----------|");
-    for (const entry of lineage.highConfidence) {
-      lines.push(
-        `| ${entry.fieldName} | ${formatCopybooks(entry.copybooks)} | ${formatPrograms(entry.programs)} | ${entry.pictures.join(", ") || "—"} | ${entry.rationale} |`
-      );
-    }
-  }
-  lines.push("");
-
-  lines.push("## Ambiguous Collisions");
-  lines.push("");
-  if (lineage.ambiguous.length === 0) {
-    lines.push("No ambiguous field-name collisions found.");
-  } else {
-    lines.push("| Field | Copybooks | Observed PIC/USAGE | Programs | Rationale |");
-    lines.push("|-------|-----------|--------------------|----------|-----------|");
-    for (const entry of lineage.ambiguous) {
-      const variants = entry.pictures.length > 0 ? entry.pictures.join(", ") : "—";
-      lines.push(
-        `| ${entry.fieldName} | ${formatCopybooks(entry.copybooks)} | ${variants} | ${formatPrograms(entry.programs)} | ${entry.rationale} |`
       );
     }
   }

@@ -163,6 +163,27 @@ describe("code-analysis plugin system", () => {
       expect(model.relations.some((r) => r.type === "db2-table" && r.to === "CUSTOMER_TABLE")).toBe(true);
     });
 
+    it("keeps schema-qualified DB2 table names intact", () => {
+      const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SQLSCHEMA.
+       PROCEDURE DIVISION.
+       MAIN.
+           EXEC SQL
+               SELECT CUSTOMER_NAME
+                 FROM PROD.CUSTOMER_TABLE
+           END-EXEC.
+           GOBACK.
+`;
+      const ast = cobolPlugin.parse(source, "SQLSCHEMA.cbl");
+      const cobolModel = extractModel(ast as ReturnType<typeof parse>);
+      const model = cobolPlugin.normalize(ast) as NormalizedCodeModel;
+
+      expect(cobolModel.db2References).toHaveLength(1);
+      expect(cobolModel.db2References[0].tables).toEqual(["PROD.CUSTOMER_TABLE"]);
+      expect(model.relations.some((r) => r.type === "db2-table" && r.to === "PROD.CUSTOMER_TABLE")).toBe(true);
+    });
+
     it("normalizes CICS FILE references from multi-line EXEC blocks", () => {
       const source = `
        IDENTIFICATION DIVISION.
@@ -188,6 +209,29 @@ describe("code-analysis plugin system", () => {
       });
       expect(model.relations.some((r) => r.type === "cics-file" && r.to === "CUSFILE")).toBe(true);
       expect(model.relations.some((r) => r.type === "cics-map" && r.to === "CUSMAP")).toBe(true);
+    });
+
+    it("keeps OPEN inference conservative when no FD is available", () => {
+      const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. OPENFREE.
+       PROCEDURE DIVISION.
+       MAIN.
+           OPEN INPUT CUST-FILE WITH NO REWIND.
+           GOBACK.
+`;
+      const ast = cobolPlugin.parse(source, "OPENFREE.cbl");
+      const cobolModel = extractModel(ast as ReturnType<typeof parse>);
+      const model = cobolPlugin.normalize(ast) as NormalizedCodeModel;
+
+      expect(cobolModel.fileAccesses).toEqual([
+        expect.objectContaining({
+          file: "CUST-FILE",
+          operation: "OPEN",
+          mode: "INPUT",
+        }),
+      ]);
+      expect(model.relations.filter((r) => r.type === "file-access").map((r) => r.to)).toEqual(["CUST-FILE"]);
     });
   });
 

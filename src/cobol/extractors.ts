@@ -117,8 +117,15 @@ function normalizeOperand(value: string): string {
   return value.replace(/['"]/g, "").toUpperCase();
 }
 
+function normalizeSqlRawText(rawText: string): string {
+  return rawText
+    .toUpperCase()
+    .replace(/([A-Z0-9_-])\s*\.\s*([A-Z0-9_-])/g, "$1.$2");
+}
+
 function extractSqlTableNames(rawText: string): string[] {
   const tables = new Set<string>();
+  const normalized = normalizeSqlRawText(rawText);
   const patterns = [
     /\bFROM\s+([A-Z0-9][A-Z0-9_.-]*)/g,
     /\bJOIN\s+([A-Z0-9][A-Z0-9_.-]*)/g,
@@ -129,7 +136,7 @@ function extractSqlTableNames(rawText: string): string[] {
   ];
 
   for (const pattern of patterns) {
-    for (const match of rawText.matchAll(pattern)) {
+    for (const match of normalized.matchAll(pattern)) {
       const table = match[1]?.replace(/['"]/g, "");
       if (table) tables.add(table);
     }
@@ -151,7 +158,7 @@ function extractDb2Reference(stmt: StatementNode): { operation?: string; tables:
   const operation = rawText.match(/^EXEC\s+SQL\s+([A-Z-]+)/)?.[1];
   return {
     operation,
-    tables: extractSqlTableNames(rawText),
+    tables: extractSqlTableNames(stmt.rawText),
     rawText: stmt.rawText,
     loc: stmt.loc,
   };
@@ -208,6 +215,14 @@ function inferFileAccesses(
 
   if (verb === "OPEN") {
     const modes = new Set(["INPUT", "OUTPUT", "I-O", "EXTEND"]);
+    const clauseKeywords = new Set([
+      "WITH",
+      "NO",
+      "REWIND",
+      "LOCK",
+      "SHARING",
+      "REVERSED",
+    ]);
     const accesses: Array<{
       file: string;
       operation: "OPEN";
@@ -217,12 +232,19 @@ function inferFileAccesses(
       loc: SourceLocation;
     }> = [];
     let currentMode: string | undefined;
+    let capturedForMode = false;
     for (const operand of operands) {
       if (modes.has(operand)) {
         currentMode = operand;
+        capturedForMode = false;
         continue;
       }
-      if (knownFiles.size > 0 && !knownFiles.has(operand)) continue;
+      if (knownFiles.size > 0) {
+        if (!knownFiles.has(operand)) continue;
+      } else {
+        if (!currentMode || capturedForMode || clauseKeywords.has(operand)) continue;
+        capturedForMode = true;
+      }
       accesses.push({
         file: operand,
         operation: "OPEN",

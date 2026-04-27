@@ -174,6 +174,61 @@ describe("COBOL MCP tools integration", () => {
     expect(readFileSync(pagePath, "utf-8")).toContain("CUSTOMER-REC");
   });
 
+  it("code_parse persists inferred field-lineage artifacts for cross-copybook matches", async () => {
+    const customerA = `
+       01  CUSTOMER-REC.
+           05  CUSTOMER-ID       PIC X(10).
+           05  CUSTOMER-NAME     PIC X(30).
+`;
+    const customerB = `
+       01  CLIENT-REC.
+           05  CUSTOMER-ID       PIC X(10).
+           05  CUSTOMER-NAME     PIC X(30).
+`;
+    const billingA = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. BILLINGA.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-A.
+       PROCEDURE DIVISION.
+       MAIN.
+           STOP RUN.
+`;
+    const billingB = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. BILLINGB.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-B.
+       PROCEDURE DIVISION.
+       MAIN.
+           STOP RUN.
+`;
+
+    wiki.rawAdd("CUSTOMER-A.cpy", { content: customerA });
+    wiki.rawAdd("CUSTOMER-B.cpy", { content: customerB });
+    wiki.rawAdd("BILLINGA.cbl", { content: billingA });
+    wiki.rawAdd("BILLINGB.cbl", { content: billingB });
+
+    await handleTool(wiki, "code_parse", { path: "BILLINGA.cbl" });
+    await handleTool(wiki, "code_parse", { path: "BILLINGB.cbl" });
+    await handleTool(wiki, "code_parse", { path: "CUSTOMER-A.cpy" });
+    const result = await handleTool(wiki, "code_parse", { path: "CUSTOMER-B.cpy" });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.artifacts).toContain("raw/parsed/cobol/field-lineage.json");
+    expect(parsed.wikiPages).toContain("cobol/field-lineage.md");
+
+    const lineagePath = join(tmp, "raw", "parsed", "cobol", "field-lineage.json");
+    const pagePath = join(tmp, "wiki", "cobol", "field-lineage.md");
+    const lineage = JSON.parse(readFileSync(lineagePath, "utf-8"));
+    expect(lineage.summary.deterministic).toBe(0);
+    expect(lineage.summary.inferredHighConfidence).toBeGreaterThan(0);
+    expect(lineage.inferredHighConfidence.some((entry: { fieldName: string }) => entry.fieldName === "CUSTOMER-ID")).toBe(true);
+    expect(readFileSync(pagePath, "utf-8")).toContain("Inferred Cross-Copybook Candidates");
+  });
+
   it("code_parse persists DB2 references into model artifacts and wiki summaries", async () => {
     const source = readFileSync(join(FIXTURES, "CUSTOMER-DB2.cbl"), "utf-8");
     wiki.rawAdd("CUSTOMER-DB2.cbl", { content: source });

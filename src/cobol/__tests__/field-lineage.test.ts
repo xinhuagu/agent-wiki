@@ -17,16 +17,25 @@ const sharedCopybook = `
 const customerA = `
        01  CUSTOMER-REC.
            05  CUSTOMER-ID       PIC X(10).
+           05  CUSTOMER-NAME     PIC X(30).
 `;
 
 const customerB = `
        01  CLIENT-REC.
            05  CUSTOMER-ID       PIC X(10).
+           05  CUSTOMER-NAME     PIC X(30).
 `;
 
 const legacyCustomer = `
        01  LEGACY-CUSTOMER.
            05  CUSTOMER-ID       PIC 9(8).
+`;
+
+const nestedCustomer = `
+       01  ORDER-REC.
+           05  HEADER.
+               10  CUSTOMER-ID   PIC X(10).
+               10  CUSTOMER-NAME PIC X(30).
 `;
 
 function program(programId: string, copybook: string): string {
@@ -61,7 +70,7 @@ describe("COBOL field lineage", () => {
     expect(zipCode!.linkage).toBe("deterministic");
   });
 
-  it("does not infer same-name same-type fields across different copybooks", () => {
+  it("infers same-name same-type fields across different copybooks when structural context aligns", () => {
     const lineage = buildFieldLineage([
       model(customerA, "CUSTOMER-A.cpy"),
       model(customerB, "CUSTOMER-B.cpy"),
@@ -69,18 +78,50 @@ describe("COBOL field lineage", () => {
       model(program("BILLINGB", "CUSTOMER-B"), "BILLINGB.cbl"),
     ]);
 
-    expect(lineage).toBeNull();
+    expect(lineage).not.toBeNull();
+    expect(lineage!.summary.deterministic).toBe(0);
+    expect(lineage!.summary.inferredHighConfidence).toBeGreaterThan(0);
+    const customerId = lineage!.inferredHighConfidence.find((entry) => entry.fieldName === "CUSTOMER-ID");
+    expect(customerId).toBeDefined();
+    expect(customerId!.left.copybook.id).toBe("copybook:CUSTOMER-A");
+    expect(customerId!.right.copybook.id).toBe("copybook:CUSTOMER-B");
+    expect(customerId!.evidence.parentContextMatch).toBe("top-level");
+    expect(customerId!.evidence.siblingOverlap).toContain("CUSTOMER-NAME");
   });
 
-  it("does not infer conflicting field-name collisions across copybooks", () => {
+  it("does not infer same-name fields when structural context differs", () => {
     const lineage = buildFieldLineage([
       model(customerA, "CUSTOMER-A.cpy"),
-      model(legacyCustomer, "LEGACY-CUSTOMER.cpy"),
+      model(nestedCustomer, "NESTED-CUSTOMER.cpy"),
       model(program("BILLINGA", "CUSTOMER-A"), "BILLINGA.cbl"),
-      model(program("LEGACYB", "LEGACY-CUSTOMER"), "LEGACYB.cbl"),
+      model(program("ORDERPROC", "NESTED-CUSTOMER"), "ORDERPROC.cbl"),
     ]);
 
     expect(lineage).toBeNull();
+  });
+
+  it("marks competing cross-copybook matches as ambiguous", () => {
+    const customerC = `
+       01  PARTY-REC.
+           05  CUSTOMER-ID       PIC X(10).
+           05  CUSTOMER-NAME     PIC X(30).
+`;
+
+    const lineage = buildFieldLineage([
+      model(customerA, "CUSTOMER-A.cpy"),
+      model(customerB, "CUSTOMER-B.cpy"),
+      model(customerC, "CUSTOMER-C.cpy"),
+      model(program("BILLINGA", "CUSTOMER-A"), "BILLINGA.cbl"),
+      model(program("BILLINGB", "CUSTOMER-B"), "BILLINGB.cbl"),
+      model(program("BILLINGC", "CUSTOMER-C"), "BILLINGC.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    expect(lineage!.summary.inferredHighConfidence).toBe(0);
+    expect(lineage!.summary.inferredAmbiguous).toBeGreaterThan(0);
+    const customerId = lineage!.inferredAmbiguous.find((entry) => entry.fieldName === "CUSTOMER-ID");
+    expect(customerId).toBeDefined();
+    expect(customerId!.evidence.competingMatches).toBeGreaterThan(0);
   });
 
   it("does not treat COPY REPLACING consumers as deterministic shared lineage", () => {
@@ -217,8 +258,9 @@ describe("COBOL field lineage", () => {
     expect(page.path).toBe("cobol/field-lineage.md");
     expect(page.content).toContain("COBOL Field Lineage");
     expect(page.content).toContain("Shared Copybook-Backed Fields");
-    expect(page.content).not.toContain("High-Confidence Candidates");
-    expect(page.content).not.toContain("Ambiguous Collisions");
+    expect(page.content).toContain("Inferred Cross-Copybook Candidates");
+    expect(page.content).toContain("High Confidence");
+    expect(page.content).toContain("Ambiguous");
     expect(page.content).toContain("CUSTOMER-REC");
   });
 });

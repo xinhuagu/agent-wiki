@@ -92,8 +92,52 @@ describe("code-analysis plugin system", () => {
       expect(performs.length).toBeGreaterThanOrEqual(2);
     });
 
+    it("produces file-access relations from parsed file operations", () => {
+      const fileAccesses = model.relations.filter((r) => r.type === "file-access");
+      expect(fileAccesses.length).toBeGreaterThanOrEqual(3);
+      expect(fileAccesses.some((r) => r.to === "EMPLOYEE-FILE" && r.metadata?.operation === "OPEN")).toBe(true);
+      expect(fileAccesses.some((r) => r.to === "EMPLOYEE-FILE" && r.metadata?.operation === "READ")).toBe(true);
+      expect(fileAccesses.some((r) => r.to === "EMPLOYEE-FILE" && r.metadata?.operation === "CLOSE")).toBe(true);
+    });
+
     it("has no diagnostics for valid source", () => {
       expect(model.diagnostics).toEqual([]);
+    });
+  });
+
+  describe("external dependency extraction", () => {
+    it("extracts DB2 table references and normalizes them into relations", () => {
+      const source = fixture("CUSTOMER-DB2.cbl");
+      const ast = cobolPlugin.parse(source, "CUSTOMER-DB2.cbl");
+      const cobolModel = extractModel(ast as ReturnType<typeof parse>);
+      const model = cobolPlugin.normalize(ast) as NormalizedCodeModel;
+
+      expect(cobolModel.db2References).toHaveLength(1);
+      expect(cobolModel.db2References[0].operation).toBe("SELECT");
+      expect(cobolModel.db2References[0].tables).toEqual(["CUSTOMER_STATUS", "CUSTOMER_TABLE"]);
+
+      const db2Tables = model.relations.filter((r) => r.type === "db2-table");
+      expect(db2Tables.map((r) => r.to)).toEqual(["CUSTOMER_STATUS", "CUSTOMER_TABLE"]);
+      expect(db2Tables.every((r) => r.metadata?.operation === "SELECT")).toBe(true);
+    });
+
+    it("extracts CICS external targets and normalizes them into relations", () => {
+      const source = fixture("ONLINE-CICS.cbl");
+      const ast = cobolPlugin.parse(source, "ONLINE-CICS.cbl");
+      const cobolModel = extractModel(ast as ReturnType<typeof parse>);
+      const model = cobolPlugin.normalize(ast) as NormalizedCodeModel;
+
+      expect(cobolModel.cicsReferences).toHaveLength(1);
+      expect(cobolModel.cicsReferences[0]).toMatchObject({
+        command: "LINK",
+        program: "CUSTSRV",
+        transaction: "C001",
+        map: "CUSTMAP",
+      });
+
+      expect(model.relations.some((r) => r.type === "cics-program" && r.to === "CUSTSRV")).toBe(true);
+      expect(model.relations.some((r) => r.type === "cics-transaction" && r.to === "C001")).toBe(true);
+      expect(model.relations.some((r) => r.type === "cics-map" && r.to === "CUSTMAP")).toBe(true);
     });
   });
 
@@ -156,6 +200,12 @@ describe("code-analysis plugin system", () => {
 
     it("page content includes PAYROLL", () => {
       expect(pages[0].content).toContain("PAYROLL");
+    });
+
+    it("page content includes external dependency summaries", () => {
+      expect(pages[0].content).toContain("External Dependencies");
+      expect(pages[0].content).toContain("File Access");
+      expect(pages[0].content).toContain("EMPLOYEE-FILE");
     });
   });
 

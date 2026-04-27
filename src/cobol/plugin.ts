@@ -155,6 +155,59 @@ function cobolToNormalized(cobolModel: CobolCodeModel): NormalizedCodeModel {
       metadata: c.replacing ? { replacing: c.replacing } : undefined,
     });
   }
+  for (const db2 of cobolModel.db2References) {
+    for (const table of db2.tables) {
+      relations.push({
+        type: "db2-table",
+        from: canonicalId,
+        to: table,
+        loc: db2.loc,
+        metadata: db2.operation ? { operation: db2.operation } : undefined,
+      });
+    }
+  }
+  for (const cics of cobolModel.cicsReferences) {
+    if (cics.program) {
+      relations.push({
+        type: "cics-program",
+        from: canonicalId,
+        to: cics.program,
+        loc: cics.loc,
+        metadata: { command: cics.command },
+      });
+    }
+    if (cics.transaction) {
+      relations.push({
+        type: "cics-transaction",
+        from: canonicalId,
+        to: cics.transaction,
+        loc: cics.loc,
+        metadata: { command: cics.command },
+      });
+    }
+    if (cics.map) {
+      relations.push({
+        type: "cics-map",
+        from: canonicalId,
+        to: cics.map,
+        loc: cics.loc,
+        metadata: { command: cics.command },
+      });
+    }
+  }
+  for (const access of cobolModel.fileAccesses) {
+    relations.push({
+      type: "file-access",
+      from: canonicalId,
+      to: access.file,
+      loc: access.loc,
+      metadata: {
+        operation: access.operation,
+        mode: access.mode,
+        recordName: access.recordName,
+      },
+    });
+  }
 
   return { units, procedures, symbols, relations, diagnostics: [] };
 }

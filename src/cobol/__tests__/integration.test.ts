@@ -174,6 +174,49 @@ describe("COBOL MCP tools integration", () => {
     expect(readFileSync(pagePath, "utf-8")).toContain("CUSTOMER-REC");
   });
 
+  it("code_parse persists DB2 references into model artifacts and wiki summaries", async () => {
+    const source = readFileSync(join(FIXTURES, "CUSTOMER-DB2.cbl"), "utf-8");
+    wiki.rawAdd("CUSTOMER-DB2.cbl", { content: source });
+
+    const result = await handleTool(wiki, "code_parse", { path: "CUSTOMER-DB2.cbl" });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.artifacts).toContain("raw/parsed/cobol/CUSTOMER-DB2.model.json");
+    expect(parsed.wikiPages).toContain("cobol/programs/customerdb.md");
+
+    const modelPath = join(tmp, "raw", "parsed", "cobol", "CUSTOMER-DB2.model.json");
+    const pagePath = join(tmp, "wiki", "cobol", "programs", "customerdb.md");
+    const modelJson = JSON.parse(readFileSync(modelPath, "utf-8"));
+    expect(modelJson.db2References).toHaveLength(1);
+    expect(modelJson.db2References[0].tables).toEqual(["CUSTOMER_STATUS", "CUSTOMER_TABLE"]);
+    expect(readFileSync(pagePath, "utf-8")).toContain("### DB2");
+    expect(readFileSync(pagePath, "utf-8")).toContain("CUSTOMER_TABLE");
+  });
+
+  it("code_parse persists CICS references into model artifacts and wiki summaries", async () => {
+    const source = readFileSync(join(FIXTURES, "ONLINE-CICS.cbl"), "utf-8");
+    wiki.rawAdd("ONLINE-CICS.cbl", { content: source });
+
+    const result = await handleTool(wiki, "code_parse", { path: "ONLINE-CICS.cbl" });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.artifacts).toContain("raw/parsed/cobol/ONLINE-CICS.model.json");
+    expect(parsed.wikiPages).toContain("cobol/programs/onlinesvc.md");
+
+    const modelPath = join(tmp, "raw", "parsed", "cobol", "ONLINE-CICS.model.json");
+    const pagePath = join(tmp, "wiki", "cobol", "programs", "onlinesvc.md");
+    const modelJson = JSON.parse(readFileSync(modelPath, "utf-8"));
+    expect(modelJson.cicsReferences).toHaveLength(1);
+    expect(modelJson.cicsReferences[0]).toMatchObject({
+      command: "LINK",
+      program: "CUSTSRV",
+      transaction: "C001",
+      map: "CUSTMAP",
+    });
+    expect(readFileSync(pagePath, "utf-8")).toContain("### CICS");
+    expect(readFileSync(pagePath, "utf-8")).toContain("CUSTSRV");
+  });
+
   it("code_parse succeeds with a .cpy copybook", async () => {
     const source = readFileSync(join(FIXTURES, "DATE-UTILS.cpy"), "utf-8");
     wiki.rawAdd("DATE-UTILS.cpy", { content: source });

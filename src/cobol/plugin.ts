@@ -62,6 +62,37 @@ function flattenDataItems(items: DataItemNode[], parent?: string): CodeSymbol[] 
   return symbols;
 }
 
+function loadCobolModels(parsedDir: string): CobolCodeModel[] {
+  const modelPaths: string[] = [];
+
+  const walk = (dir: string) => {
+    const entries = readdirSync(dir, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith(".model.json")) continue;
+      modelPaths.push(full);
+    }
+  };
+
+  if (!existsSync(parsedDir)) return [];
+  walk(parsedDir);
+
+  const models: CobolCodeModel[] = [];
+  for (const full of modelPaths.sort((a, b) => a.localeCompare(b))) {
+    try {
+      models.push(JSON.parse(readFileSync(full, "utf-8")));
+    } catch {
+      // Skip malformed files
+    }
+  }
+  return models;
+}
+
 // ---------------------------------------------------------------------------
 // COBOL → NormalizedCodeModel
 // ---------------------------------------------------------------------------
@@ -192,15 +223,7 @@ export const cobolPlugin: CodeAnalysisPlugin = {
 
   rebuildAggregatePages(parsedDir: string): Array<{ path: string; content: string }> {
     if (!existsSync(parsedDir)) return [];
-    const models: CobolCodeModel[] = [];
-    for (const file of readdirSync(parsedDir)) {
-      if (!file.endsWith(".model.json")) continue;
-      try {
-        models.push(JSON.parse(readFileSync(join(parsedDir, file), "utf-8")));
-      } catch {
-        // Skip malformed files
-      }
-    }
+    const models = loadCobolModels(parsedDir);
     if (models.length === 0) return [];
     return [generateCallGraphPage(models)];
   },
@@ -210,15 +233,7 @@ export const cobolPlugin: CodeAnalysisPlugin = {
     wikiPages: Array<{ path: string; content: string }>;
   } | null {
     if (!existsSync(parsedDir)) return null;
-    const models: CobolCodeModel[] = [];
-    for (const file of readdirSync(parsedDir)) {
-      if (!file.endsWith(".model.json")) continue;
-      try {
-        models.push(JSON.parse(readFileSync(join(parsedDir, file), "utf-8")));
-      } catch {
-        // Skip malformed files
-      }
-    }
+    const models = loadCobolModels(parsedDir);
     if (models.length === 0) return null;
 
     const builder = new KnowledgeGraphBuilder();

@@ -10,6 +10,8 @@
  * This module is language-agnostic — plugins populate it via the builder API.
  */
 
+import { basename } from "node:path";
+
 // ---------------------------------------------------------------------------
 // Confidence model (3-tier)
 // ---------------------------------------------------------------------------
@@ -102,6 +104,56 @@ export interface GraphDiagnostic {
   message: string;
   sourceFile?: string;
   line?: number;
+}
+
+/** Get all edges from a given node in a built graph. */
+export function graphEdgesFrom(graph: KnowledgeGraph, nodeId: string): GraphEdge[] {
+  return graph.edges.filter((e) => e.from === nodeId);
+}
+
+/** Get all edges to a given node in a built graph. */
+export function graphEdgesTo(graph: KnowledgeGraph, nodeId: string): GraphEdge[] {
+  return graph.edges.filter((e) => e.to === nodeId);
+}
+
+/** Get nodes that directly depend on the given node (reverse lookup). */
+export function graphDependentsOf(graph: KnowledgeGraph, nodeId: string): GraphNode[] {
+  const fromIds = graphEdgesTo(graph, nodeId).map((e) => e.from);
+  return [...new Set(fromIds)].map((id) => graph.nodes.get(id)).filter(Boolean) as GraphNode[];
+}
+
+/**
+ * Impact analysis over a built graph: given a changed node, find all transitively
+ * affected nodes grouped by reverse-dependency depth.
+ */
+export function graphImpactOf(graph: KnowledgeGraph, nodeId: string, maxDepth = 10): Map<number, GraphNode[]> {
+  const result = new Map<number, GraphNode[]>();
+  const visited = new Set<string>([nodeId]);
+  let frontier = [nodeId];
+  let depth = 0;
+
+  while (frontier.length > 0 && depth < maxDepth) {
+    depth++;
+    const nextFrontier: string[] = [];
+    const levelNodes: GraphNode[] = [];
+
+    for (const id of frontier) {
+      for (const dep of graphDependentsOf(graph, id)) {
+        if (!visited.has(dep.id)) {
+          visited.add(dep.id);
+          nextFrontier.push(dep.id);
+          levelNodes.push(dep);
+        }
+      }
+    }
+
+    if (levelNodes.length > 0) {
+      result.set(depth, levelNodes);
+    }
+    frontier = nextFrontier;
+  }
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,10 +277,12 @@ export class KnowledgeGraphBuilder {
   // ---- build --------------------------------------------------------------
 
   build(): KnowledgeGraph {
+    const validationDiagnostics: GraphDiagnostic[] = [];
+
     // Validate: warn about edges referencing non-existent nodes
     for (const edge of this.edges) {
       if (!this.nodes.has(edge.from)) {
-        this.diagnostics.push({
+        validationDiagnostics.push({
           severity: "warning",
           message: `Edge references unknown source node: ${edge.from}`,
           sourceFile: edge.evidence.sourceFile,
@@ -236,7 +290,7 @@ export class KnowledgeGraphBuilder {
         });
       }
       if (!this.nodes.has(edge.to)) {
-        this.diagnostics.push({
+        validationDiagnostics.push({
           severity: "warning",
           message: `Edge references unknown target node: ${edge.to} (unresolved ${edge.kind} from ${edge.from})`,
           sourceFile: edge.evidence.sourceFile,
@@ -254,7 +308,7 @@ export class KnowledgeGraphBuilder {
         const referencingEdges = this.edges.filter((e) => e.to === id);
         const referrers = referencingEdges.map((e) => e.from).join(", ");
         const firstRef = referencingEdges[0];
-        this.diagnostics.push({
+        validationDiagnostics.push({
           severity: "warning",
           message: `Unresolved ${node.kind} "${id}" — referenced by [${referrers}] but never parsed from source`,
           sourceFile: firstRef?.evidence.sourceFile,
@@ -266,7 +320,7 @@ export class KnowledgeGraphBuilder {
     return {
       nodes: new Map(this.nodes),
       edges: [...this.edges],
-      diagnostics: [...this.diagnostics],
+      diagnostics: [...this.diagnostics, ...validationDiagnostics],
     };
   }
 }
@@ -292,7 +346,7 @@ export class KnowledgeGraphBuilder {
  * Supported extensions: .cbl, .cob, .cpy (case-insensitive).
  */
 export function stripSourceExtension(filename: string): string {
-  return filename.replace(/\.(cpy|cbl|cob)$/i, "");
+  return basename(filename).replace(/\.(cpy|cbl|cob)$/i, "");
 }
 
 /**
@@ -300,7 +354,7 @@ export function stripSourceExtension(filename: string): string {
  *
  * - If programId is set (normal .cbl with PROGRAM-ID): use it as-is.
  * - Otherwise (standalone copybook, or .cbl missing PROGRAM-ID): strip
- *   the file extension from sourceFile to get the logical name.
+ *   the file extension from the basename of sourceFile to get the logical name.
  */
 export function resolveCanonicalId(model: { programId: string; sourceFile: string }): string {
   return model.programId || stripSourceExtension(model.sourceFile);

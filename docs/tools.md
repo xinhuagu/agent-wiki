@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-agent-wiki exposes 18 tools through the Model Context Protocol.
+agent-wiki exposes 19 tools through the Model Context Protocol.
 
 ## Raw Layer — Immutable Sources
 
@@ -40,6 +40,7 @@ agent-wiki exposes 18 tools through the Model Context Protocol.
 |------|-------------|
 | `code_parse` | Parse a source file from raw/ into structured code knowledge (AST, normalized model, summary). Generates wiki pages automatically. Currently supports COBOL (.cbl, .cob, .cpy). Optionally traces a variable. |
 | `code_trace_variable` | Trace all references to a variable across a parsed source file. Shows where it is read, written, or passed, grouped by section/paragraph. |
+| `code_impact` | Query the compiled COBOL knowledge graph for downstream impact. Returns affected nodes grouped by dependency depth, with evidence and unresolved/lower-confidence markers. |
 
 The code analysis system is plugin-based with a language-agnostic `NormalizedCodeModel`:
 

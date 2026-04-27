@@ -137,6 +137,19 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
   const parsedPrograms = models.filter((model) => !isCopybook(model.sourceFile));
   if (parsedCopybooks.length === 0 || parsedPrograms.length === 0) return null;
 
+  const copybooksByLogicalName = new Map<string, CobolCodeModel[]>();
+  for (const copybook of parsedCopybooks) {
+    const logicalName = resolveCanonicalId(copybook);
+    const list = copybooksByLogicalName.get(logicalName) ?? [];
+    list.push(copybook);
+    copybooksByLogicalName.set(logicalName, list);
+  }
+  const duplicateLogicalNames = new Set(
+    [...copybooksByLogicalName.entries()]
+      .filter(([, list]) => list.length > 1)
+      .map(([logicalName]) => logicalName)
+  );
+
   const consumersByCopybook = new Map<string, FieldConsumer[]>();
   for (const program of parsedPrograms) {
     const programId = `program:${resolveCanonicalId(program)}`;
@@ -153,7 +166,9 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
     }
   }
 
-  const copybookUsage = parsedCopybooks.map((copybook) => {
+  const rawCopybookUsage = parsedCopybooks
+    .filter((copybook) => !duplicateLogicalNames.has(resolveCanonicalId(copybook)))
+    .map((copybook) => {
     const logicalName = resolveCanonicalId(copybook);
     const copybookId = `copybook:${logicalName}`;
     const consumers = [...new Map(
@@ -169,10 +184,10 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
   }).filter((entry) => entry.programs.length > 0)
     .sort((a, b) => a.copybookId.localeCompare(b.copybookId));
 
-  if (copybookUsage.length === 0) return null;
+  if (rawCopybookUsage.length === 0) return null;
 
   const flattenedByCopybook = new Map<string, FlattenedField[]>();
-  for (const copybook of parsedCopybooks) {
+  for (const copybook of parsedCopybooks.filter((entry) => !duplicateLogicalNames.has(resolveCanonicalId(entry)))) {
     const copybookId = `copybook:${resolveCanonicalId(copybook)}`;
     flattenedByCopybook.set(copybookId, flattenDataItems(copybook.dataItems, copybookId, copybook.sourceFile));
   }
@@ -180,7 +195,7 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
   const deterministic: SerializedFieldLineageEntry[] = [];
   const candidateFields: Array<FlattenedField & { programs: FieldConsumer[] }> = [];
 
-  for (const usage of copybookUsage) {
+  for (const usage of rawCopybookUsage) {
     const fields = flattenedByCopybook.get(usage.copybookId) ?? [];
     const exactPrograms = usage.programs.filter((program) => !program.replacing || program.replacing.length === 0);
     for (const field of fields) {
@@ -268,10 +283,18 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
     return null;
   }
 
+  const participatingCopybookIds = new Set<string>();
+  const participatingProgramIds = new Set<string>();
+  for (const entry of [...sortedDeterministic, ...sortedHighConfidence, ...sortedAmbiguous]) {
+    for (const copybook of entry.copybooks) participatingCopybookIds.add(copybook.id);
+    for (const program of entry.programs) participatingProgramIds.add(program.id);
+  }
+  const copybookUsage = rawCopybookUsage.filter((entry) => participatingCopybookIds.has(entry.copybookId));
+
   return {
     summary: {
-      copybooks: copybookUsage.length,
-      programs: sortUnique(copybookUsage.flatMap((entry) => entry.programs.map((program) => program.id))).length,
+      copybooks: participatingCopybookIds.size,
+      programs: participatingProgramIds.size,
       deterministic: sortedDeterministic.length,
       highConfidence: sortedHighConfidence.length,
       ambiguous: sortedAmbiguous.length,

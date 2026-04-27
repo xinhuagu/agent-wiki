@@ -113,6 +113,43 @@ describe("COBOL field lineage", () => {
     expect(lineage).toBeNull();
   });
 
+  it("summary counts only programs that actually participate in lineage", () => {
+    const lineage = buildFieldLineage([
+      model(sharedCopybook, "CUSTOMER-REC.cpy"),
+      model(customerB, "CUSTOMER-B.cpy"),
+      model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl"),
+      model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl"),
+      model(program("BILLINGB", "CUSTOMER-B"), "BILLINGB.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    expect(lineage!.summary.programs).toBe(3);
+    expect(lineage!.copybookUsage.map((entry) => entry.copybookId)).toEqual([
+      "copybook:CUSTOMER-B",
+      "copybook:CUSTOMER-REC",
+    ]);
+  });
+
+  it("does not conflate parsed copybooks that share the same basename", () => {
+    const billingCommon = `
+       01  BILLING-COMMON.
+           05  SHARED-ID         PIC X(10).
+`;
+    const claimsCommon = `
+       01  CLAIMS-COMMON.
+           05  CLAIM-ID          PIC 9(8).
+`;
+
+    const lineage = buildFieldLineage([
+      model(billingCommon, "billing/COMMON.cpy"),
+      model(claimsCommon, "claims/COMMON.cpy"),
+      model(program("BILLINGA", "COMMON"), "BILLINGA.cbl"),
+      model(program("BILLINGB", "COMMON"), "BILLINGB.cbl"),
+    ]);
+
+    expect(lineage).toBeNull();
+  });
+
   it("generates a lineage wiki summary page", () => {
     const lineage = buildFieldLineage([
       model(sharedCopybook, "CUSTOMER-REC.cpy"),

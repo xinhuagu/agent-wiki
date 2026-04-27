@@ -564,6 +564,58 @@ describe("COBOL MCP tools integration", () => {
       expect(existsSync(pagePath)).toBe(false);
     });
 
+    it("wiki_rebuild removes stale field-lineage outputs when parsed model directory disappears", async () => {
+      const copybook = `
+       01  CUSTOMER-REC.
+           05  CUSTOMER-ID       PIC X(10).
+`;
+      const orderA = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERA.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+      const orderB = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERB.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+
+      wiki.rawAdd("ORDERA.cbl", { content: orderA });
+      wiki.rawAdd("ORDERB.cbl", { content: orderB });
+      wiki.rawAdd("CUSTOMER-REC.cpy", { content: copybook });
+
+      await handleTool(wiki, "code_parse", { path: "ORDERA.cbl" }, { skipGraphRebuild: true });
+      await handleTool(wiki, "code_parse", { path: "ORDERB.cbl" }, { skipGraphRebuild: true });
+      await handleTool(wiki, "code_parse", { path: "CUSTOMER-REC.cpy" }, { skipGraphRebuild: true });
+      await handleTool(wiki, "wiki_rebuild", {});
+
+      const lineagePath = join(tmp, "raw", "parsed", "cobol", "field-lineage.json");
+      const lineageMetaPath = `${lineagePath}.meta.yaml`;
+      const pagePath = join(tmp, "wiki", "cobol", "field-lineage.md");
+      expect(existsSync(lineagePath)).toBe(true);
+      expect(existsSync(pagePath)).toBe(true);
+
+      rmSync(join(tmp, "raw", "parsed", "cobol"), { recursive: true, force: true });
+
+      await handleTool(wiki, "wiki_rebuild", {});
+
+      expect(existsSync(lineagePath)).toBe(false);
+      expect(existsSync(lineageMetaPath)).toBe(false);
+      expect(existsSync(pagePath)).toBe(false);
+    });
+
     it("wiki_rebuild includes graph pages in index.md and timeline.md", async () => {
       const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
       wiki.rawAdd("PAYROLL.cbl", { content: payrollSrc });

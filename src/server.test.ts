@@ -2139,3 +2139,437 @@ describe("wiki_search: knowledge_gap", () => {
     expect(parsed.knowledge_gap.suggested_page).toMatch(/^artifact-/);
   });
 });
+
+// ═══════════════════════════════════════════════════════
+//  CONSOLIDATED PUBLIC TOOLS — routing and backward compat
+// ═══════════════════════════════════════════════════════
+
+describe("consolidated tool: raw_ingest", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("mode:add delegates to raw_add", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "raw_ingest", {
+      mode: "add",
+      filename: "ingest-test.md",
+      content: "hello from raw_ingest",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.document.path).toBe("ingest-test.md");
+    // verify file actually exists in raw
+    const docs = wiki.rawList();
+    expect(docs.some((d) => d.path === "ingest-test.md")).toBe(true);
+  });
+
+  it("mode:fetch delegates to raw_fetch", async () => {
+    const wiki = freshWiki();
+    const readable = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(Buffer.from("fetched content")));
+        controller.close();
+      },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(readable, { status: 200, headers: { "content-type": "text/plain" } })
+    );
+    try {
+      const result = await handleTool(wiki, "raw_ingest", {
+        mode: "fetch",
+        url: "https://example.com/doc.txt",
+        filename: "fetched-via-ingest.txt",
+      });
+      const parsed = JSON.parse(result as string);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.document.path).toBe("fetched-via-ingest.txt");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("throws on unknown mode", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "raw_ingest", { mode: "invalid_mode" })
+    ).rejects.toThrow(/Unknown raw_ingest mode/);
+  });
+
+  it("throws when mode is missing", async () => {
+    const wiki = freshWiki();
+    await expect(handleTool(wiki, "raw_ingest", {})).rejects.toThrow(/Unknown raw_ingest mode/);
+  });
+});
+
+describe("consolidated tool: wiki_admin", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("action:config returns current config", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_admin", { action: "config" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed).toHaveProperty("wikiDir");
+    expect(parsed).toHaveProperty("rawDir");
+    expect(parsed).toHaveProperty("search");
+  });
+
+  it("action:rebuild runs without error", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_admin", { action: "rebuild" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.message).toMatch(/rebuilt/i);
+  });
+
+  it("action:lint returns a lint report", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_admin", { action: "lint" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed).toHaveProperty("issues");
+    expect(parsed).toHaveProperty("pagesChecked");
+  });
+
+  it("action:init initializes a new knowledge base", async () => {
+    // Use a fresh subdirectory to avoid conflicts
+    const initPath = join(TEST_ROOT, "fresh-kb");
+    mkdirSync(initPath, { recursive: true });
+    const wiki = freshWiki(); // need a wiki instance for handleTool signature
+    const result = await handleTool(wiki, "wiki_admin", { action: "init", path: initPath });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(existsSync(join(initPath, "wiki"))).toBe(true);
+    expect(existsSync(join(initPath, "raw"))).toBe(true);
+  });
+
+  it("throws on unknown action", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "wiki_admin", { action: "unknown_action" })
+    ).rejects.toThrow(/Unknown wiki_admin action/);
+  });
+
+  it("throws when action is missing", async () => {
+    const wiki = freshWiki();
+    await expect(handleTool(wiki, "wiki_admin", {})).rejects.toThrow(/Unknown wiki_admin action/);
+  });
+});
+
+describe("consolidated tool: code_query", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("query_type:trace_variable traces a variable in parsed COBOL", async () => {
+    const wiki = freshWiki();
+    const cobol = `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SAMPLE.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-COUNTER PIC 9(4) VALUE 0.
+       PROCEDURE DIVISION.
+           MOVE 1 TO WS-COUNTER.
+           STOP RUN.`;
+    wiki.rawAdd("SAMPLE.cbl", { content: cobol });
+    // parse first
+    await handleTool(wiki, "code_parse", { path: "SAMPLE.cbl" });
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "trace_variable",
+      path: "SAMPLE.cbl",
+      variable: "WS-COUNTER",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.variable).toBe("WS-COUNTER");
+    expect(parsed.file).toBe("SAMPLE.cbl");
+    expect(Array.isArray(parsed.references)).toBe(true);
+  });
+
+  it("throws on unknown query_type", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "code_query", { query_type: "unknown" })
+    ).rejects.toThrow(/Unknown code_query query_type/);
+  });
+
+  it("throws when query_type is missing", async () => {
+    const wiki = freshWiki();
+    await expect(handleTool(wiki, "code_query", {})).rejects.toThrow(/Unknown code_query query_type/);
+  });
+});
+
+describe("consolidated tool: knowledge_ingest", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("mode:batch delegates to knowledge_ingest_batch", async () => {
+    const wiki = freshWiki();
+    const srcDir = join(TEST_ROOT, "sources");
+    mkdirSync(srcDir, { recursive: true });
+    writeFileSync(join(srcDir, "doc.txt"), "content of doc");
+    // Add allowed source dir to config
+    (wiki.config as any).allowedSourceDirs = [srcDir];
+    const result = await handleTool(wiki, "knowledge_ingest", {
+      mode: "batch",
+      source_path: srcDir,
+      topic: "test-topic",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.matched).toBeGreaterThan(0);
+  });
+
+  it("mode:digest_write delegates to knowledge_digest_write", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_ingest", {
+      mode: "digest_write",
+      pages: [
+        { page: "concept-test.md", title: "Test Concept", body: "Some content about testing." },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(1);
+    expect(parsed.written).toBe(1);
+  });
+
+  it("throws on unknown mode", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "knowledge_ingest", { mode: "unknown" })
+    ).rejects.toThrow(/Unknown knowledge_ingest mode/);
+  });
+
+  it("throws when mode is missing", async () => {
+    const wiki = freshWiki();
+    await expect(handleTool(wiki, "knowledge_ingest", {})).rejects.toThrow(/Unknown knowledge_ingest mode/);
+  });
+});
+
+describe("wiki_search: read_top_n combined search+read mode", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("returns pages array when read_top_n is set", async () => {
+    const wiki = freshWiki();
+    wiki.write("concept-alpha.md", `---
+title: Alpha Concept
+type: concept
+tags: [alpha]
+---
+Alpha is a concept about beginnings.`);
+    wiki.write("concept-beta.md", `---
+title: Beta Concept
+type: concept
+tags: [beta]
+---
+Beta is a concept about second iterations.`);
+    const result = await handleTool(wiki, "wiki_search", { query: "concept", read_top_n: 2 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed).toHaveProperty("results");
+    expect(parsed).toHaveProperty("pages");
+    expect(parsed).toHaveProperty("nextReads");
+    expect(Array.isArray(parsed.pages)).toBe(true);
+    expect(parsed.pagesRead).toBeGreaterThan(0);
+  });
+
+  it("deduplicates multiple hits on the same page", async () => {
+    const wiki = freshWiki();
+    wiki.write("concept-dup.md", `---
+title: Dup Concept
+type: concept
+tags: [dup, alpha, beta]
+---
+Alpha beta gamma delta epsilon. Alpha again.`);
+    const result = await handleTool(wiki, "wiki_search", { query: "alpha beta", read_top_n: 3, limit: 5 });
+    const parsed = JSON.parse(result as string);
+    const pagePaths = parsed.pages.map((p: any) => p.path);
+    const uniquePaths = [...new Set(pagePaths)];
+    expect(pagePaths.length).toBe(uniquePaths.length);
+  });
+
+  it("nextReads contains pages beyond read_top_n", async () => {
+    const wiki = freshWiki();
+    for (let i = 1; i <= 5; i++) {
+      wiki.write(`concept-item${i}.md`, `---
+title: Item ${i}
+type: concept
+tags: [searchable]
+---
+Searchable content item number ${i}.`);
+    }
+    const result = await handleTool(wiki, "wiki_search", { query: "searchable", read_top_n: 2, limit: 10 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pagesRead).toBeLessThanOrEqual(2);
+    expect(Array.isArray(parsed.nextReads)).toBe(true);
+  });
+
+  it("read_top_n is capped at 10", async () => {
+    const wiki = freshWiki();
+    wiki.write("concept-cap.md", `---
+title: Cap Test
+type: concept
+tags: [cap]
+---
+Capped at ten.`);
+    // read_top_n=99 should be clamped to 10 internally
+    const result = await handleTool(wiki, "wiki_search", { query: "capped", read_top_n: 99 });
+    const parsed = JSON.parse(result as string);
+    // Should not throw and should return valid structure
+    expect(parsed).toHaveProperty("pages");
+    expect(parsed.pagesRead).toBeLessThanOrEqual(10);
+  });
+
+  it("section filter applies to read pages when read_top_n is set", async () => {
+    const wiki = freshWiki();
+    wiki.write("concept-sections.md", `---
+title: Section Test
+type: concept
+tags: [sections]
+---
+## Introduction
+Intro content here.
+
+## Details
+Detail content here.`);
+    const result = await handleTool(wiki, "wiki_search", {
+      query: "sections",
+      read_top_n: 1,
+      section: "## Details",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.pages.length).toBeGreaterThan(0);
+    if (parsed.pages[0].content) {
+      expect(parsed.pages[0].content).toContain("Detail content");
+    }
+  });
+
+  it("knowledge_gap is returned when read_top_n is set but no results found", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_search", { query: "nonexistent-xyz-123", read_top_n: 3 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results).toHaveLength(0);
+    expect(parsed).toHaveProperty("knowledge_gap");
+  });
+});
+
+describe("backward compat: legacy tool names still work via handleTool", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("raw_add still works", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "raw_add", {
+      filename: "compat-test.md",
+      content: "backward compat content",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+  });
+
+  it("wiki_config still works", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_config", {});
+    const parsed = JSON.parse(result as string);
+    expect(parsed).toHaveProperty("wikiDir");
+  });
+
+  it("wiki_lint still works", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_lint", {});
+    const parsed = JSON.parse(result as string);
+    expect(parsed).toHaveProperty("issues");
+  });
+
+  it("wiki_rebuild still works", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_rebuild", {});
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+  });
+
+  it("wiki_search_read still works", async () => {
+    const wiki = freshWiki();
+    wiki.write("concept-compat.md", `---
+title: Compat Page
+type: concept
+tags: [compat]
+---
+Content for backward compatibility test.`);
+    const result = await handleTool(wiki, "wiki_search_read", { query: "compat" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed).toHaveProperty("results");
+    expect(parsed).toHaveProperty("pages");
+  });
+
+  it("knowledge_ingest_batch still works", async () => {
+    const wiki = freshWiki();
+    const srcDir = join(TEST_ROOT, "compat-sources");
+    mkdirSync(srcDir, { recursive: true });
+    writeFileSync(join(srcDir, "compat.txt"), "compat content");
+    (wiki.config as any).allowedSourceDirs = [srcDir];
+    const result = await handleTool(wiki, "knowledge_ingest_batch", {
+      source_path: srcDir,
+      topic: "compat-topic",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+  });
+
+  it("knowledge_digest_write still works", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "knowledge_digest_write", {
+      pages: [{ page: "concept-compat-write.md", title: "Compat Write", body: "body text" }],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.written).toBe(1);
+  });
+
+  it("code_trace_variable still works", async () => {
+    const wiki = freshWiki();
+    const cobol = `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. COMPAT.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-X PIC 9(4) VALUE 0.
+       PROCEDURE DIVISION.
+           MOVE 5 TO WS-X.
+           STOP RUN.`;
+    wiki.rawAdd("COMPAT.cbl", { content: cobol });
+    await handleTool(wiki, "code_parse", { path: "COMPAT.cbl" });
+    const result = await handleTool(wiki, "code_trace_variable", {
+      path: "COMPAT.cbl",
+      variable: "WS-X",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.variable).toBe("WS-X");
+  });
+});
+
+describe("batch: wiki_admin action:rebuild is deduplicated", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("wiki_admin action:rebuild is deferred and merged with end-of-batch rebuild", async () => {
+    const wiki = freshWiki();
+    wiki.write("concept-batch-rebuild.md", `---
+title: Batch Rebuild Test
+type: concept
+tags: [batch]
+---
+Content for batch rebuild test.`);
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_write", args: { page: "concept-extra.md", content: `---
+title: Extra
+type: concept
+tags: [extra]
+---
+Extra content.` } },
+        { tool: "wiki_admin", args: { action: "rebuild" } },
+      ],
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(2);
+    // wiki_admin action:rebuild should be deferred
+    const rebuildResult = parsed.results.find((r: any) => r.tool === "wiki_admin");
+    expect(rebuildResult?.result?.deferred).toMatch(/rebuild/);
+  });
+});

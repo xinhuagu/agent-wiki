@@ -45,47 +45,88 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       //  RAW LAYER — Immutable source documents
       // ═══════════════════════════════════════════════════════
       {
-        name: "raw_add",
+        name: "raw_ingest",
         description:
-          "Add a raw source document to the knowledge base. Raw files are IMMUTABLE — once added, they cannot be modified or overwritten. Each file gets a .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Use this for downloaded articles, papers, web pages, data files. Supports both content string and local file path (physical copy). If source_path points to a DIRECTORY, all files in it are imported recursively (use pattern to filter, e.g. '*.html'). IMPORTANT: When adding a single image file (PNG, JPEG, GIF, WEBP, etc.) under 10 MB, the image will be returned inline in the response so you can see it. Directory imports and oversized images return metadata only. When an image IS returned, you MUST immediately call wiki_write to create a description page for the image capturing what it shows, any text visible in it, and its relevance to the knowledge base.",
+          "Ingest raw source documents into the knowledge base. Select `mode` to control the ingestion method:\n" +
+          "- `add`: Add a local file or content string (immutable, SHA-256 verified). Supports directory imports. Single images (<10MB) returned inline — you MUST immediately call wiki_write to describe them.\n" +
+          "- `fetch`: Download a file from a URL into raw/ (arXiv abstract URLs auto-converted to PDF). Single images returned inline — you MUST immediately call wiki_write to describe them.\n" +
+          "- `import_confluence`: Recursively import Confluence pages with attachments and hierarchy. Requires CONFLUENCE_API_TOKEN env var ('email:api-token').\n" +
+          "- `import_jira`: Import a Jira issue with comments, attachments, and linked issues. Requires JIRA_API_TOKEN env var ('email:api-token').",
         inputSchema: {
           type: "object" as const,
           properties: {
+            mode: {
+              type: "string",
+              enum: ["add", "fetch", "import_confluence", "import_jira"],
+              description: "Ingestion mode: add (local file/content), fetch (URL download), import_confluence (Confluence pages), import_jira (Jira issues)",
+            },
             filename: {
               type: "string",
-              description: "Filename in raw/ (e.g. 'paper-attention.pdf', 'article-yolo.md'). When importing a directory, this becomes the subdirectory prefix in raw/ (e.g. 'my-docs').",
+              description: "[add] Filename in raw/ (e.g. 'paper.pdf'). For directory imports, becomes subdirectory prefix (e.g. 'my-docs').",
             },
             content: {
               type: "string",
-              description: "File content as string (for text files). Either content or source_path is required.",
+              description: "[add] File content as string. Either content or source_path is required.",
             },
             source_path: {
               type: "string",
-              description: "Absolute path to a local file OR DIRECTORY to physically copy into raw/. If a directory, all files are imported recursively. The original is NOT modified — full copies are made. Either content or source_path is required.",
+              description: "[add] Absolute path to local file or directory to copy into raw/. If directory, all files imported recursively. Either content or source_path is required.",
             },
             source_url: {
               type: "string",
-              description: "Original URL where the document was downloaded from",
+              description: "[add/fetch] Original URL where the document was downloaded from",
             },
             description: {
               type: "string",
-              description: "Brief description of what this source contains",
+              description: "[add/fetch] Brief description of what this source contains",
             },
             tags: {
               type: "array",
               items: { type: "string" },
-              description: "Tags for categorization",
+              description: "[add/fetch] Tags for categorization",
             },
             auto_version: {
               type: "boolean",
-              description: "If true and file already exists, automatically create a versioned copy (e.g. report_v2.xlsx) instead of failing. Default: false.",
+              description: "[add] If true and file already exists, create a versioned copy (e.g. report_v2.xlsx) instead of failing. Default: false.",
             },
             pattern: {
               type: "string",
-              description: "File pattern filter when importing a directory (e.g. '*.html', '*.xlsx', '*.{html,css}'). Only matching files are imported. Ignored for single file imports.",
+              description: "[add] File pattern filter for directory imports (e.g. '*.html', '*.{html,css}'). Ignored for single files.",
+            },
+            url: {
+              type: "string",
+              description: "[fetch] URL to download from. arXiv abs URLs auto-converted to PDF links. [import_confluence] Confluence page URL. [import_jira] Jira issue URL.",
+            },
+            recursive: {
+              type: "boolean",
+              description: "[import_confluence] Import child pages recursively (default: false)",
+            },
+            depth: {
+              type: "number",
+              description: "[import_confluence] Max recursion depth (-1 = unlimited, default: 50 when recursive=true)",
+            },
+            auth_env: {
+              type: "string",
+              description: "[import_confluence] Auth env var name (default: CONFLUENCE_API_TOKEN). [import_jira] Auth env var name (default: JIRA_API_TOKEN)",
+            },
+            include_comments: {
+              type: "boolean",
+              description: "[import_jira] Include issue comments (default: true)",
+            },
+            include_attachments: {
+              type: "boolean",
+              description: "[import_jira] Download attachments (default: true)",
+            },
+            include_links: {
+              type: "boolean",
+              description: "[import_jira] Import linked issues (default: true)",
+            },
+            link_depth: {
+              type: "number",
+              description: "[import_jira] Levels of linked issues to follow (default: 1)",
             },
           },
-          required: ["filename"],
+          required: ["mode"],
         },
       },
       {
@@ -167,103 +208,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
         },
       },
       // raw_verify removed — wiki_lint already includes SHA-256 integrity checks
-      {
-        name: "raw_fetch",
-        description:
-          "Download a file from a URL and save it to raw/ as an immutable source document. Automatically generates .meta.yaml sidecar with provenance (source URL, download time, SHA-256 hash). Smart URL handling: arXiv abstract URLs (arxiv.org/abs/XXXX) are auto-converted to PDF download links. Supports any downloadable file: PDFs, HTML pages, images, data files, etc. IMPORTANT: When fetching an image file (PNG, JPEG, GIF, WEBP, etc.) under 10 MB, the image will be returned inline in the response so you can see it. Oversized images return metadata only. When an image IS returned, you MUST immediately call wiki_write to create a description page for the image capturing what it shows, any text visible in it, and its relevance to the knowledge base.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            url: {
-              type: "string",
-              description: "URL to download from. arXiv abs URLs are auto-converted to PDF links (e.g. https://arxiv.org/abs/2304.00501 → PDF download)",
-            },
-            filename: {
-              type: "string",
-              description: "Optional filename in raw/. If omitted, auto-inferred from URL (arXiv papers get clean names like 'arxiv-2304-00501.pdf')",
-            },
-            description: {
-              type: "string",
-              description: "Brief description of what this source document contains",
-            },
-            tags: {
-              type: "array",
-              items: { type: "string" },
-              description: "Tags for categorization",
-            },
-          },
-          required: ["url"],
-        },
-      },
-      // ═══════════════════════════════════════════════════════
-      //  ATLASSIAN — Confluence & Jira
-      // ═══════════════════════════════════════════════════════
-      {
-        name: "raw_import_confluence",
-        description:
-          "Import a Confluence page (and optionally all child pages recursively) into raw/. " +
-          "Saves each page as HTML with metadata sidecar, and downloads all page attachments (images, PDFs, etc.) up to max_attachment_size. Generates _tree.yaml preserving page hierarchy. " +
-          "Requires CONFLUENCE_API_TOKEN env var set to 'email:api-token'.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            url: {
-              type: "string",
-              description: "Confluence page URL (e.g. https://company.atlassian.net/wiki/spaces/ENG/pages/123456/Page-Title)",
-            },
-            recursive: {
-              type: "boolean",
-              description: "Import child pages recursively (default: false)",
-            },
-            depth: {
-              type: "number",
-              description: "Max recursion depth (-1 = unlimited, default: 50 when recursive=true, 0 when false)",
-            },
-            auth_env: {
-              type: "string",
-              description: "Environment variable name containing auth credentials (default: CONFLUENCE_API_TOKEN)",
-            },
-          },
-          required: ["url"],
-        },
-      },
-      {
-        name: "raw_import_jira",
-        description:
-          "Import a Jira issue into raw/ with full details: fields, description, comments, attachments, and linked issues. " +
-          "Saves structured JSON + readable Markdown. Attachments are downloaded to subdirectory. " +
-          "Requires JIRA_API_TOKEN env var set to 'email:api-token'.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            url: {
-              type: "string",
-              description: "Jira issue URL (e.g. https://company.atlassian.net/browse/PROJ-123)",
-            },
-            include_comments: {
-              type: "boolean",
-              description: "Include issue comments (default: true)",
-            },
-            include_attachments: {
-              type: "boolean",
-              description: "Download attachments (default: true)",
-            },
-            include_links: {
-              type: "boolean",
-              description: "Import linked issues (default: true)",
-            },
-            link_depth: {
-              type: "number",
-              description: "How many levels of linked issues to follow (default: 1)",
-            },
-            auth_env: {
-              type: "string",
-              description: "Environment variable name containing auth credentials (default: JIRA_API_TOKEN)",
-            },
-          },
-          required: ["url"],
-        },
-      },
+      // raw_fetch, raw_import_confluence, raw_import_jira folded into raw_ingest
       // ═══════════════════════════════════════════════════════
       //  WIKI LAYER — Mutable compiled knowledge
       // ═══════════════════════════════════════════════════════
@@ -369,9 +314,10 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
         description:
           "Full-text keyword search across all wiki pages. Returns paths, scores, and snippets sorted by relevance. " +
           "Uses BM25 by default; switches to hybrid BM25+vector re-ranking when `search.hybrid: true` is set in " +
-          ".agent-wiki.yaml (requires wiki_rebuild to build the vector index first). " +
-          "Set include_content=true for simple inline content. For advanced search+read with deduplication, " +
-          "readTopN control, and per-page limits, use wiki_search_read instead. " +
+          ".agent-wiki.yaml (requires wiki_admin action:rebuild to build the vector index first). " +
+          "Set include_content=true for simple inline content (with optional inline_budget cap). " +
+          "Set read_top_n to additionally read the top N unique matching pages (deduplicated) — enables combined search+read in one call; " +
+          "returns a `pages` array with full content and `nextReads` for unread matches. " +
           "Use `type` or `tags` to narrow results without a separate wiki_list call. " +
           "When no results are found, returns a `knowledge_gap` field with a suggested page slug, title, type, and tags — use it to decide what to create with wiki_write.",
         inputSchema: {
@@ -396,109 +342,67 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             },
             include_content: {
               type: "boolean",
-              description: "If true, include page content in results. When a section matched, returns that section; otherwise returns first 200 lines. Saves a follow-up batch read. Default: false.",
+              description: "If true, include page content inline in results. When a section matched, returns that section; otherwise returns first 200 lines. Saves a follow-up batch read. Default: false.",
             },
             inline_budget: {
               type: "number",
               description: "Max total characters of inlined content across all results (only with include_content=true). Greedy — top-scoring results get content first; lower-scoring ones fall back to snippet-only when budget is exhausted. Omit for no limit.",
             },
-          },
-          required: ["query"],
-        },
-      },
-      {
-        name: "wiki_search_read",
-        description:
-          "Search wiki pages and read top results in a single call. " +
-          "Combines wiki_search + wiki_read with deduplication — multiple search hits on the same page read it only once. " +
-          "Returns search metadata (results) separately from page content (pages). " +
-          "Remaining unread result paths are listed in nextReads for follow-up if needed.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            query: {
-              type: "string",
-              description: "Search query (keywords)",
-            },
-            limit: {
+            read_top_n: {
               type: "number",
-              description: "Max search results (default: 10)",
-            },
-            readTopN: {
-              type: "number",
-              description: "How many unique top-scoring pages to read content for (default: 3, max: 10). Counts unique pages, not search results.",
+              description: "How many unique top-scoring pages to read in full (default: unset). When set, activates combined search+read mode: deduplicates search hits, reads up to N unique pages, and returns a `pages` array alongside `results`. Max: 10.",
             },
             section: {
               type: "string",
-              description: "Section heading filter applied to all page reads (e.g. '## Installation'). Case-insensitive partial match. If omitted, reads full page content.",
+              description: "Section heading filter applied to all page reads when read_top_n is set (e.g. '## Installation'). Case-insensitive partial match.",
             },
-            perPageLimit: {
+            per_page_limit: {
               type: "number",
-              description: "Max lines per page (default: 200, max: 500). Pages exceeding this are truncated with metadata.",
+              description: "Max lines per page when read_top_n is set (default: 200, max: 500). Pages exceeding this are truncated with metadata.",
             },
-            includeToc: {
+            include_toc: {
               type: "boolean",
-              description: "Include table of contents for truncated pages (default: false).",
+              description: "Include table of contents for truncated pages when read_top_n is set (default: false).",
             },
           },
           required: ["query"],
         },
       },
+      // wiki_search_read folded into wiki_search (read_top_n parameter)
       {
-        name: "wiki_lint",
+        name: "wiki_admin",
         description:
-          "Run comprehensive health checks. Detects: contradictions between pages (numeric/date claims across related pages), orphan pages, broken [[links]] (with 'did you mean?' suggestions from BM25), missing sources, stale content, raw file integrity (SHA-256 verification), synthesis page integrity. " +
-          "Set `apply_fixes: true` to automatically repair fixable issues: missing frontmatter pages get title + type + tags injected via auto-classify.",
+          "Wiki administration and maintenance. Select `action` to control behavior:\n" +
+          "- `init`: Initialize a new knowledge base — creates wiki/, raw/, schemas/ directories and default templates.\n" +
+          "- `config`: Show current workspace configuration: directories, lint settings, search settings, entity templates.\n" +
+          "- `rebuild`: Rebuild index.md, timeline.md, code knowledge graphs, and optionally the vector index (when search.hybrid is enabled).\n" +
+          "- `lint`: Run comprehensive health checks: contradictions, orphan pages, broken links, raw file integrity (SHA-256), synthesis page integrity. Set apply_fixes=true to auto-repair fixable issues.",
         inputSchema: {
           type: "object" as const,
           properties: {
-            apply_fixes: {
-              type: "boolean",
-              description: "If true, automatically fix auto-fixable issues (missing frontmatter → inject title/type/tags). Default: false.",
+            action: {
+              type: "string",
+              enum: ["init", "config", "rebuild", "lint"],
+              description: "Administration action to perform",
             },
-          },
-        },
-      },
-      // wiki_log removed — use wiki_read("log.md") instead
-      {
-        name: "wiki_init",
-        description:
-          "Initialize a new knowledge base. Creates wiki/, raw/, schemas/ directories and default templates. Optionally use a separate workspace directory for all data files.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
             path: {
               type: "string",
-              description: "Config root — where .agent-wiki.yaml is created (default: current directory)",
+              description: "[init] Config root — where .agent-wiki.yaml is created (default: current directory)",
             },
             workspace: {
               type: "string",
-              description: "Separate workspace directory for all data (wiki/, raw/, schemas/). If omitted, data goes in path.",
+              description: "[init] Separate workspace directory for wiki/, raw/, schemas/. If omitted, data goes in path.",
+            },
+            apply_fixes: {
+              type: "boolean",
+              description: "[lint] If true, automatically fix auto-fixable issues (missing frontmatter → inject title/type/tags). Default: false.",
             },
           },
+          required: ["action"],
         },
       },
-      {
-        name: "wiki_config",
-        description:
-          "Show the current workspace configuration: config root, workspace directory, data directories (wiki/, raw/, schemas/), lint settings, search settings (including hybrid mode status and vector count), and available entity type templates.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {},
-        },
-      },
-      // wiki_schemas removed — merged into wiki_config
-      {
-        name: "wiki_rebuild",
-        description:
-          "Rebuild the index.md and timeline.md from all wiki pages. If topic subdirectories exist, generates per-topic sub-indexes and a top-level hub. Otherwise groups pages by type with counts and dates. " +
-          "Also rebuilds code knowledge graphs (call-graph, system-map, knowledge-graph.json) from all parsed artifacts. " +
-          "When `search.hybrid: true` is enabled, also rebuilds the vector index (embeds all pages for semantic re-ranking). This downloads the embedding model (~90 MB) on first run.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {},
-        },
-      },
+      // wiki_log removed — use wiki_read("log.md") instead
+      // wiki_lint, wiki_init, wiki_config, wiki_rebuild folded into wiki_admin
       // wiki_classify removed — wiki_write auto-classifies internally
       // wiki_synthesize removed — agent can call wiki_read on multiple pages directly
 
@@ -543,59 +447,52 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
       //  KNOWLEDGE INGESTION — Batch import, extract, chunk, pack
       // ═══════════════════════════════════════════════════════
       {
-        name: "knowledge_ingest_batch",
+        name: "knowledge_ingest",
         description:
-          "Batch import, extract, chunk, and pack source documents into digest packs. " +
+          "Knowledge ingestion pipeline. Select `mode` to control behavior:\n" +
+          "- `batch`: Batch import, extract, chunk, and pack source documents into digest packs. " +
           "Scans a directory (or single file), imports to raw/, extracts text with structural provenance " +
           "(per-page PDF, per-sheet XLSX, per-slide PPTX), chunks into fixed-line segments, then packs " +
-          "into markdown digest packs under raw/digest-packs/{topic}/. Each pack includes provenance headers. " +
-          "Files already in raw/ are skipped. Returns a compact summary with recommended next reads.",
+          "into markdown digest packs under raw/digest-packs/{topic}/. Files already in raw/ are skipped.\n" +
+          "- `digest_write`: Write LLM-generated digest summaries to wiki with structured provenance. " +
+          "Creates or updates one or more wiki pages from digested content, linking back to source raw files and digest packs. " +
+          "Index is rebuilt once at the end. Each page gets auto-classified, auto-routed, and timestamped.",
         inputSchema: {
           type: "object" as const,
           properties: {
+            mode: {
+              type: "string",
+              enum: ["batch", "digest_write"],
+              description: "Ingestion mode: batch (import and pack source documents) or digest_write (write LLM summaries to wiki)",
+            },
             source_path: {
               type: "string",
-              description: "Absolute path to a directory or single file to ingest",
+              description: "[batch] Absolute path to a directory or single file to ingest",
             },
             pattern: {
               type: "string",
-              description: "Glob filter when source_path is a directory (e.g. '*.pdf', '*.{xlsx,docx}')",
+              description: "[batch] Glob filter when source_path is a directory (e.g. '*.pdf', '*.{xlsx,docx}')",
             },
             maxFiles: {
               type: "number",
-              description: "Maximum files to process (default: 100, max: 1000)",
+              description: "[batch] Maximum files to process (default: 100, max: 1000)",
             },
             topic: {
               type: "string",
-              description: "Topic name for organizing digest packs (default: 'general')",
+              description: "[batch] Topic name for organizing digest packs (default: 'general')",
             },
             chunkLines: {
               type: "number",
-              description: "Maximum lines per chunk (default: 100)",
+              description: "[batch] Maximum lines per chunk (default: 100)",
             },
             packLines: {
               type: "number",
-              description: "Maximum lines per digest pack (default: 500)",
+              description: "[batch] Maximum lines per digest pack (default: 500)",
             },
             continueOnError: {
               type: "boolean",
-              description: "Continue processing on individual file errors (default: true)",
+              description: "[batch] Continue processing on individual file errors (default: true)",
             },
-          },
-          required: ["source_path"],
-        },
-      },
-
-      {
-        name: "knowledge_digest_write",
-        description:
-          "Write LLM-generated digest summaries back to wiki with structured provenance. " +
-          "Creates or updates one or more wiki pages from digested content, linking back to " +
-          "source raw files and digest packs. Supports batch writes — index is rebuilt once at the end. " +
-          "Each page gets auto-classified, auto-routed, and timestamped like wiki_write.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
             pages: {
               type: "array",
               items: {
@@ -611,7 +508,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
                   },
                   body: {
                     type: "string",
-                    description: "Markdown body content (without frontmatter — frontmatter is auto-generated)",
+                    description: "Markdown body content (without frontmatter — auto-generated)",
                   },
                   type: {
                     type: "string",
@@ -629,22 +526,23 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
                   sources: {
                     type: "array",
                     items: { type: "string" },
-                    description: "Source raw file paths (e.g. ['raw/topic/doc.pdf', 'raw/topic/data.xlsx'])",
+                    description: "Source raw file paths (e.g. ['raw/topic/doc.pdf'])",
                   },
                   sourcePacks: {
                     type: "array",
                     items: { type: "string" },
-                    description: "Digest pack paths used to generate this page (e.g. ['raw/digest-packs/topic/pack-001.md'])",
+                    description: "Digest pack paths used to generate this page",
                   },
                 },
                 required: ["page", "title", "body"],
               },
-              description: "Array of wiki pages to write",
+              description: "[digest_write] Array of wiki pages to write",
             },
           },
-          required: ["pages"],
+          required: ["mode"],
         },
       },
+      // knowledge_ingest_batch, knowledge_digest_write folded into knowledge_ingest
 
       // ═══════════════════════════════════════════════════════
       //  CODE ANALYSIS — Parse source files into structured knowledge
@@ -669,51 +567,48 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
         },
       },
       {
-        name: "code_trace_variable",
+        name: "code_query",
         description:
-          "Trace all references to a variable across a parsed COBOL program. Shows where it is read, written, or passed, grouped by section/paragraph.",
+          "Query parsed code knowledge. Select `query_type` to control behavior:\n" +
+          "- `trace_variable`: Trace all references to a variable in a parsed source file — shows where it is read, written, or passed, grouped by section/paragraph.\n" +
+          "- `impact`: Query the compiled knowledge graph for downstream impact — returns affected programs, copybooks, or datasets grouped by dependency depth, with evidence and uncertainty markers.",
         inputSchema: {
           type: "object" as const,
           properties: {
+            query_type: {
+              type: "string",
+              enum: ["trace_variable", "impact"],
+              description: "Query type: trace_variable (variable reference tracing) or impact (downstream dependency impact)",
+            },
             path: {
               type: "string",
-              description: "Path to source file in raw/ (e.g. 'PAYROLL.cbl')",
+              description: "[trace_variable] Path to source file in raw/ (e.g. 'PAYROLL.cbl')",
             },
             variable: {
               type: "string",
-              description: "Variable name to trace (e.g. 'WS-TOTAL-SALARY')",
+              description: "[trace_variable] Variable name to trace (e.g. 'WS-TOTAL-SALARY')",
             },
-          },
-          required: ["path", "variable"],
-        },
-      },
-      {
-        name: "code_impact",
-        description:
-          "Query the compiled COBOL knowledge graph for downstream impact. Returns affected programs, copybooks, or datasets grouped by dependency depth, with evidence and uncertainty markers.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
             node_id: {
               type: "string",
-              description: "Canonical node ID or logical name (e.g. 'copybook:DATE-UTILS' or 'DATE-UTILS')",
+              description: "[impact] Canonical node ID or logical name (e.g. 'copybook:DATE-UTILS' or 'DATE-UTILS')",
             },
             kind: {
               type: "string",
-              description: "Optional node kind when using a logical name: program, copybook, dataset, job, or step",
+              description: "[impact] Optional node kind: program, copybook, dataset, job, or step",
             },
             max_depth: {
               type: "number",
-              description: "Maximum reverse-dependency depth to traverse (default: 10)",
+              description: "[impact] Maximum reverse-dependency depth to traverse (default: 10)",
             },
             language: {
               type: "string",
-              description: "Compiled language graph to read (default: 'cobol')",
+              description: "[impact] Compiled language graph to read (default: 'cobol')",
             },
           },
-          required: ["node_id"],
+          required: ["query_type"],
         },
       },
+      // code_trace_variable, code_impact folded into code_query
     ],
   }));
 
@@ -723,6 +618,11 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
 
   // Tools that mutate state — serialized through the write queue
   const WRITE_TOOLS = new Set([
+    // Consolidated public tools
+    "raw_ingest",    // add/fetch/import_confluence/import_jira all mutate raw/
+    "wiki_admin",    // init/rebuild/lint all mutate state (config is read-only but routed through write queue for safety)
+    "knowledge_ingest", // batch/digest_write both mutate state
+    // Legacy aliases (kept for backward compatibility — not listed in public tool surface)
     "raw_add", "raw_fetch", "raw_import_confluence", "raw_import_jira",
     "wiki_write", "wiki_delete", "wiki_init", "wiki_rebuild",
     "wiki_lint", // writes .lint-cache.json + log.md
@@ -1406,6 +1306,95 @@ export async function handleTool(
           knowledge_gap: buildKnowledgeGap(searchQuery, wiki, filterType),
         }, null, 2);
       }
+      // Combined search+read mode (read_top_n) — supersedes include_content when both are set
+      if (args.read_top_n != null) {
+        const readTopN = Math.min(Math.max(1, Math.floor((args.read_top_n as number) ?? 3)), 10);
+        const sectionFilter = args.section as string | undefined;
+        const perPageLimit = Math.min(500, Math.max(1, Math.floor((args.per_page_limit as number) ?? 200)));
+        const includeToc = (args.include_toc as boolean) ?? false;
+
+        // Deduplicate — preserve score order, first occurrence wins
+        const seen = new Set<string>();
+        const uniquePaths: string[] = [];
+        for (const r of results) {
+          if (!seen.has(r.path)) {
+            seen.add(r.path);
+            uniquePaths.push(r.path);
+          }
+        }
+
+        const toRead = uniquePaths.slice(0, readTopN);
+        const nextReads = uniquePaths.slice(readTopN);
+
+        const pages: Array<Record<string, unknown>> = [];
+        for (const pagePath of toRead) {
+          try {
+            const page = wiki.read(pagePath);
+            if (!page) throw new Error(`Page not found: ${pagePath}`);
+            const fullPath = join(wiki.config.wikiDir, page.path);
+            const raw = readFileSync(fullPath, "utf-8");
+
+            if (sectionFilter) {
+              const sections = splitSections(raw);
+              const target = findSectionByHeading(sections, sectionFilter);
+              if (!target) {
+                pages.push({
+                  path: pagePath,
+                  content: null,
+                  error: `Section "${sectionFilter}" not found`,
+                  toc: buildToc(sections) || null,
+                });
+                continue;
+              }
+              const targetIdx = sections.indexOf(target);
+              let hasSubsections = false;
+              const parts = [target.content];
+              for (let i = targetIdx + 1; i < sections.length; i++) {
+                const s = sections[i]!;
+                if (s.level <= target.level && s.heading !== "") break;
+                if (s.heading !== "") hasSubsections = true;
+                parts.push(s.content);
+              }
+              const sectionText = parts.join("\n");
+              const sectionLines = sectionText.split("\n");
+              const truncated = sectionLines.length > perPageLimit;
+              pages.push({
+                path: pagePath,
+                content: truncated ? sectionLines.slice(0, perPageLimit).join("\n") : sectionText,
+                truncated,
+                ...(truncated ? { total_lines: sectionLines.length } : {}),
+                ...(truncated && hasSubsections ? { has_subsections: true } : {}),
+                ...(truncated && includeToc ? { toc: buildToc(sections) } : {}),
+              });
+            } else {
+              const lines = raw.split("\n");
+              const truncated = lines.length > perPageLimit;
+              pages.push({
+                path: pagePath,
+                content: truncated ? lines.slice(0, perPageLimit).join("\n") : raw,
+                truncated,
+                ...(truncated ? { total_lines: lines.length } : {}),
+                ...(truncated && includeToc ? { toc: buildToc(splitSections(raw)) } : {}),
+              });
+            }
+          } catch (err) {
+            pages.push({
+              path: pagePath,
+              content: null,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
+        return JSON.stringify({
+          results,
+          count: results.length,
+          pages,
+          pagesRead: pages.length,
+          nextReads,
+        }, null, 2);
+      }
+
       if (!args.include_content) {
         return JSON.stringify({ results, count: results.length }, null, 2);
       }
@@ -2127,8 +2116,10 @@ export async function handleTool(
           results.push({ tool: op.tool, error: "Cannot nest batch operations" });
           continue;
         }
-        // Deduplicate wiki_rebuild — defer to end-of-batch full rebuild
-        if (op.tool === "wiki_rebuild") {
+        // Deduplicate wiki_rebuild / wiki_admin action:rebuild — defer to end-of-batch full rebuild
+        const isRebuild = op.tool === "wiki_rebuild" ||
+          (op.tool === "wiki_admin" && (op.args?.action === "rebuild"));
+        if (isRebuild) {
           needsRebuild = true;
           needsTimeline = true;
           results.push({ tool: op.tool, result: { ok: true, deferred: "merged into end-of-batch rebuild" } });
@@ -2187,6 +2178,48 @@ export async function handleTool(
       }
 
       return JSON.stringify({ results, count: results.length }, null, 2);
+    }
+
+    // ═══ CONSOLIDATED PUBLIC TOOLS (delegate to legacy handlers) ═══
+
+    case "raw_ingest": {
+      const mode = args.mode as string | undefined;
+      switch (mode) {
+        case "add": return handleTool(wiki, "raw_add", args, opts);
+        case "fetch": return handleTool(wiki, "raw_fetch", args, opts);
+        case "import_confluence": return handleTool(wiki, "raw_import_confluence", args, opts);
+        case "import_jira": return handleTool(wiki, "raw_import_jira", args, opts);
+        default: throw new Error(`Unknown raw_ingest mode: "${mode}". Expected: add | fetch | import_confluence | import_jira`);
+      }
+    }
+
+    case "wiki_admin": {
+      const action = args.action as string | undefined;
+      switch (action) {
+        case "init": return handleTool(wiki, "wiki_init", args, opts);
+        case "config": return handleTool(wiki, "wiki_config", args, opts);
+        case "rebuild": return handleTool(wiki, "wiki_rebuild", args, opts);
+        case "lint": return handleTool(wiki, "wiki_lint", args, opts);
+        default: throw new Error(`Unknown wiki_admin action: "${action}". Expected: init | config | rebuild | lint`);
+      }
+    }
+
+    case "code_query": {
+      const queryType = args.query_type as string | undefined;
+      switch (queryType) {
+        case "trace_variable": return handleTool(wiki, "code_trace_variable", args, opts);
+        case "impact": return handleTool(wiki, "code_impact", args, opts);
+        default: throw new Error(`Unknown code_query query_type: "${queryType}". Expected: trace_variable | impact`);
+      }
+    }
+
+    case "knowledge_ingest": {
+      const mode = args.mode as string | undefined;
+      switch (mode) {
+        case "batch": return handleTool(wiki, "knowledge_ingest_batch", args, opts);
+        case "digest_write": return handleTool(wiki, "knowledge_digest_write", args, opts);
+        default: throw new Error(`Unknown knowledge_ingest mode: "${mode}". Expected: batch | digest_write`);
+      }
     }
 
     default:

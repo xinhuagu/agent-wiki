@@ -261,7 +261,7 @@ export function tokenize(source: string): Token[] {
       }
 
       // Operators and special characters — emit as identifiers
-      if ("()=<>+-*/,;:".includes(text[pos])) {
+      if ("().=<>+-*/,;:".includes(text[pos])) {
         tokens.push({ type: "IDENTIFIER", value: text[pos], line: lineNumber, column: col });
         pos++;
         continue;

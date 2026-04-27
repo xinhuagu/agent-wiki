@@ -549,6 +549,7 @@ class Parser {
   private parseStatement(): StatementNode {
     const start = this.advance(); // verb
     const verb = start.value;
+    const isExecBlock = verb === "EXEC";
     const operands: string[] = [];
     const rawParts: string[] = [verb];
 
@@ -561,7 +562,7 @@ class Parser {
       }
       if (t.type === "DIVISION") break;
       // Next statement start — don't consume
-      if (this.isStatementStart(t) && t.line !== start.line) break;
+      if (!isExecBlock && this.isStatementStart(t) && t.line !== start.line) break;
       // END-xxx terminates the current statement
       if (t.type === "VERB" && t.value.startsWith("END-")) {
         rawParts.push(t.value);

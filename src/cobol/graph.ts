@@ -10,6 +10,8 @@
  * This module is language-agnostic — plugins populate it via the builder API.
  */
 
+import { basename } from "node:path";
+
 // ---------------------------------------------------------------------------
 // Confidence model (3-tier)
 // ---------------------------------------------------------------------------
@@ -342,7 +344,7 @@ export class KnowledgeGraphBuilder {
  * Supported extensions: .cbl, .cob, .cpy (case-insensitive).
  */
 export function stripSourceExtension(filename: string): string {
-  return filename.replace(/\.(cpy|cbl|cob)$/i, "");
+  return basename(filename).replace(/\.(cpy|cbl|cob)$/i, "");
 }
 
 /**
@@ -350,7 +352,7 @@ export function stripSourceExtension(filename: string): string {
  *
  * - If programId is set (normal .cbl with PROGRAM-ID): use it as-is.
  * - Otherwise (standalone copybook, or .cbl missing PROGRAM-ID): strip
- *   the file extension from sourceFile to get the logical name.
+ *   the file extension from the basename of sourceFile to get the logical name.
  */
 export function resolveCanonicalId(model: { programId: string; sourceFile: string }): string {
   return model.programId || stripSourceExtension(model.sourceFile);

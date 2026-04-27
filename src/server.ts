@@ -898,7 +898,7 @@ function summarizeEvidence(edge: GraphEdge): Record<string, unknown> {
 }
 
 function diagnosticNodeIds(diag: { message: string }): Set<string> {
-  const matches = diag.message.match(/\b(?:program|copybook|dataset|job|step):[A-Za-z0-9][A-Za-z0-9-]*\b/g) ?? [];
+  const matches = diag.message.match(/\b(?:program|copybook|dataset|job|step):[^\s"'`\],)]+/g) ?? [];
   return new Set(matches);
 }
 

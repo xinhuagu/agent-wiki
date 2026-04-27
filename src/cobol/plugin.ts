@@ -62,6 +62,29 @@ function flattenDataItems(items: DataItemNode[], parent?: string): CodeSymbol[] 
   return symbols;
 }
 
+function loadCobolModels(parsedDir: string): CobolCodeModel[] {
+  const models: CobolCodeModel[] = [];
+
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith(".model.json")) continue;
+      try {
+        models.push(JSON.parse(readFileSync(full, "utf-8")));
+      } catch {
+        // Skip malformed files
+      }
+    }
+  };
+
+  if (existsSync(parsedDir)) walk(parsedDir);
+  return models;
+}
+
 // ---------------------------------------------------------------------------
 // COBOL → NormalizedCodeModel
 // ---------------------------------------------------------------------------
@@ -192,15 +215,7 @@ export const cobolPlugin: CodeAnalysisPlugin = {
 
   rebuildAggregatePages(parsedDir: string): Array<{ path: string; content: string }> {
     if (!existsSync(parsedDir)) return [];
-    const models: CobolCodeModel[] = [];
-    for (const file of readdirSync(parsedDir)) {
-      if (!file.endsWith(".model.json")) continue;
-      try {
-        models.push(JSON.parse(readFileSync(join(parsedDir, file), "utf-8")));
-      } catch {
-        // Skip malformed files
-      }
-    }
+    const models = loadCobolModels(parsedDir);
     if (models.length === 0) return [];
     return [generateCallGraphPage(models)];
   },
@@ -210,15 +225,7 @@ export const cobolPlugin: CodeAnalysisPlugin = {
     wikiPages: Array<{ path: string; content: string }>;
   } | null {
     if (!existsSync(parsedDir)) return null;
-    const models: CobolCodeModel[] = [];
-    for (const file of readdirSync(parsedDir)) {
-      if (!file.endsWith(".model.json")) continue;
-      try {
-        models.push(JSON.parse(readFileSync(join(parsedDir, file), "utf-8")));
-      } catch {
-        // Skip malformed files
-      }
-    }
+    const models = loadCobolModels(parsedDir);
     if (models.length === 0) return null;
 
     const builder = new KnowledgeGraphBuilder();

@@ -226,6 +226,44 @@ describe("COBOL MCP tools integration", () => {
     expect(parsed.diagnostics).toEqual([]);
   });
 
+  it("code_impact keeps diagnostics for dataset ids with dots and underscores", async () => {
+    wiki.rawAddParsedArtifact("parsed/cobol/knowledge-graph.json", JSON.stringify({
+      nodes: [
+        { id: "dataset:HLQ.PROD_TRANS.FILE", kind: "Dataset", resolved: true, sourceFile: "JOB001.jcl" },
+      ],
+      edges: [],
+      diagnostics: [
+        {
+          severity: "warning",
+          message: 'Unresolved Dataset "dataset:HLQ.PROD_TRANS.FILE" — referenced by [program:PAYROLL] but never parsed from source',
+          sourceFile: "PAYROLL.cbl",
+          line: 27,
+        },
+      ],
+    }, null, 2));
+
+    const result = await handleTool(wiki, "code_impact", { node_id: "dataset:HLQ.PROD_TRANS.FILE" });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.source.node_id).toBe("dataset:HLQ.PROD_TRANS.FILE");
+    expect(parsed.diagnostics).toHaveLength(1);
+    expect(parsed.diagnostics[0].message).toContain("dataset:HLQ.PROD_TRANS.FILE");
+  });
+
+  it("code_parse and code_impact work for nested source paths", async () => {
+    const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+    wiki.rawAdd("nested/PAYROLL.cbl", { content: source });
+
+    const parseResult = await handleTool(wiki, "code_parse", { path: "nested/PAYROLL.cbl" });
+    const parseParsed = JSON.parse(parseResult as string);
+    expect(parseParsed.knowledgeGraph).toBeDefined();
+    expect(parseParsed.knowledgeGraph.nodes).toBeGreaterThan(0);
+
+    const impactResult = await handleTool(wiki, "code_impact", { node_id: "program:CALC-TAX" });
+    const impactParsed = JSON.parse(impactResult as string);
+    expect(impactParsed.impactedByDepth[0].nodes.some((n: { node_id: string }) => n.node_id === "program:PAYROLL")).toBe(true);
+  });
+
   it("parsed artifacts pass lint integrity checks (no missing-meta)", async () => {
     const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
     wiki.rawAdd("PAYROLL.cbl", { content: source });

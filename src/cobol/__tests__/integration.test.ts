@@ -74,6 +74,53 @@ describe("COBOL MCP tools integration", () => {
     expect(parsed.references.length).toBeGreaterThan(0);
   });
 
+  it("code_impact reports affected programs for a resolved copybook", async () => {
+    const invoiceSrc = readFileSync(join(FIXTURES, "INVOICE.cbl"), "utf-8");
+    const dateUtilsSrc = readFileSync(join(FIXTURES, "DATE-UTILS.cpy"), "utf-8");
+    wiki.rawAdd("INVOICE.cbl", { content: invoiceSrc });
+    wiki.rawAdd("DATE-UTILS.cpy", { content: dateUtilsSrc });
+
+    await handleTool(wiki, "code_parse", { path: "INVOICE.cbl" });
+    await handleTool(wiki, "code_parse", { path: "DATE-UTILS.cpy" });
+
+    const result = await handleTool(wiki, "code_impact", {
+      node_id: "DATE-UTILS",
+      kind: "copybook",
+    });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.source.node_id).toBe("copybook:DATE-UTILS");
+    expect(parsed.source.resolved).toBe(true);
+    expect(parsed.summary.affectedNodes).toBeGreaterThanOrEqual(1);
+    expect(parsed.impactedByDepth).toHaveLength(1);
+    expect(parsed.impactedByDepth[0].depth).toBe(1);
+    expect(parsed.impactedByDepth[0].nodes.some((n: { node_id: string }) => n.node_id === "program:INVOICE")).toBe(true);
+    const invoice = parsed.impactedByDepth[0].nodes.find((n: { node_id: string }) => n.node_id === "program:INVOICE");
+    expect(invoice.resolved).toBe(true);
+    expect(invoice.via.some((e: { relationship: string; to: string }) => e.relationship === "COPIES" && e.to === "copybook:DATE-UTILS")).toBe(true);
+  });
+
+  it("code_impact works for unresolved source nodes and marks downstream warnings", async () => {
+    const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+    wiki.rawAdd("PAYROLL.cbl", { content: payrollSrc });
+
+    await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" });
+
+    const result = await handleTool(wiki, "code_impact", {
+      node_id: "program:CALC-TAX",
+    });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.source.node_id).toBe("program:CALC-TAX");
+    expect(parsed.source.resolved).toBe(false);
+    expect(parsed.impactedByDepth).toHaveLength(1);
+    const level1 = parsed.impactedByDepth[0];
+    expect(level1.nodes.some((n: { node_id: string }) => n.node_id === "program:PAYROLL")).toBe(true);
+    const payroll = level1.nodes.find((n: { node_id: string }) => n.node_id === "program:PAYROLL");
+    expect(payroll.via.some((e: { relationship: string; to: string }) => e.relationship === "CALLS" && e.to === "program:CALC-TAX")).toBe(true);
+    expect(parsed.diagnostics.some((d: { message: string }) => d.message.includes("program:CALC-TAX"))).toBe(true);
+  });
+
   it("code_parse succeeds with a .cpy copybook", async () => {
     const source = readFileSync(join(FIXTURES, "DATE-UTILS.cpy"), "utf-8");
     wiki.rawAdd("DATE-UTILS.cpy", { content: source });
@@ -148,6 +195,11 @@ describe("COBOL MCP tools integration", () => {
   it("rejects unsupported file types", async () => {
     await expect(handleTool(wiki, "code_parse", { path: "readme.md" }))
       .rejects.toThrow(/Unsupported file type/);
+  });
+
+  it("code_impact fails clearly when no compiled graph exists", async () => {
+    await expect(handleTool(wiki, "code_impact", { node_id: "program:PAYROLL" }))
+      .rejects.toThrow(/Compiled knowledge graph not found/);
   });
 
   it("parsed artifacts pass lint integrity checks (no missing-meta)", async () => {

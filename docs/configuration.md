@@ -98,7 +98,7 @@ agent-wiki raw-list                           # list raw sources
 agent-wiki raw-verify                         # verify raw file integrity
 agent-wiki lint                               # run health checks
 
-# Direct tool call (all 18 tools)
+# Direct tool call (all 19 tools)
 agent-wiki call wiki_search '{"query":"yolo"}'
 agent-wiki call raw_add '{"filename":"doc.pdf","source_path":"/path/to/file"}'
 agent-wiki call code_parse '{"path":"PAYROLL.cbl"}'

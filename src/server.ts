@@ -22,8 +22,10 @@ import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } fro
 import matter from "gray-matter";
 import { VERSION } from "./version.js";
 import { RequestQueue } from "./queue.js";
-import { registerPlugin, getPluginForFile, listPlugins, summarizeModel } from "./code-analysis.js";
+import { registerPlugin, getPlugin, getPluginForFile, listPlugins, summarizeModel } from "./code-analysis.js";
 import { cobolPlugin } from "./cobol/plugin.js";
+import { canonicalNodeId, deserializeGraph, displayLabel, graphEdgesFrom, graphImpactOf } from "./cobol/graph.js";
+import type { GraphEdge, GraphNode, KnowledgeGraph, NodeKind, SerializedGraph } from "./cobol/graph.js";
 
 // Register built-in plugins
 registerPlugin(cobolPlugin);
@@ -685,6 +687,33 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           required: ["path", "variable"],
         },
       },
+      {
+        name: "code_impact",
+        description:
+          "Query the compiled COBOL knowledge graph for downstream impact. Returns affected programs, copybooks, or datasets grouped by dependency depth, with evidence and uncertainty markers.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            node_id: {
+              type: "string",
+              description: "Canonical node ID or logical name (e.g. 'copybook:DATE-UTILS' or 'DATE-UTILS')",
+            },
+            kind: {
+              type: "string",
+              description: "Optional node kind when using a logical name: program, copybook, dataset, job, or step",
+            },
+            max_depth: {
+              type: "number",
+              description: "Maximum reverse-dependency depth to traverse (default: 10)",
+            },
+            language: {
+              type: "string",
+              description: "Compiled language graph to read (default: 'cobol')",
+            },
+          },
+          required: ["node_id"],
+        },
+      },
     ],
   }));
 
@@ -779,6 +808,159 @@ function sanitizeTopic(raw: string): string {
     throw new Error(`Invalid topic: "${raw}". Must not contain "..", absolute paths, or null bytes.`);
   }
   return raw.replace(/[^a-zA-Z0-9_\-/]/g, "-").replace(/\/{2,}/g, "/").replace(/^\/|\/$/g, "");
+}
+
+function normalizeImpactKind(raw?: string): NodeKind | undefined {
+  if (!raw) return undefined;
+  switch (raw.trim().toLowerCase()) {
+    case "program":
+      return "Program";
+    case "copybook":
+      return "Copybook";
+    case "dataset":
+      return "Dataset";
+    case "job":
+      return "Job";
+    case "step":
+      return "Step";
+    default:
+      throw new Error(`Unsupported node kind: ${raw}. Expected one of: program, copybook, dataset, job, step.`);
+  }
+}
+
+async function loadCompiledGraph(wiki: Wiki, language: string): Promise<KnowledgeGraph> {
+  const plugin = getPlugin(language);
+  if (!plugin) {
+    const available = listPlugins().map((p) => p.id).join(", ");
+    throw new Error(`Unknown code-analysis plugin: ${language}. Available plugins: ${available}`);
+  }
+  const rawResult = await wiki.rawRead(`parsed/${plugin.id}/knowledge-graph.json`);
+  if (!rawResult || rawResult.content === null) {
+    throw new Error(
+      `Compiled knowledge graph not found for "${plugin.id}". Run code_parse on one or more ${plugin.id.toUpperCase()} files, or run wiki_rebuild after parsing.`
+    );
+  }
+  let parsed: SerializedGraph;
+  try {
+    parsed = JSON.parse(rawResult.content) as SerializedGraph;
+  } catch (err) {
+    throw new Error(`Failed to parse compiled knowledge graph for "${plugin.id}": ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return deserializeGraph(parsed);
+}
+
+function resolveImpactNode(graph: KnowledgeGraph, requested: string, kind?: NodeKind): GraphNode {
+  const trimmed = requested.trim();
+  if (!trimmed) {
+    throw new Error("node_id must not be empty");
+  }
+  const needle = trimmed.toLowerCase();
+
+  const exactMatches = Array.from(graph.nodes.values()).filter((node) => {
+    if (kind && node.kind !== kind) return false;
+    return node.id.toLowerCase() === needle;
+  });
+  if (exactMatches.length === 1) return exactMatches[0]!;
+  if (exactMatches.length > 1) {
+    throw new Error(`Ambiguous node_id "${requested}" matched multiple nodes: ${exactMatches.map((n) => n.id).join(", ")}`);
+  }
+
+  const labelMatches = Array.from(graph.nodes.values()).filter((node) => {
+    if (kind && node.kind !== kind) return false;
+    return displayLabel(node.id).toLowerCase() === needle;
+  });
+  if (labelMatches.length === 1) return labelMatches[0]!;
+  if (labelMatches.length > 1) {
+    throw new Error(
+      `Logical name "${requested}" is ambiguous. Use a canonical node ID or pass kind. Matches: ${labelMatches.map((n) => n.id).join(", ")}`
+    );
+  }
+
+  if (kind) {
+    const canonical = canonicalNodeId(kind, trimmed);
+    const canonicalMatch = Array.from(graph.nodes.values()).find((node) => node.id.toLowerCase() === canonical.toLowerCase());
+    if (canonicalMatch) return canonicalMatch;
+  }
+
+  throw new Error(`Node not found in compiled graph: ${requested}`);
+}
+
+function summarizeEvidence(edge: GraphEdge): Record<string, unknown> {
+  return {
+    to: edge.to,
+    toLabel: displayLabel(edge.to),
+    relationship: edge.kind,
+    confidence: edge.confidence,
+    sourceFile: edge.evidence.sourceFile,
+    line: edge.evidence.line,
+    reason: edge.evidence.reason,
+  };
+}
+
+function buildImpactResponse(graph: KnowledgeGraph, sourceNode: GraphNode, maxDepth: number): Record<string, unknown> {
+  const levels = graphImpactOf(graph, sourceNode.id, maxDepth);
+  const impactedIds = new Set<string>();
+  let previousLevelIds = new Set<string>([sourceNode.id]);
+  const impactedByDepth: Array<Record<string, unknown>> = [];
+  let unresolvedNodes = 0;
+  let lowerConfidencePaths = 0;
+
+  for (let depth = 1; depth <= maxDepth; depth++) {
+    const levelNodes = levels.get(depth) ?? [];
+    if (levelNodes.length === 0) continue;
+    const currentIds = new Set(levelNodes.map((node) => node.id));
+    const nodes = levelNodes.map((node) => {
+      impactedIds.add(node.id);
+      if (!node.resolved) unresolvedNodes++;
+      const viaEdges = graphEdgesFrom(graph, node.id).filter((edge) => previousLevelIds.has(edge.to));
+      const hasLowerConfidence = viaEdges.some((edge) => edge.confidence !== "deterministic");
+      if (hasLowerConfidence) lowerConfidencePaths++;
+      const warnings: string[] = [];
+      if (!node.resolved) warnings.push("unresolved-node");
+      if (hasLowerConfidence) warnings.push("lower-confidence-path");
+      return {
+        node_id: node.id,
+        label: displayLabel(node.id),
+        kind: node.kind,
+        resolved: node.resolved ?? false,
+        sourceFile: node.sourceFile ?? null,
+        metadata: node.metadata ?? {},
+        via: viaEdges.map(summarizeEvidence),
+        warnings,
+      };
+    });
+    impactedByDepth.push({ depth, nodes });
+    previousLevelIds = currentIds;
+  }
+
+  const relevantNodeIds = new Set<string>([sourceNode.id, ...impactedIds]);
+  const relevantDiagnostics = graph.diagnostics.filter((diag) =>
+    Array.from(relevantNodeIds).some((id) => diag.message.includes(id))
+  );
+
+  return {
+    query: {
+      requested: sourceNode.id,
+      maxDepth,
+    },
+    source: {
+      node_id: sourceNode.id,
+      label: displayLabel(sourceNode.id),
+      kind: sourceNode.kind,
+      resolved: sourceNode.resolved ?? false,
+      sourceFile: sourceNode.sourceFile ?? null,
+      metadata: sourceNode.metadata ?? {},
+    },
+    summary: {
+      affectedNodes: impactedIds.size,
+      depths: impactedByDepth.length,
+      unresolvedNodes,
+      lowerConfidencePaths,
+      diagnostics: relevantDiagnostics.length,
+    },
+    impactedByDepth,
+    diagnostics: relevantDiagnostics,
+  };
 }
 
 /** Internal options — not exposed to MCP callers. */
@@ -1550,6 +1732,17 @@ export async function handleTool(
       const ast = plugin.parse(rawResult.content, filePath);
       const refs = plugin.traceVariable(ast, varName);
       return JSON.stringify({ variable: varName, file: filePath, references: refs }, null, 2);
+    }
+
+    case "code_impact": {
+      const language = ((args.language as string | undefined) ?? "cobol").trim().toLowerCase();
+      const requestedNode = args.node_id as string;
+      const kind = normalizeImpactKind(args.kind as string | undefined);
+      const maxDepth = Math.min(50, Math.max(1, Math.floor((args.max_depth as number | undefined) ?? 10)));
+      const graph = await loadCompiledGraph(wiki, language);
+      const sourceNode = resolveImpactNode(graph, requestedNode, kind);
+      const response = buildImpactResponse(graph, sourceNode, maxDepth);
+      return JSON.stringify(response, null, 2);
     }
 
     // ═══ KNOWLEDGE INGESTION ═══

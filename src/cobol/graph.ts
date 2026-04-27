@@ -104,6 +104,56 @@ export interface GraphDiagnostic {
   line?: number;
 }
 
+/** Get all edges from a given node in a built graph. */
+export function graphEdgesFrom(graph: KnowledgeGraph, nodeId: string): GraphEdge[] {
+  return graph.edges.filter((e) => e.from === nodeId);
+}
+
+/** Get all edges to a given node in a built graph. */
+export function graphEdgesTo(graph: KnowledgeGraph, nodeId: string): GraphEdge[] {
+  return graph.edges.filter((e) => e.to === nodeId);
+}
+
+/** Get nodes that directly depend on the given node (reverse lookup). */
+export function graphDependentsOf(graph: KnowledgeGraph, nodeId: string): GraphNode[] {
+  const fromIds = graphEdgesTo(graph, nodeId).map((e) => e.from);
+  return [...new Set(fromIds)].map((id) => graph.nodes.get(id)).filter(Boolean) as GraphNode[];
+}
+
+/**
+ * Impact analysis over a built graph: given a changed node, find all transitively
+ * affected nodes grouped by reverse-dependency depth.
+ */
+export function graphImpactOf(graph: KnowledgeGraph, nodeId: string, maxDepth = 10): Map<number, GraphNode[]> {
+  const result = new Map<number, GraphNode[]>();
+  const visited = new Set<string>([nodeId]);
+  let frontier = [nodeId];
+  let depth = 0;
+
+  while (frontier.length > 0 && depth < maxDepth) {
+    depth++;
+    const nextFrontier: string[] = [];
+    const levelNodes: GraphNode[] = [];
+
+    for (const id of frontier) {
+      for (const dep of graphDependentsOf(graph, id)) {
+        if (!visited.has(dep.id)) {
+          visited.add(dep.id);
+          nextFrontier.push(dep.id);
+          levelNodes.push(dep);
+        }
+      }
+    }
+
+    if (levelNodes.length > 0) {
+      result.set(depth, levelNodes);
+    }
+    frontier = nextFrontier;
+  }
+
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------

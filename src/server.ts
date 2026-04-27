@@ -849,6 +849,53 @@ async function loadCompiledGraph(wiki: Wiki, language: string): Promise<Knowledg
   return deserializeGraph(parsed);
 }
 
+function removeParsedArtifactIfExists(wiki: Wiki, relativePath: string): void {
+  const fullPath = safePath(wiki.config.rawDir, relativePath);
+  if (existsSync(fullPath)) rmSync(fullPath, { force: true });
+  if (existsSync(`${fullPath}.meta.yaml`)) rmSync(`${fullPath}.meta.yaml`, { force: true });
+}
+
+function removeWikiPageIfExists(wiki: Wiki, pagePath: string): void {
+  if (wiki.read(pagePath)) {
+    wiki.delete(pagePath);
+  }
+}
+
+function applyDerivedArtifacts(
+  wiki: Wiki,
+  pluginId: string,
+  derived: {
+    artifacts: Array<{ path: string; content: string }>;
+    wikiPages: Array<{ path: string; content: string }>;
+    staleArtifacts?: string[];
+    staleWikiPages?: string[];
+  },
+): Array<string> {
+  const writtenArtifacts: string[] = [];
+  const currentArtifactPaths = new Set(derived.artifacts.map((artifact) => artifact.path));
+  const currentWikiPagePaths = new Set(derived.wikiPages.map((page) => page.path));
+
+  for (const artifactPath of derived.staleArtifacts ?? []) {
+    if (!currentArtifactPaths.has(artifactPath)) {
+      removeParsedArtifactIfExists(wiki, `parsed/${pluginId}/${artifactPath}`);
+    }
+  }
+  for (const pagePath of derived.staleWikiPages ?? []) {
+    if (!currentWikiPagePaths.has(pagePath)) {
+      removeWikiPageIfExists(wiki, pagePath);
+    }
+  }
+
+  for (const artifact of derived.artifacts) {
+    wiki.rawAddParsedArtifact(`parsed/${pluginId}/${artifact.path}`, artifact.content);
+    writtenArtifacts.push(`raw/parsed/${pluginId}/${artifact.path}`);
+  }
+  for (const page of derived.wikiPages) {
+    wiki.write(page.path, page.content);
+  }
+  return writtenArtifacts;
+}
+
 function rebuildDeferredGraphs(wiki: Wiki): void {
   for (const plugin of listPlugins()) {
     const parsedDir = join(wiki.config.rawDir, "parsed", plugin.id);
@@ -872,12 +919,7 @@ function rebuildDeferredGraphs(wiki: Wiki): void {
     if (plugin.buildDerivedArtifacts) {
       const derived = plugin.buildDerivedArtifacts(parsedDir);
       if (derived) {
-        for (const artifact of derived.artifacts) {
-          wiki.rawAddParsedArtifact(`parsed/${plugin.id}/${artifact.path}`, artifact.content);
-        }
-        for (const page of derived.wikiPages) {
-          wiki.write(page.path, page.content);
-        }
+        applyDerivedArtifacts(wiki, plugin.id, derived);
       }
     }
   }
@@ -1614,12 +1656,7 @@ export async function handleTool(
         if (plugin.buildDerivedArtifacts) {
           const derived = plugin.buildDerivedArtifacts(parsedDir);
           if (derived) {
-            for (const artifact of derived.artifacts) {
-              wiki.rawAddParsedArtifact(`parsed/${plugin.id}/${artifact.path}`, artifact.content);
-            }
-            for (const page of derived.wikiPages) {
-              wiki.write(page.path, page.content);
-            }
+            applyDerivedArtifacts(wiki, plugin.id, derived);
           }
         }
       }
@@ -1747,12 +1784,8 @@ export async function handleTool(
         const parsedDir = join(wiki.config.rawDir, "parsed", lang);
         const derived = plugin.buildDerivedArtifacts(parsedDir);
         if (derived) {
-          for (const artifact of derived.artifacts) {
-            wiki.rawAddParsedArtifact(`parsed/${lang}/${artifact.path}`, artifact.content);
-            artifacts.push(`raw/parsed/${lang}/${artifact.path}`);
-          }
+          artifacts.push(...applyDerivedArtifacts(wiki, lang, derived));
           for (const page of derived.wikiPages) {
-            wiki.write(page.path, page.content);
             writtenPages.push(page.path);
           }
         }

@@ -182,6 +182,8 @@ export interface CodeAnalysisPlugin {
   buildDerivedArtifacts?(parsedDir: string): {
     artifacts: Array<{ path: string; content: string }>;
     wikiPages: Array<{ path: string; content: string }>;
+    staleArtifacts?: string[];
+    staleWikiPages?: string[];
   } | null;
 }
 

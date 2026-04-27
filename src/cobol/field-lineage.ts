@@ -40,6 +40,7 @@ interface FieldConsumer {
   id: string;
   sourceFile: string;
   copyLoc?: SourceLocation;
+  replacing?: string[];
 }
 
 interface FlattenedField {
@@ -142,7 +143,12 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
     for (const copy of program.copies) {
       const key = normalizeCopybookName(copy.copybook);
       const list = consumersByCopybook.get(key) ?? [];
-      list.push({ id: programId, sourceFile: program.sourceFile, copyLoc: copy.loc });
+      list.push({
+        id: programId,
+        sourceFile: program.sourceFile,
+        copyLoc: copy.loc,
+        replacing: copy.replacing,
+      });
       consumersByCopybook.set(key, list);
     }
   }
@@ -176,14 +182,14 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
 
   for (const usage of copybookUsage) {
     const fields = flattenedByCopybook.get(usage.copybookId) ?? [];
-    const uniquePrograms = usage.programs;
+    const exactPrograms = usage.programs.filter((program) => !program.replacing || program.replacing.length === 0);
     for (const field of fields) {
-      candidateFields.push({ ...field, programs: uniquePrograms });
-      if (uniquePrograms.length < 2) continue;
+      candidateFields.push({ ...field, programs: exactPrograms });
+      if (exactPrograms.length < 2) continue;
       deterministic.push(buildEntry(
         "deterministic",
         [field],
-        uniquePrograms,
+        exactPrograms,
         "Exact parsed copybook field shared by multiple programs through COPY."
       ));
     }
@@ -257,6 +263,10 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
     a.fieldName.localeCompare(b.fieldName) ||
     a.copybooks[0]!.id.localeCompare(b.copybooks[0]!.id)
   );
+
+  if (sortedDeterministic.length === 0 && sortedHighConfidence.length === 0 && sortedAmbiguous.length === 0) {
+    return null;
+  }
 
   return {
     summary: {

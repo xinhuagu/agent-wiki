@@ -252,13 +252,22 @@ export const cobolPlugin: CodeAnalysisPlugin = {
   buildDerivedArtifacts(parsedDir: string): {
     artifacts: Array<{ path: string; content: string }>;
     wikiPages: Array<{ path: string; content: string }>;
+    staleArtifacts?: string[];
+    staleWikiPages?: string[];
   } | null {
     if (!existsSync(parsedDir)) return null;
     const models = loadCobolModels(parsedDir);
     if (models.length === 0) return null;
 
     const lineage = buildFieldLineage(models);
-    if (!lineage) return null;
+    if (!lineage) {
+      return {
+        artifacts: [],
+        wikiPages: [],
+        staleArtifacts: ["field-lineage.json"],
+        staleWikiPages: ["cobol/field-lineage.md"],
+      };
+    }
 
     return {
       artifacts: [{
@@ -266,6 +275,8 @@ export const cobolPlugin: CodeAnalysisPlugin = {
         content: JSON.stringify(lineage, null, 2),
       }],
       wikiPages: [generateFieldLineagePage(lineage)],
+      staleArtifacts: ["field-lineage.json"],
+      staleWikiPages: ["cobol/field-lineage.md"],
     };
   },
 };

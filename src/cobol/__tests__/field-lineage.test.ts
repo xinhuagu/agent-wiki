@@ -99,6 +99,20 @@ describe("COBOL field lineage", () => {
     expect(customerId!.linkage).toBe("ambiguous");
   });
 
+  it("does not treat COPY REPLACING consumers as deterministic shared lineage", () => {
+    const orderA = model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl");
+    const orderB = model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl");
+    orderB.copies[0]!.replacing = ["CUSTOMER-ID", "CLIENT-ID"];
+
+    const lineage = buildFieldLineage([
+      model(sharedCopybook, "CUSTOMER-REC.cpy"),
+      orderA,
+      orderB,
+    ]);
+
+    expect(lineage).toBeNull();
+  });
+
   it("generates a lineage wiki summary page", () => {
     const lineage = buildFieldLineage([
       model(sharedCopybook, "CUSTOMER-REC.cpy"),

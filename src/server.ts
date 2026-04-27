@@ -849,6 +849,53 @@ async function loadCompiledGraph(wiki: Wiki, language: string): Promise<Knowledg
   return deserializeGraph(parsed);
 }
 
+function removeParsedArtifactIfExists(wiki: Wiki, relativePath: string): void {
+  const fullPath = safePath(wiki.config.rawDir, relativePath);
+  if (existsSync(fullPath)) rmSync(fullPath, { force: true });
+  if (existsSync(`${fullPath}.meta.yaml`)) rmSync(`${fullPath}.meta.yaml`, { force: true });
+}
+
+function removeWikiPageIfExists(wiki: Wiki, pagePath: string): void {
+  if (wiki.read(pagePath)) {
+    wiki.delete(pagePath);
+  }
+}
+
+function applyDerivedArtifacts(
+  wiki: Wiki,
+  pluginId: string,
+  derived: {
+    artifacts: Array<{ path: string; content: string }>;
+    wikiPages: Array<{ path: string; content: string }>;
+    staleArtifacts?: string[];
+    staleWikiPages?: string[];
+  },
+): Array<string> {
+  const writtenArtifacts: string[] = [];
+  const currentArtifactPaths = new Set(derived.artifacts.map((artifact) => artifact.path));
+  const currentWikiPagePaths = new Set(derived.wikiPages.map((page) => page.path));
+
+  for (const artifactPath of derived.staleArtifacts ?? []) {
+    if (!currentArtifactPaths.has(artifactPath)) {
+      removeParsedArtifactIfExists(wiki, `parsed/${pluginId}/${artifactPath}`);
+    }
+  }
+  for (const pagePath of derived.staleWikiPages ?? []) {
+    if (!currentWikiPagePaths.has(pagePath)) {
+      removeWikiPageIfExists(wiki, pagePath);
+    }
+  }
+
+  for (const artifact of derived.artifacts) {
+    wiki.rawAddParsedArtifact(`parsed/${pluginId}/${artifact.path}`, artifact.content);
+    writtenArtifacts.push(`raw/parsed/${pluginId}/${artifact.path}`);
+  }
+  for (const page of derived.wikiPages) {
+    wiki.write(page.path, page.content);
+  }
+  return writtenArtifacts;
+}
+
 function rebuildDeferredGraphs(wiki: Wiki): void {
   for (const plugin of listPlugins()) {
     const parsedDir = join(wiki.config.rawDir, "parsed", plugin.id);
@@ -867,6 +914,12 @@ function rebuildDeferredGraphs(wiki: Wiki): void {
         for (const page of graphResult.wikiPages) {
           wiki.write(page.path, page.content);
         }
+      }
+    }
+    if (plugin.buildDerivedArtifacts) {
+      const derived = plugin.buildDerivedArtifacts(parsedDir);
+      if (derived) {
+        applyDerivedArtifacts(wiki, plugin.id, derived);
       }
     }
   }
@@ -1600,6 +1653,12 @@ export async function handleTool(
             };
           }
         }
+        if (plugin.buildDerivedArtifacts) {
+          const derived = plugin.buildDerivedArtifacts(parsedDir);
+          if (derived) {
+            applyDerivedArtifacts(wiki, plugin.id, derived);
+          }
+        }
       }
 
       // Now build page cache AFTER graph pages are written, so they are
@@ -1719,6 +1778,16 @@ export async function handleTool(
             edges: ser.edges?.length ?? 0,
             diagnostics: ser.diagnostics?.length ?? 0,
           };
+        }
+      }
+      if (plugin.buildDerivedArtifacts && !opts?.skipGraphRebuild) {
+        const parsedDir = join(wiki.config.rawDir, "parsed", lang);
+        const derived = plugin.buildDerivedArtifacts(parsedDir);
+        if (derived) {
+          artifacts.push(...applyDerivedArtifacts(wiki, lang, derived));
+          for (const page of derived.wikiPages) {
+            writtenPages.push(page.path);
+          }
         }
       }
 

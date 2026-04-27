@@ -202,6 +202,30 @@ describe("COBOL MCP tools integration", () => {
       .rejects.toThrow(/Compiled knowledge graph not found/);
   });
 
+  it("code_impact does not include diagnostics for prefix-overlapping node ids", async () => {
+    wiki.rawAddParsedArtifact("parsed/cobol/knowledge-graph.json", JSON.stringify({
+      nodes: [
+        { id: "program:PAY", kind: "Program", resolved: true, sourceFile: "PAY.cbl" },
+        { id: "program:PAYROLL", kind: "Program", resolved: true, sourceFile: "PAYROLL.cbl" },
+      ],
+      edges: [],
+      diagnostics: [
+        {
+          severity: "warning",
+          message: 'Unresolved Program "program:PAYROLL" — referenced by [program:INVOICE] but never parsed from source',
+          sourceFile: "INVOICE.cbl",
+          line: 15,
+        },
+      ],
+    }, null, 2));
+
+    const result = await handleTool(wiki, "code_impact", { node_id: "program:PAY" });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.source.node_id).toBe("program:PAY");
+    expect(parsed.diagnostics).toEqual([]);
+  });
+
   it("parsed artifacts pass lint integrity checks (no missing-meta)", async () => {
     const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
     wiki.rawAdd("PAYROLL.cbl", { content: source });

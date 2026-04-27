@@ -897,6 +897,11 @@ function summarizeEvidence(edge: GraphEdge): Record<string, unknown> {
   };
 }
 
+function diagnosticNodeIds(diag: { message: string }): Set<string> {
+  const matches = diag.message.match(/\b(?:program|copybook|dataset|job|step):[A-Za-z0-9][A-Za-z0-9-]*\b/g) ?? [];
+  return new Set(matches);
+}
+
 function buildImpactResponse(graph: KnowledgeGraph, sourceNode: GraphNode, maxDepth: number): Record<string, unknown> {
   const levels = graphImpactOf(graph, sourceNode.id, maxDepth);
   const impactedIds = new Set<string>();
@@ -935,7 +940,7 @@ function buildImpactResponse(graph: KnowledgeGraph, sourceNode: GraphNode, maxDe
 
   const relevantNodeIds = new Set<string>([sourceNode.id, ...impactedIds]);
   const relevantDiagnostics = graph.diagnostics.filter((diag) =>
-    Array.from(relevantNodeIds).some((id) => diag.message.includes(id))
+    Array.from(diagnosticNodeIds(diag)).some((id) => relevantNodeIds.has(id))
   );
 
   return {

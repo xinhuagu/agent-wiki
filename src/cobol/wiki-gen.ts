@@ -91,6 +91,48 @@ export function generateProgramPage(model: CobolCodeModel, summary: CodeSummary)
     lines.push("");
   }
 
+  if (model.db2References.length > 0 || model.cicsReferences.length > 0 || model.fileAccesses.length > 0) {
+    lines.push("## External Dependencies");
+    lines.push("");
+
+    if (model.db2References.length > 0) {
+      lines.push("### DB2");
+      lines.push("");
+      lines.push("| Operation | Tables | Line |");
+      lines.push("|-----------|--------|------|");
+      for (const ref of model.db2References) {
+        lines.push(`| ${ref.operation ?? "SQL"} | ${ref.tables.join(", ") || "—"} | ${ref.loc.line} |`);
+      }
+      lines.push("");
+    }
+
+    if (model.cicsReferences.length > 0) {
+      lines.push("### CICS");
+      lines.push("");
+      lines.push("| Command | Program | Transaction | Map | File | Line |");
+      lines.push("|---------|---------|-------------|-----|------|------|");
+      for (const ref of model.cicsReferences) {
+        lines.push(
+          `| ${ref.command} | ${ref.program ?? "—"} | ${ref.transaction ?? "—"} | ${ref.map ?? "—"} | ${ref.file ?? "—"} | ${ref.loc.line} |`
+        );
+      }
+      lines.push("");
+    }
+
+    if (model.fileAccesses.length > 0) {
+      lines.push("### File Access");
+      lines.push("");
+      lines.push("| Operation | File | Mode | Record | Line |");
+      lines.push("|-----------|------|------|--------|------|");
+      for (const access of model.fileAccesses) {
+        lines.push(
+          `| ${access.operation} | ${access.file} | ${access.mode ?? "—"} | ${access.recordName ?? "—"} | ${access.loc.line} |`
+        );
+      }
+      lines.push("");
+    }
+  }
+
   return {
     path: `cobol/programs/${id.toLowerCase()}.md`,
     content: lines.join("\n"),

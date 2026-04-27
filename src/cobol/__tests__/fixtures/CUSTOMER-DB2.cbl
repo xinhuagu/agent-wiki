@@ -1,0 +1,15 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CUSTOMERDB.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-CUST-ID             PIC X(10).
+       PROCEDURE DIVISION.
+       MAIN.
+           EXEC SQL
+               SELECT CUSTOMER_NAME
+                 FROM CUSTOMER_TABLE
+                 JOIN CUSTOMER_STATUS
+                   ON CUSTOMER_TABLE.STATUS_ID = CUSTOMER_STATUS.STATUS_ID
+                WHERE CUSTOMER_ID = :WS-CUST-ID
+           END-EXEC.
+           GOBACK.

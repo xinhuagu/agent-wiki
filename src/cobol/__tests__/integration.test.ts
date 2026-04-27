@@ -358,6 +358,29 @@ describe("COBOL MCP tools integration", () => {
       expect(existsSync(systemMap)).toBe(true);
     });
 
+    it("batch code_parse followed by code_impact sees freshly rebuilt graph", async () => {
+      const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+      wiki.rawAdd("PAYROLL.cbl", { content: payrollSrc });
+
+      const result = await handleTool(wiki, "batch", {
+        operations: [
+          { tool: "code_parse", args: { path: "PAYROLL.cbl" } },
+          { tool: "code_impact", args: { node_id: "program:CALC-TAX" } },
+        ],
+      });
+      const batch = JSON.parse(result as string);
+
+      expect(batch.count).toBe(2);
+      expect(batch.results[0].error).toBeUndefined();
+      expect(batch.results[1].error).toBeUndefined();
+      expect(batch.results[1].result.source.node_id).toBe("program:CALC-TAX");
+      expect(batch.results[1].result.impactedByDepth).toHaveLength(1);
+      expect(batch.results[1].result.impactedByDepth[0].nodes.some((n: { node_id: string }) => n.node_id === "program:PAYROLL")).toBe(true);
+
+      const graphPath = join(tmp, "raw", "parsed", "cobol", "knowledge-graph.json");
+      expect(existsSync(graphPath)).toBe(true);
+    });
+
     it("wiki_rebuild regenerates knowledge graph from existing parsed artifacts", async () => {
       const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
       const invoiceSrc = readFileSync(join(FIXTURES, "INVOICE.cbl"), "utf-8");

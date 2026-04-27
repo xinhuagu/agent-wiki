@@ -849,6 +849,29 @@ async function loadCompiledGraph(wiki: Wiki, language: string): Promise<Knowledg
   return deserializeGraph(parsed);
 }
 
+function rebuildDeferredGraphs(wiki: Wiki): void {
+  for (const plugin of listPlugins()) {
+    const parsedDir = join(wiki.config.rawDir, "parsed", plugin.id);
+    if (plugin.rebuildAggregatePages) {
+      for (const page of plugin.rebuildAggregatePages(parsedDir)) {
+        wiki.write(page.path, page.content);
+      }
+    }
+    if (plugin.buildKnowledgeGraph) {
+      const graphResult = plugin.buildKnowledgeGraph(parsedDir);
+      if (graphResult) {
+        wiki.rawAddParsedArtifact(
+          `parsed/${plugin.id}/knowledge-graph.json`,
+          JSON.stringify(graphResult.serialized, null, 2),
+        );
+        for (const page of graphResult.wikiPages) {
+          wiki.write(page.path, page.content);
+        }
+      }
+    }
+  }
+}
+
 function resolveImpactNode(graph: KnowledgeGraph, requested: string, kind?: NodeKind): GraphNode {
   const trimmed = requested.trim();
   if (!trimmed) {
@@ -2023,6 +2046,8 @@ export async function handleTool(
       const REBUILD_TOOLS = new Set(["wiki_write", "wiki_delete"]);
       // Tools whose per-call graph/aggregate rebuild should be deferred
       const GRAPH_REBUILD_TOOLS = new Set(["code_parse"]);
+      // Tools that must observe the current compiled graph inside the same batch
+      const GRAPH_CONSUMER_TOOLS = new Set(["code_impact"]);
       let needsRebuild = false;
       let needsTimeline = false;
       let needsGraphRebuild = false;
@@ -2041,6 +2066,11 @@ export async function handleTool(
           continue;
         }
         try {
+          if (needsGraphRebuild && GRAPH_CONSUMER_TOOLS.has(op.tool)) {
+            rebuildDeferredGraphs(wiki);
+            needsGraphRebuild = false;
+          }
+
           const opOpts: HandleToolOpts = {};
           if (REBUILD_TOOLS.has(op.tool)) opOpts.skipRebuild = true;
           if (GRAPH_REBUILD_TOOLS.has(op.tool)) opOpts.skipGraphRebuild = true;
@@ -2078,26 +2108,7 @@ export async function handleTool(
 
       // Deferred graph rebuild: run once at end of batch for all plugins that parsed files
       if (needsGraphRebuild) {
-        for (const plugin of listPlugins()) {
-          const parsedDir = join(wiki.config.rawDir, "parsed", plugin.id);
-          if (plugin.rebuildAggregatePages) {
-            for (const page of plugin.rebuildAggregatePages(parsedDir)) {
-              wiki.write(page.path, page.content);
-            }
-          }
-          if (plugin.buildKnowledgeGraph) {
-            const graphResult = plugin.buildKnowledgeGraph(parsedDir);
-            if (graphResult) {
-              wiki.rawAddParsedArtifact(
-                `parsed/${plugin.id}/knowledge-graph.json`,
-                JSON.stringify(graphResult.serialized, null, 2),
-              );
-              for (const page of graphResult.wikiPages) {
-                wiki.write(page.path, page.content);
-              }
-            }
-          }
-        }
+        rebuildDeferredGraphs(wiki);
       }
 
       if (needsRebuild) {

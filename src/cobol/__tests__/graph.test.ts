@@ -103,6 +103,22 @@ describe("KnowledgeGraphBuilder", () => {
     expect(msgs.some((m) => m.includes("UNKNOWN"))).toBe(true);
   });
 
+  it("build is idempotent and does not duplicate validation diagnostics", () => {
+    const b = new KnowledgeGraphBuilder();
+    b.addNode({ id: "program:A", kind: "Program", resolved: true });
+    b.addEdge({
+      from: "program:A", to: "program:UNKNOWN",
+      kind: "CALLS",
+      confidence: "deterministic",
+      evidence: { sourceFile: "A.cbl", line: 5 },
+    });
+
+    const first = b.build();
+    const second = b.build();
+    expect(second.diagnostics).toEqual(first.diagnostics);
+    expect(second.diagnostics).toHaveLength(first.diagnostics.length);
+  });
+
   it("computes dependentsOf and dependenciesOf", () => {
     const b = new KnowledgeGraphBuilder();
     b.addNode({ id: "program:A", kind: "Program" });

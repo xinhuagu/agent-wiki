@@ -277,10 +277,12 @@ export class KnowledgeGraphBuilder {
   // ---- build --------------------------------------------------------------
 
   build(): KnowledgeGraph {
+    const validationDiagnostics: GraphDiagnostic[] = [];
+
     // Validate: warn about edges referencing non-existent nodes
     for (const edge of this.edges) {
       if (!this.nodes.has(edge.from)) {
-        this.diagnostics.push({
+        validationDiagnostics.push({
           severity: "warning",
           message: `Edge references unknown source node: ${edge.from}`,
           sourceFile: edge.evidence.sourceFile,
@@ -288,7 +290,7 @@ export class KnowledgeGraphBuilder {
         });
       }
       if (!this.nodes.has(edge.to)) {
-        this.diagnostics.push({
+        validationDiagnostics.push({
           severity: "warning",
           message: `Edge references unknown target node: ${edge.to} (unresolved ${edge.kind} from ${edge.from})`,
           sourceFile: edge.evidence.sourceFile,
@@ -306,7 +308,7 @@ export class KnowledgeGraphBuilder {
         const referencingEdges = this.edges.filter((e) => e.to === id);
         const referrers = referencingEdges.map((e) => e.from).join(", ");
         const firstRef = referencingEdges[0];
-        this.diagnostics.push({
+        validationDiagnostics.push({
           severity: "warning",
           message: `Unresolved ${node.kind} "${id}" — referenced by [${referrers}] but never parsed from source`,
           sourceFile: firstRef?.evidence.sourceFile,
@@ -318,7 +320,7 @@ export class KnowledgeGraphBuilder {
     return {
       nodes: new Map(this.nodes),
       edges: [...this.edges],
-      diagnostics: [...this.diagnostics],
+      diagnostics: [...this.diagnostics, ...validationDiagnostics],
     };
   }
 }

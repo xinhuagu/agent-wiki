@@ -63,25 +63,33 @@ function flattenDataItems(items: DataItemNode[], parent?: string): CodeSymbol[] 
 }
 
 function loadCobolModels(parsedDir: string): CobolCodeModel[] {
-  const models: CobolCodeModel[] = [];
+  const modelPaths: string[] = [];
 
   const walk = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const entries = readdirSync(dir, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
         walk(full);
         continue;
       }
       if (!entry.name.endsWith(".model.json")) continue;
-      try {
-        models.push(JSON.parse(readFileSync(full, "utf-8")));
-      } catch {
-        // Skip malformed files
-      }
+      modelPaths.push(full);
     }
   };
 
-  if (existsSync(parsedDir)) walk(parsedDir);
+  if (!existsSync(parsedDir)) return [];
+  walk(parsedDir);
+
+  const models: CobolCodeModel[] = [];
+  for (const full of modelPaths.sort((a, b) => a.localeCompare(b))) {
+    try {
+      models.push(JSON.parse(readFileSync(full, "utf-8")));
+    } catch {
+      // Skip malformed files
+    }
+  }
   return models;
 }
 

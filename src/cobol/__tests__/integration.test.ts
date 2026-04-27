@@ -264,6 +264,24 @@ describe("COBOL MCP tools integration", () => {
     expect(impactParsed.impactedByDepth[0].nodes.some((n: { node_id: string }) => n.node_id === "program:PAYROLL")).toBe(true);
   });
 
+  it("wiki_rebuild emits deterministic call-graph source order for nested models", async () => {
+    const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+    const invoiceSrc = readFileSync(join(FIXTURES, "INVOICE.cbl"), "utf-8");
+    wiki.rawAdd("nested/PAYROLL.cbl", { content: payrollSrc });
+    wiki.rawAdd("INVOICE.cbl", { content: invoiceSrc });
+
+    await handleTool(wiki, "code_parse", { path: "nested/PAYROLL.cbl" }, { skipGraphRebuild: true });
+    await handleTool(wiki, "code_parse", { path: "INVOICE.cbl" }, { skipGraphRebuild: true });
+    await handleTool(wiki, "wiki_rebuild", {});
+
+    const callGraph = readFileSync(join(tmp, "wiki", "cobol", "call-graph.md"), "utf-8");
+    const invoiceIdx = callGraph.indexOf("  - raw/INVOICE.cbl");
+    const nestedIdx = callGraph.indexOf("  - raw/nested/PAYROLL.cbl");
+    expect(invoiceIdx).toBeGreaterThan(-1);
+    expect(nestedIdx).toBeGreaterThan(-1);
+    expect(invoiceIdx).toBeLessThan(nestedIdx);
+  });
+
   it("parsed artifacts pass lint integrity checks (no missing-meta)", async () => {
     const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
     wiki.rawAdd("PAYROLL.cbl", { content: source });

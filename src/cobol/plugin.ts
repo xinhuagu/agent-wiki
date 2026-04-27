@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { parse } from "./parser.js";
 import { extractModel, generateSummary } from "./extractors.js";
 import { traceVariable as cobolTraceVariable } from "./variable-tracer.js";
+import { buildFieldLineage, generateFieldLineagePage } from "./field-lineage.js";
 import { generateProgramPage, generateCopybookPage, generateCallGraphPage } from "./wiki-gen.js";
 import type { CobolAST, DataItemNode } from "./types.js";
 import type { CobolCodeModel } from "./extractors.js";
@@ -246,6 +247,26 @@ export const cobolPlugin: CodeAnalysisPlugin = {
     wikiPages.push(generateSystemMapPage(serialized));
 
     return { serialized, wikiPages };
+  },
+
+  buildDerivedArtifacts(parsedDir: string): {
+    artifacts: Array<{ path: string; content: string }>;
+    wikiPages: Array<{ path: string; content: string }>;
+  } | null {
+    if (!existsSync(parsedDir)) return null;
+    const models = loadCobolModels(parsedDir);
+    if (models.length === 0) return null;
+
+    const lineage = buildFieldLineage(models);
+    if (!lineage) return null;
+
+    return {
+      artifacts: [{
+        path: "field-lineage.json",
+        content: JSON.stringify(lineage, null, 2),
+      }],
+      wikiPages: [generateFieldLineagePage(lineage)],
+    };
   },
 };
 

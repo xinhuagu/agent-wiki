@@ -121,6 +121,59 @@ describe("COBOL MCP tools integration", () => {
     expect(parsed.diagnostics.some((d: { message: string }) => d.message.includes("program:CALC-TAX"))).toBe(true);
   });
 
+  it("code_parse persists field-lineage artifacts and wiki summary when copybooks are shared", async () => {
+    const copybook = `
+       01  CUSTOMER-REC.
+           05  CUSTOMER-ID       PIC X(10).
+           05  CUSTOMER-ADDRESS.
+               10  ZIP-CODE      PIC 9(5).
+`;
+    const orderA = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERA.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+    const orderB = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERB.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+
+    wiki.rawAdd("ORDERA.cbl", { content: orderA });
+    wiki.rawAdd("ORDERB.cbl", { content: orderB });
+    wiki.rawAdd("CUSTOMER-REC.cpy", { content: copybook });
+
+    await handleTool(wiki, "code_parse", { path: "ORDERA.cbl" });
+    await handleTool(wiki, "code_parse", { path: "ORDERB.cbl" });
+    const result = await handleTool(wiki, "code_parse", { path: "CUSTOMER-REC.cpy" });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.artifacts).toContain("raw/parsed/cobol/field-lineage.json");
+    expect(parsed.wikiPages).toContain("cobol/field-lineage.md");
+
+    const lineagePath = join(tmp, "raw", "parsed", "cobol", "field-lineage.json");
+    const pagePath = join(tmp, "wiki", "cobol", "field-lineage.md");
+    expect(existsSync(lineagePath)).toBe(true);
+    expect(existsSync(pagePath)).toBe(true);
+
+    const lineage = JSON.parse(readFileSync(lineagePath, "utf-8"));
+    expect(lineage.summary.deterministic).toBeGreaterThan(0);
+    expect(lineage.deterministic.some((entry: { fieldName: string }) => entry.fieldName === "ZIP-CODE")).toBe(true);
+    expect(readFileSync(pagePath, "utf-8")).toContain("CUSTOMER-REC");
+  });
+
   it("code_parse succeeds with a .cpy copybook", async () => {
     const source = readFileSync(join(FIXTURES, "DATE-UTILS.cpy"), "utf-8");
     wiki.rawAdd("DATE-UTILS.cpy", { content: source });
@@ -407,6 +460,55 @@ describe("COBOL MCP tools integration", () => {
       const nodeIds = graph.nodes.map((n: { id: string }) => n.id);
       expect(nodeIds).toContain("program:PAYROLL");
       expect(nodeIds).toContain("program:INVOICE");
+    });
+
+    it("wiki_rebuild regenerates field-lineage artifacts from existing parsed models", async () => {
+      const copybook = `
+       01  CUSTOMER-REC.
+           05  CUSTOMER-ID       PIC X(10).
+`;
+      const orderA = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERA.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+      const orderB = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERB.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+
+      wiki.rawAdd("ORDERA.cbl", { content: orderA });
+      wiki.rawAdd("ORDERB.cbl", { content: orderB });
+      wiki.rawAdd("CUSTOMER-REC.cpy", { content: copybook });
+
+      await handleTool(wiki, "code_parse", { path: "ORDERA.cbl" }, { skipGraphRebuild: true });
+      await handleTool(wiki, "code_parse", { path: "ORDERB.cbl" }, { skipGraphRebuild: true });
+      await handleTool(wiki, "code_parse", { path: "CUSTOMER-REC.cpy" }, { skipGraphRebuild: true });
+
+      const lineagePath = join(tmp, "raw", "parsed", "cobol", "field-lineage.json");
+      const pagePath = join(tmp, "wiki", "cobol", "field-lineage.md");
+      expect(existsSync(lineagePath)).toBe(false);
+      expect(existsSync(pagePath)).toBe(false);
+
+      await handleTool(wiki, "wiki_rebuild", {});
+
+      expect(existsSync(lineagePath)).toBe(true);
+      expect(existsSync(pagePath)).toBe(true);
+      const lineage = JSON.parse(readFileSync(lineagePath, "utf-8"));
+      expect(lineage.summary.deterministic).toBeGreaterThan(0);
     });
 
     it("wiki_rebuild includes graph pages in index.md and timeline.md", async () => {

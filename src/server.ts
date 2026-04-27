@@ -869,6 +869,17 @@ function rebuildDeferredGraphs(wiki: Wiki): void {
         }
       }
     }
+    if (plugin.buildDerivedArtifacts) {
+      const derived = plugin.buildDerivedArtifacts(parsedDir);
+      if (derived) {
+        for (const artifact of derived.artifacts) {
+          wiki.rawAddParsedArtifact(`parsed/${plugin.id}/${artifact.path}`, artifact.content);
+        }
+        for (const page of derived.wikiPages) {
+          wiki.write(page.path, page.content);
+        }
+      }
+    }
   }
 }
 
@@ -1600,6 +1611,17 @@ export async function handleTool(
             };
           }
         }
+        if (plugin.buildDerivedArtifacts) {
+          const derived = plugin.buildDerivedArtifacts(parsedDir);
+          if (derived) {
+            for (const artifact of derived.artifacts) {
+              wiki.rawAddParsedArtifact(`parsed/${plugin.id}/${artifact.path}`, artifact.content);
+            }
+            for (const page of derived.wikiPages) {
+              wiki.write(page.path, page.content);
+            }
+          }
+        }
       }
 
       // Now build page cache AFTER graph pages are written, so they are
@@ -1719,6 +1741,20 @@ export async function handleTool(
             edges: ser.edges?.length ?? 0,
             diagnostics: ser.diagnostics?.length ?? 0,
           };
+        }
+      }
+      if (plugin.buildDerivedArtifacts && !opts?.skipGraphRebuild) {
+        const parsedDir = join(wiki.config.rawDir, "parsed", lang);
+        const derived = plugin.buildDerivedArtifacts(parsedDir);
+        if (derived) {
+          for (const artifact of derived.artifacts) {
+            wiki.rawAddParsedArtifact(`parsed/${lang}/${artifact.path}`, artifact.content);
+            artifacts.push(`raw/parsed/${lang}/${artifact.path}`);
+          }
+          for (const page of derived.wikiPages) {
+            wiki.write(page.path, page.content);
+            writtenPages.push(page.path);
+          }
         }
       }
 

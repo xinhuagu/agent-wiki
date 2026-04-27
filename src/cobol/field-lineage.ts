@@ -289,7 +289,13 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
     for (const copybook of entry.copybooks) participatingCopybookIds.add(copybook.id);
     for (const program of entry.programs) participatingProgramIds.add(program.id);
   }
-  const copybookUsage = rawCopybookUsage.filter((entry) => participatingCopybookIds.has(entry.copybookId));
+  const copybookUsage = rawCopybookUsage
+    .filter((entry) => participatingCopybookIds.has(entry.copybookId))
+    .map((entry) => ({
+      ...entry,
+      programs: entry.programs.filter((program) => participatingProgramIds.has(program.id)),
+    }))
+    .filter((entry) => entry.programs.length > 0);
 
   return {
     summary: {

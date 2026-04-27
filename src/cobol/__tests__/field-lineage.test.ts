@@ -130,6 +130,28 @@ describe("COBOL field lineage", () => {
     ]);
   });
 
+  it("copybook usage excludes consumers that do not participate in lineage evidence", () => {
+    const orderA = model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl");
+    const orderB = model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl");
+    const orderC = model(program("ORDERC", "CUSTOMER-REC"), "ORDERC.cbl");
+    orderC.copies[0]!.replacing = ["CUSTOMER-ID", "CLIENT-ID"];
+
+    const lineage = buildFieldLineage([
+      model(sharedCopybook, "CUSTOMER-REC.cpy"),
+      orderA,
+      orderB,
+      orderC,
+    ]);
+
+    expect(lineage).not.toBeNull();
+    expect(lineage!.summary.programs).toBe(2);
+    expect(lineage!.copybookUsage).toHaveLength(1);
+    expect(lineage!.copybookUsage[0]!.programs.map((program) => program.id)).toEqual([
+      "program:ORDERA",
+      "program:ORDERB",
+    ]);
+  });
+
   it("does not conflate parsed copybooks that share the same basename", () => {
     const billingCommon = `
        01  BILLING-COMMON.

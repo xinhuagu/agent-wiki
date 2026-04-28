@@ -41,9 +41,9 @@ The current codebase already has the right primitives:
 - immutable `raw/` source layer with provenance
 - mutable `wiki/` layer with structured Markdown pages
 - `raw_coverage` to expose uncompiled source material
-- `wiki_lint` to detect structural and factual risk signals
-- `knowledge_ingest_batch` and `knowledge_digest_write` to support compile loops
-- `wiki_search_read` to move retrieval closer to grounded reading
+- `wiki_admin` to detect structural risk signals and rebuild compiled views
+- `knowledge_ingest` to support compile loops without multiplying public tools
+- `wiki_search` plus batched `wiki_read` to move retrieval closer to grounded reading
 - pluggable code analysis with an initial COBOL implementation
 - a standalone graph viewer for live knowledge visualization
 

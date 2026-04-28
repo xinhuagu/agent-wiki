@@ -83,7 +83,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | Feature | Description |
 |---------|-------------|
 | **Batch Mode** | Generic `batch` tool + semantic pipelines — collapse multi-step workflows into single requests |
-| **Knowledge Pipelines** | `knowledge_ingest_batch` + `knowledge_digest_write` — end-to-end ingest/digest/write-back loop |
+| **Knowledge Pipelines** | Unified `knowledge_ingest` modes — end-to-end ingest/digest/write-back loop without expanding the public tool surface |
 | **Structured Extraction** | PDF (per-page), DOCX, XLSX (per-sheet), PPTX (per-slide) — segments with source provenance |
 | **Immutable Sources** | SHA-256 verified `raw/` layer — write-once, tamper-proof, full provenance |
 | **Knowledge Compilation** | Agent builds structured wiki pages from raw sources — not retrieve-and-forget |
@@ -95,7 +95,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **Coverage Report** | `raw_coverage` tells the agent which raw sources have not yet been compiled into any wiki page — drives active knowledge completion |
 | **Atlassian Import** | One-command Confluence pages and Jira issues with full hierarchy |
 | **File Versioning** | Auto-version same-name files, query latest, list all versions |
-| **COBOL Code Analysis** | AST parser with variable tracing, call graph generation, and auto wiki pages |
+| **COBOL Code Analysis** | AST parser with unified `code_query` access for variable tracing, impact, procedure flow, and field lineage |
 | **Skill Install** | One-command install as native skill for Claude Code and compatible clients |
 | **Git-Native** | Plain Markdown — diffable, blameable, revertable |
 | **3D Graph Viewer** | Built-in — realtime 3D graph of pages and `[[wikilinks]]`, edits push live over SSE. Run `agent-wiki web`. |
@@ -144,10 +144,10 @@ search:
   hybrid: true
 ```
 
-**2.** Run `wiki_rebuild` once to embed all pages:
+**2.** Run `wiki_admin` once to rebuild and embed all pages:
 
 ```bash
-agent-wiki call wiki_rebuild
+agent-wiki call wiki_admin '{"action":"rebuild"}'
 ```
 
 The first run downloads the `Xenova/all-MiniLM-L6-v2` model (~90 MB) from HuggingFace Hub and caches it locally. After that, every `wiki_write` automatically keeps the vector index up to date.
@@ -158,7 +158,7 @@ See [Search configuration](docs/tools.md#hybrid-bm25vector-search) for weight tu
 
 ## Documentation
 
-- [MCP Tools (19) & Entity Types](docs/tools.md)
+- [MCP Tools (15 public tools) & Entity Types](docs/tools.md)
 - [Configuration, CLI & Security](docs/configuration.md)
 - [Request Optimization — Batch Digest, Pagination, Context Limits](docs/request-optimization.md)
 

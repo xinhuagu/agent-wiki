@@ -136,7 +136,7 @@ search:
 3. Build the vector index (embeds all existing pages):
 
 ```bash
-agent-wiki call wiki_rebuild '{}'
+agent-wiki call wiki_admin '{"action":"rebuild"}'
 ```
 
 The model (`Xenova/all-MiniLM-L6-v2`, ~90 MB) downloads automatically from HuggingFace Hub on first run and is cached locally.
@@ -189,7 +189,7 @@ Weights must sum to 1.0 for consistent scoring. Adjust in `.agent-wiki.yaml` and
 - Automatically invalidated if `search.model` changes
 - `wiki_write` updates the single page's embedding incrementally
 - `wiki_delete` removes the page's embedding
-- `wiki_rebuild` rebuilds all embeddings from scratch
+- `wiki_admin` with `action: "rebuild"` rebuilds all embeddings from scratch
 
 ### Graceful degradation
 

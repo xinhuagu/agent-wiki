@@ -1,30 +1,53 @@
 # Agent Wiki — Tool Parameter Reference
 
-Complete parameter schemas for all 18 tools.
+Complete parameter schemas for all 15 public tools.
+
+Legacy tool names (raw_add, raw_fetch, raw_import_confluence, raw_import_jira, wiki_search_read, wiki_init, wiki_config, wiki_rebuild, wiki_lint, code_trace_variable, code_impact, knowledge_ingest_batch, knowledge_digest_write) remain supported for backward compatibility but are no longer listed in the public MCP tool surface.
 
 ---
 
 ## RAW LAYER
 
-### raw_add
+### raw_ingest
 
-Add a raw source document (immutable, SHA-256 verified).
+Ingest raw source documents. Select `mode` to control the ingestion method.
 
 ```json
 {
-  "filename": "(required) string — Filename in raw/ (e.g. 'paper.pdf'). For directory imports, becomes subdirectory prefix.",
-  "content": "string — File content as string (for text files). Mutually exclusive with source_path.",
-  "source_path": "string — Absolute path to local file or directory to copy. If directory, all files imported recursively.",
-  "source_url": "string — Original URL where downloaded from",
-  "description": "string — Brief description",
-  "tags": ["string array — Tags for categorization"],
-  "auto_version": "boolean — If true and file exists, create versioned copy (e.g. report_v2.xlsx). Default: false",
-  "pattern": "string — Glob filter for directory imports (e.g. '*.html'). Ignored for single files."
+  "mode": "(required) string — add | fetch | import_confluence | import_jira",
+
+  "filename":   "[add] string — Filename in raw/ (e.g. 'paper.pdf'). For directory imports, becomes subdirectory prefix.",
+  "content":    "[add] string — File content as string. Either content or source_path is required.",
+  "source_path":"[add] string — Absolute path to local file or directory to copy into raw/.",
+  "source_url": "[add/fetch] string — Original URL where the document was downloaded from",
+  "description":"[add/fetch] string — Brief description",
+  "tags":       "[add/fetch] string array — Tags for categorization",
+  "auto_version":"[add] boolean — Create versioned copy if file exists (e.g. report_v2.xlsx). Default: false",
+  "pattern":    "[add] string — Glob filter for directory imports (e.g. '*.html'). Ignored for single files.",
+
+  "url":        "[fetch] string — URL to download. arXiv abs URLs auto-converted to PDF. [import_confluence] Confluence page URL. [import_jira] Jira issue URL.",
+  "recursive":  "[import_confluence] boolean — Import child pages recursively (default: false)",
+  "depth":      "[import_confluence] number — Max recursion depth (-1 = unlimited, default: 50 if recursive)",
+  "auth_env":   "[import_confluence] string — Env var for auth (default: CONFLUENCE_API_TOKEN). [import_jira] Env var (default: JIRA_API_TOKEN)",
+  "include_comments":    "[import_jira] boolean — Include comments (default: true)",
+  "include_attachments": "[import_jira] boolean — Download attachments (default: true)",
+  "include_links":       "[import_jira] boolean — Import linked issues (default: true)",
+  "link_depth":          "[import_jira] number — Levels of linked issues to follow (default: 1)"
 }
 ```
 
-Either `content` or `source_path` is required (or neither for empty files).
-Directory imports return an array of documents. Single image files (<10MB) return inline image.
+**mode: add** — `filename` required. Either `content` or `source_path` required.
+Returns: `{ ok, document }` or `{ ok, imported, documents }` for directory.
+Single image files (<10MB) returned inline — you MUST call wiki_write to describe them.
+
+**mode: fetch** — `url` required.
+Returns: `{ ok, document }`. Single images (<10MB) returned inline.
+
+**mode: import_confluence** — `url` required. Requires `CONFLUENCE_API_TOKEN='email:api-token'`.
+Returns: `{ ok, pages, files, tree }`
+
+**mode: import_jira** — `url` required. Requires `JIRA_API_TOKEN='email:api-token'`.
+Returns: `{ ok, issueKey, summary, files, linkedIssues, importedCount }`
 
 ### raw_list
 
@@ -80,50 +103,19 @@ List all versions of a raw file.
 
 Returns: `{ versions: [...], latest: "filename", count: N }`
 
-### raw_fetch
+### raw_coverage
 
-Download file from URL into raw/.
-
-```json
-{
-  "url": "(required) string — URL to download. arXiv abs URLs auto-converted to PDF.",
-  "filename": "string — Override filename (auto-inferred if omitted)",
-  "description": "string — Brief description",
-  "tags": ["string array"]
-}
-```
-
-### raw_import_confluence
-
-Import Confluence page(s) recursively.
+Report which raw/ files are not yet covered by any wiki page.
 
 ```json
 {
-  "url": "(required) string — Confluence page URL",
-  "recursive": "boolean — Import child pages (default: false)",
-  "depth": "number — Max recursion depth (-1 = unlimited, default: 50 if recursive, 0 if not)",
-  "auth_env": "string — Env var name for auth (default: CONFLUENCE_API_TOKEN, format: 'email:api-token')"
+  "limit": "number — Max uncovered entries (default: 50)",
+  "sort":  "string — newest | oldest | largest (default: newest)",
+  "tag":   "string — Only consider files with this tag"
 }
 ```
 
-Returns: `{ ok, pages, files, tree }`
-
-### raw_import_jira
-
-Import Jira issue with full details.
-
-```json
-{
-  "url": "(required) string — Jira issue URL (e.g. https://company.atlassian.net/browse/PROJ-123)",
-  "include_comments": "boolean — Include comments (default: true)",
-  "include_attachments": "boolean — Download attachments (default: true)",
-  "include_links": "boolean — Import linked issues (default: true)",
-  "link_depth": "number — Levels of linked issues to follow (default: 1)",
-  "auth_env": "string — Env var name for auth (default: JIRA_API_TOKEN)"
-}
-```
-
-Returns: `{ ok, issueKey, summary, files, linkedIssues, importedCount }`
+Returns: `{ uncovered: [...], covered: N, total: N, coverageRatio: N }`
 
 ---
 
@@ -135,11 +127,15 @@ Read a wiki page (frontmatter + markdown body).
 
 ```json
 {
-  "page": "(required) string — Path relative to wiki/ (e.g. 'concept-gil.md')"
+  "page": "string — Path relative to wiki/ (use for single-page reads)",
+  "pages": "string array — Paths for multi-page reads (returns array of results)",
+  "section": "string — Heading to read (e.g. '## Installation'). Case-insensitive partial match.",
+  "offset": "number — First line to return (default: 0). For line-based pagination.",
+  "limit":  "number — Max lines (default: 200, max: 500)."
 }
 ```
 
-Returns the full file content as string.
+Either `page` or `pages` is required. Large pages (>200 lines) return paginated JSON with `toc`.
 
 ### wiki_write
 
@@ -149,11 +145,12 @@ Create or update a wiki page. Auto-classifies type/tags if missing. Auto-routes 
 {
   "page": "(required) string — Path relative to wiki/",
   "content": "(required) string — Full content with YAML frontmatter + Markdown body",
-  "source": "string — Provenance note (why this write happened)"
+  "source": "string — Provenance note (why this write happened)",
+  "return_content": "boolean — Include final written content in response. Default: false."
 }
 ```
 
-Returns: `{ ok, page, routed, autoClassified: { type, tags, confidence } }`
+Returns: `{ ok, page, routed, autoClassified: { type, tags, confidence }, autoLinked, content? }`
 
 Content format:
 ```markdown
@@ -198,61 +195,86 @@ Returns: `{ pages: [...], count: N }`
 
 ### wiki_search
 
-Full-text BM25 keyword search.
+Full-text BM25 keyword search. Optionally reads top results in one call.
 
 ```json
 {
-  "query": "(required) string — Search keywords",
-  "limit": "number — Max results (default: 10)"
+  "query":   "(required) string — Search keywords",
+  "limit":   "number — Max results (default: 10)",
+  "type":    "string — Filter by entity type",
+  "tags":    "string array — Filter by tags (any match)",
+  "include_content": "boolean — Inline page content in results. Default: false.",
+  "inline_budget":   "number — Max total chars of inlined content (with include_content). Omit for no limit.",
+  "read_top_n":   "number — Read top N unique matching pages (max: 10). Activates combined search+read mode.",
+  "section":      "string — Section heading filter applied to read pages (with read_top_n).",
+  "per_page_limit":"number — Max lines per read page (default: 200, max: 500) (with read_top_n).",
+  "include_toc":  "boolean — Include TOC for truncated pages (default: false) (with read_top_n)."
 }
 ```
 
-Returns: `{ results: [{ path, score, snippet }], count: N }`
+**Without `read_top_n`:** Returns `{ results: [{ path, score, snippet, section? }], count: N }`.
+When `include_content=true`, each result also includes `content`.
 
-Features: field-weighted scoring, synonym expansion, fuzzy matching, prefix matching, CJK support.
+**With `read_top_n`:** Returns `{ results, count, pages: [{ path, content, ... }], pagesRead, nextReads }`.
+`pages` contains full content for top N unique matching pages (deduplicated).
+`nextReads` lists remaining unique page paths for follow-up reads.
 
-### wiki_lint
+**When no results found:** Returns `knowledge_gap` with `suggested_page`, `suggested_title`, `suggested_type`, `suggested_tags`.
 
-Comprehensive health checks. No parameters.
+### wiki_admin
 
-```bash
-agent-wiki call wiki_lint
-```
-
-Checks: contradictions, orphans, broken [[links]], missing sources, stale content, SHA-256 integrity, synthesis integrity.
-
-Returns: `{ pagesChecked, rawChecked, issues: [...], contradictions: [...] }`
-
-### wiki_init
-
-Initialize a new knowledge base.
+Wiki administration and maintenance.
 
 ```json
 {
-  "path": "string — Config root (default: '.')",
-  "workspace": "string — Separate data directory"
+  "action": "(required) string — init | config | rebuild | lint",
+  "path":       "[init] string — Config root where .agent-wiki.yaml is created (default: '.')",
+  "workspace":  "[init] string — Separate data directory for wiki/, raw/, schemas/",
+  "apply_fixes":"[lint] boolean — Auto-fix fixable issues (missing frontmatter). Default: false."
 }
 ```
 
-Creates: wiki/, raw/, schemas/, .agent-wiki.yaml
+**action: init** — Initialize a new knowledge base. Creates wiki/, raw/, schemas/, .agent-wiki.yaml.
+Returns: `{ ok, configRoot, workspace, message }`
 
-### wiki_config
+**action: config** — Show current workspace configuration.
+Returns: `{ configRoot, workspace, wikiDir, rawDir, schemasDir, lint, search, separateWorkspace, schemas }`
 
-Show workspace configuration. No parameters.
+**action: rebuild** — Rebuild index.md, timeline.md, code knowledge graphs, and optional vector index.
+Returns: `{ ok, message }`
 
-```bash
-agent-wiki call wiki_config
+**action: lint** — Run comprehensive health checks: contradictions, orphan pages, broken links, SHA-256 integrity, synthesis integrity.
+Returns: `{ pagesChecked, rawChecked, issues: [...], contradictions: [...], fixed, fixedPages }`
+
+---
+
+## KNOWLEDGE INGESTION
+
+### knowledge_ingest
+
+Knowledge ingestion pipeline.
+
+```json
+{
+  "mode": "(required) string — batch | digest_write",
+
+  "source_path":    "[batch] string — (required) Absolute path to directory or file to ingest",
+  "pattern":        "[batch] string — Glob filter for directory (e.g. '*.pdf', '*.{xlsx,docx}')",
+  "maxFiles":       "[batch] number — Max files to process (default: 100, max: 1000)",
+  "topic":          "[batch] string — Topic name for digest packs (default: 'general')",
+  "chunkLines":     "[batch] number — Max lines per chunk (default: 100)",
+  "packLines":      "[batch] number — Max lines per digest pack (default: 500)",
+  "continueOnError":"[batch] boolean — Continue on individual file errors (default: true)",
+
+  "pages": "[digest_write] array — (required) Wiki pages to write. Each: { page, title, body, type?, tags?, topic?, sources?, sourcePacks? }"
+}
 ```
 
-Returns: `{ configRoot, workspace, wikiDir, rawDir, schemasDir, lint, separateWorkspace, schemas }`
+**mode: batch** — Imports files into raw/, extracts text, chunks, and packs into digest packs under raw/digest-packs/{topic}/.
+Returns: `{ ok, matched, imported, skipped, extracted, chunks, packs, failed, packPaths, nextRecommendedReads }`
 
-### wiki_rebuild
-
-Rebuild index.md and timeline.md. No parameters.
-
-```bash
-agent-wiki call wiki_rebuild
-```
+**mode: digest_write** — Writes LLM-generated digest summaries to wiki with provenance. Auto-classifies, auto-routes, auto-timestamps.
+Returns: `{ results: [...], count, written }`
 
 ---
 
@@ -280,15 +302,44 @@ Outputs:
 
 Returns: `{ summary, normalizedModel, artifacts, wikiPages, variableTrace? }`
 
-### code_trace_variable
+### code_query
 
-Trace variable references in parsed code.
+Query parsed code knowledge.
 
 ```json
 {
-  "path": "(required) string — Path in raw/ (e.g. 'PAYROLL.cbl')",
-  "variable": "(required) string — Variable name (e.g. 'WS-TOTAL-SALARY')"
+  "query_type": "(required) string — trace_variable | impact",
+
+  "path":     "[trace_variable] string — (required) Path in raw/ (e.g. 'PAYROLL.cbl')",
+  "variable": "[trace_variable] string — (required) Variable name (e.g. 'WS-TOTAL-SALARY')",
+
+  "node_id":  "[impact] string — (required) Canonical node ID or logical name (e.g. 'copybook:DATE-UTILS')",
+  "kind":     "[impact] string — Node kind: program | copybook | dataset | job | step",
+  "max_depth":"[impact] number — Max reverse-dependency depth (default: 10)",
+  "language": "[impact] string — Language plugin to use (default: 'cobol')"
 }
 ```
 
+**query_type: trace_variable** — Traces all references to a variable in a parsed source file.
 Returns: `{ variable, file, references: [...] }`
+
+**query_type: impact** — Queries the compiled knowledge graph for downstream impact.
+Returns: `{ query, source, summary, impactedByDepth: [...], diagnostics }`
+
+---
+
+## BATCH
+
+### batch
+
+Execute multiple tool calls in one request.
+
+```json
+{
+  "operations": "(required) array — [{ tool: string, args?: object }, ...]"
+}
+```
+
+Supports any combination of tools. Max 50 operations. wiki_rebuild / wiki_admin action:rebuild are deduplicated (runs once at end). Failures per-operation do not abort the batch.
+
+Returns: `{ results: [{ tool, result? | error? }], count: N }`

@@ -2283,6 +2283,13 @@ describe("consolidated tool: code_query", () => {
     expect(Array.isArray(parsed.references)).toBe(true);
   });
 
+  it("query_type:impact throws when no compiled graph exists", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "code_query", { query_type: "impact", node_id: "program:MISSING" })
+    ).rejects.toThrow(/not found/i);
+  });
+
   it("throws on unknown query_type", async () => {
     const wiki = freshWiki();
     await expect(
@@ -2540,6 +2547,13 @@ Content for backward compatibility test.`);
     });
     const parsed = JSON.parse(result as string);
     expect(parsed.variable).toBe("WS-X");
+  });
+
+  it("code_impact still throws when no compiled graph exists", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "code_impact", { node_id: "program:MISSING" })
+    ).rejects.toThrow(/not found/i);
   });
 });
 

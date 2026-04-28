@@ -25,6 +25,8 @@ import { RequestQueue } from "./queue.js";
 import { registerPlugin, getPlugin, getPluginForFile, listPlugins, summarizeModel } from "./code-analysis.js";
 import { cobolPlugin } from "./cobol/plugin.js";
 import { canonicalNodeId, deserializeGraph, displayLabel, graphEdgesFrom, graphImpactOf } from "./cobol/graph.js";
+import type { CodeProcedure, CodeRelation, NormalizedCodeModel } from "./code-analysis.js";
+import type { SerializedFieldLineage, SerializedInferredFieldLineageEntry } from "./cobol/field-lineage.js";
 import type { GraphEdge, GraphNode, KnowledgeGraph, NodeKind, SerializedGraph } from "./cobol/graph.js";
 
 // Register built-in plugins
@@ -571,18 +573,20 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
         description:
           "Query parsed code knowledge. Select `query_type` to control behavior:\n" +
           "- `trace_variable`: Trace all references to a variable in a parsed source file — shows where it is read, written, or passed, grouped by section/paragraph.\n" +
-          "- `impact`: Query the compiled knowledge graph for downstream impact — returns affected programs, copybooks, or datasets grouped by dependency depth, with evidence and uncertainty markers.",
+          "- `impact`: Query the compiled knowledge graph for downstream impact — returns affected programs, copybooks, or datasets grouped by dependency depth, with evidence and uncertainty markers.\n" +
+          "- `procedure_flow`: Query parsed procedure/section PERFORM flow for one source file — returns section-level and paragraph-level flow, optionally focused on one procedure.\n" +
+          "- `field_lineage`: Query compiled field-lineage artifacts — returns deterministic and inferred matches for one field, optionally narrowed to a copybook or qualified name.",
         inputSchema: {
           type: "object" as const,
           properties: {
             query_type: {
               type: "string",
-              enum: ["trace_variable", "impact"],
-              description: "Query type: trace_variable (variable reference tracing) or impact (downstream dependency impact)",
+              enum: ["trace_variable", "impact", "procedure_flow", "field_lineage"],
+              description: "Query type: trace_variable, impact, procedure_flow, or field_lineage",
             },
             path: {
               type: "string",
-              description: "[trace_variable] Path to source file in raw/ (e.g. 'PAYROLL.cbl')",
+              description: "[trace_variable/procedure_flow] Path to source file in raw/ (e.g. 'PAYROLL.cbl')",
             },
             variable: {
               type: "string",
@@ -602,7 +606,27 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             },
             language: {
               type: "string",
-              description: "[impact] Compiled language graph to read (default: 'cobol')",
+              description: "[impact/field_lineage] Compiled language artifact set to read (default: 'cobol')",
+            },
+            procedure: {
+              type: "string",
+              description: "[procedure_flow] Optional procedure/section/paragraph name to focus traversal from (e.g. 'A100-INIT')",
+            },
+            procedure_kind: {
+              type: "string",
+              description: "[procedure_flow] Optional procedure kind filter: section or paragraph",
+            },
+            field_name: {
+              type: "string",
+              description: "[field_lineage] Field name to query (e.g. 'CUSTOMER-ID')",
+            },
+            qualified_name: {
+              type: "string",
+              description: "[field_lineage] Optional qualified field path (e.g. 'CUSTOMER-REC.CUSTOMER-ID')",
+            },
+            copybook: {
+              type: "string",
+              description: "[field_lineage] Optional copybook canonical id or logical name (e.g. 'copybook:CUSTOMER-A' or 'CUSTOMER-A')",
             },
           },
           required: ["query_type"],
@@ -728,6 +752,362 @@ function normalizeImpactKind(raw?: string): NodeKind | undefined {
     default:
       throw new Error(`Unsupported node kind: ${raw}. Expected one of: program, copybook, dataset, job, step.`);
   }
+}
+
+function normalizeProcedureKind(raw?: string): "section" | "paragraph" | undefined {
+  if (!raw) return undefined;
+  const kind = raw.trim().toLowerCase();
+  if (kind === "section" || kind === "paragraph") return kind;
+  throw new Error(`Unsupported procedure_kind: ${raw}. Expected one of: section, paragraph.`);
+}
+
+function parsedArtifactStem(filePath: string): string {
+  return filePath.replace(/\.[^.]+$/, "");
+}
+
+async function loadParsedNormalizedModel(wiki: Wiki, filePath: string): Promise<NormalizedCodeModel> {
+  const plugin = getPluginForFile(filePath);
+  if (!plugin) {
+    const supported = listPlugins().flatMap((p) => p.extensions).join(", ");
+    throw new Error(`Unsupported file type: ${filePath}. Supported extensions: ${supported}`);
+  }
+  const rawResult = await wiki.rawRead(`parsed/${plugin.id}/${parsedArtifactStem(filePath)}.normalized.json`);
+  if (!rawResult || rawResult.content === null) {
+    throw new Error(`Parsed normalized model not found for "${filePath}". Run code_parse on that source file first.`);
+  }
+  try {
+    return JSON.parse(rawResult.content) as NormalizedCodeModel;
+  } catch (err) {
+    throw new Error(`Failed to parse normalized model for "${filePath}": ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+async function loadFieldLineageArtifact(wiki: Wiki, language: string): Promise<SerializedFieldLineage> {
+  const plugin = getPlugin(language);
+  if (!plugin) {
+    const available = listPlugins().map((p) => p.id).join(", ");
+    throw new Error(`Unknown code-analysis plugin: ${language}. Available plugins: ${available}`);
+  }
+  const rawResult = await wiki.rawRead(`parsed/${plugin.id}/field-lineage.json`);
+  if (!rawResult || rawResult.content === null) {
+    throw new Error(
+      `Compiled field lineage not found for "${plugin.id}". Run code_parse on one or more ${plugin.id.toUpperCase()} files, or run wiki_rebuild after parsing.`
+    );
+  }
+  try {
+    return JSON.parse(rawResult.content) as SerializedFieldLineage;
+  } catch (err) {
+    throw new Error(`Failed to parse compiled field lineage for "${plugin.id}": ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function procedureSectionName(procedure?: CodeProcedure): string | null {
+  if (!procedure) return null;
+  return procedure.kind === "section" ? procedure.name : procedure.parentProcedure ?? null;
+}
+
+function procedureSummary(procedure?: CodeProcedure): Record<string, unknown> | null {
+  if (!procedure) return null;
+  return {
+    name: procedure.name,
+    kind: procedure.kind,
+    parentUnit: procedure.parentUnit ?? null,
+    parentProcedure: procedure.parentProcedure ?? null,
+    section: procedureSectionName(procedure),
+    loc: procedure.loc,
+  };
+}
+
+function resolveProcedure(
+  procedures: CodeProcedure[],
+  requested: string,
+  kind?: "section" | "paragraph",
+): CodeProcedure {
+  const needle = requested.trim().toLowerCase();
+  if (!needle) throw new Error("procedure must not be empty");
+  const matches = procedures.filter((procedure) => {
+    if (kind && procedure.kind !== kind) return false;
+    return procedure.name.toLowerCase() === needle;
+  });
+  if (matches.length === 1) return matches[0]!;
+  if (matches.length > 1) {
+    throw new Error(
+      `Procedure "${requested}" is ambiguous. Use procedure_kind to narrow it. Matches: ${matches.map((p) => `${p.kind}:${p.name}`).join(", ")}`
+    );
+  }
+  throw new Error(`Procedure not found in parsed model: ${requested}`);
+}
+
+function buildProcedureFlowResponse(
+  model: NormalizedCodeModel,
+  query: {
+    path: string;
+    procedure?: string;
+    procedureKind?: "section" | "paragraph";
+    maxDepth: number;
+  },
+): Record<string, unknown> {
+  const procedures = model.procedures.filter((procedure) =>
+    procedure.kind === "section" || procedure.kind === "paragraph"
+  );
+  const procedureByName = new Map<string, CodeProcedure>();
+  for (const procedure of procedures) {
+    const key = procedure.name.toLowerCase();
+    if (!procedureByName.has(key)) procedureByName.set(key, procedure);
+  }
+
+  const performRelations = model.relations.filter((relation) => relation.type === "perform");
+  const performs = performRelations.map((relation) => {
+    const fromProcedure = procedureByName.get(relation.from.toLowerCase());
+    const toProcedure = procedureByName.get(relation.to.toLowerCase());
+    return {
+      from: {
+        name: relation.from,
+        kind: fromProcedure?.kind ?? null,
+        section: procedureSectionName(fromProcedure),
+      },
+      to: {
+        name: relation.to,
+        kind: toProcedure?.kind ?? null,
+        section: procedureSectionName(toProcedure),
+      },
+      line: relation.loc.line,
+      thru: typeof relation.metadata?.thru === "string" ? relation.metadata.thru : null,
+    };
+  });
+
+  const sectionCallMap = new Map<string, {
+    fromSection: string;
+    toSection: string;
+    callers: Set<string>;
+    targets: Set<string>;
+    count: number;
+  }>();
+  for (const perform of performs) {
+    const fromSection = perform.from.section;
+    const toSection = perform.to.section;
+    if (!fromSection || !toSection) continue;
+    const key = `${fromSection}→${toSection}`;
+    const aggregate = sectionCallMap.get(key) ?? {
+      fromSection,
+      toSection,
+      callers: new Set<string>(),
+      targets: new Set<string>(),
+      count: 0,
+    };
+    aggregate.callers.add(perform.from.name);
+    aggregate.targets.add(perform.to.name);
+    aggregate.count += 1;
+    sectionCallMap.set(key, aggregate);
+  }
+  const sectionCalls = [...sectionCallMap.values()]
+    .map((entry) => ({
+      fromSection: entry.fromSection,
+      toSection: entry.toSection,
+      count: entry.count,
+      callers: [...entry.callers].sort((a, b) => a.localeCompare(b)),
+      targets: [...entry.targets].sort((a, b) => a.localeCompare(b)),
+    }))
+    .sort((a, b) => a.fromSection.localeCompare(b.fromSection) || a.toSection.localeCompare(b.toSection));
+
+  const response: Record<string, unknown> = {
+    query: {
+      type: "procedure_flow",
+      path: query.path,
+      procedure: query.procedure ?? null,
+      procedure_kind: query.procedureKind ?? null,
+      maxDepth: query.maxDepth,
+    },
+    unit: model.units[0] ?? null,
+    summary: {
+      sections: procedures.filter((procedure) => procedure.kind === "section").length,
+      paragraphs: procedures.filter((procedure) => procedure.kind === "paragraph").length,
+      performRelations: performs.length,
+      sectionCalls: sectionCalls.length,
+    },
+    procedures: {
+      sections: procedures
+        .filter((procedure) => procedure.kind === "section")
+        .map((procedure) => procedureSummary(procedure)),
+      paragraphs: procedures
+        .filter((procedure) => procedure.kind === "paragraph")
+        .map((procedure) => procedureSummary(procedure)),
+    },
+    performs,
+    sectionCalls,
+  };
+
+  if (!query.procedure) return response;
+
+  const focus = resolveProcedure(procedures, query.procedure, query.procedureKind);
+  const adjacency = new Map<string, Array<CodeRelation & { metadata?: Record<string, unknown> }>>();
+  for (const relation of performRelations) {
+    const fromKey = relation.from.toLowerCase();
+    const fromList = adjacency.get(fromKey) ?? [];
+    fromList.push(relation);
+    adjacency.set(fromKey, fromList);
+
+    const fromProcedure = procedureByName.get(fromKey);
+    const fromSection = procedureSectionName(fromProcedure);
+    if (fromSection) {
+      const sectionKey = fromSection.toLowerCase();
+      const sectionList = adjacency.get(sectionKey) ?? [];
+      sectionList.push({
+        ...relation,
+        from: fromSection,
+        metadata: {
+          ...(relation.metadata ?? {}),
+          viaParagraph: relation.from,
+        },
+      });
+      adjacency.set(sectionKey, sectionList);
+    }
+  }
+
+  const flowByDepth: Array<Record<string, unknown>> = [];
+  const visited = new Set<string>([focus.name.toLowerCase()]);
+  let frontier = new Set<string>([focus.name.toLowerCase()]);
+
+  for (let depth = 1; depth <= query.maxDepth; depth++) {
+    const edges = [...frontier].flatMap((name) => adjacency.get(name) ?? []);
+    const currentLevelTargets = new Set<string>();
+    for (const edge of edges) {
+      const targetKey = edge.to.toLowerCase();
+      if (visited.has(targetKey)) continue;
+      currentLevelTargets.add(targetKey);
+    }
+    if (currentLevelTargets.size === 0) break;
+
+    const nodes = [...currentLevelTargets]
+      .sort((a, b) => a.localeCompare(b))
+      .map((targetKey) => {
+        visited.add(targetKey);
+        const targetProcedure = procedureByName.get(targetKey);
+        const via = edges
+          .filter((edge) => edge.to.toLowerCase() === targetKey)
+          .map((edge) => {
+            const fromProcedure = procedureByName.get(edge.from.toLowerCase());
+            return {
+              from: edge.from,
+              fromKind: fromProcedure?.kind ?? null,
+              fromSection: procedureSectionName(fromProcedure),
+              viaParagraph: typeof edge.metadata?.viaParagraph === "string" ? edge.metadata.viaParagraph : null,
+              line: edge.loc.line,
+              thru: typeof edge.metadata?.thru === "string" ? edge.metadata.thru : null,
+            };
+          });
+        return {
+          name: targetProcedure?.name ?? targetKey,
+          kind: targetProcedure?.kind ?? null,
+          parentUnit: targetProcedure?.parentUnit ?? null,
+          parentProcedure: targetProcedure?.parentProcedure ?? null,
+          section: procedureSectionName(targetProcedure),
+          resolved: Boolean(targetProcedure),
+          loc: targetProcedure?.loc ?? null,
+          via,
+        };
+      });
+
+    flowByDepth.push({ depth, nodes });
+    frontier = currentLevelTargets;
+  }
+
+  response.focus = procedureSummary(focus);
+  response.flowByDepth = flowByDepth;
+  response.summary = {
+    ...(response.summary as Record<string, unknown>),
+    reachableProcedures: flowByDepth.reduce((count, level) => count + (((level.nodes as unknown[])?.length) ?? 0), 0),
+    focusDepths: flowByDepth.length,
+  };
+  return response;
+}
+
+function normalizeLineageCopybookQuery(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) throw new Error("copybook must not be empty");
+  return (trimmed.includes(":") ? trimmed : canonicalNodeId("Copybook", trimmed)).toUpperCase();
+}
+
+function copybookMatches(copybook: { id: string }, requestedCopybook?: string): boolean {
+  if (!requestedCopybook) return true;
+  const canonical = copybook.id.toUpperCase();
+  if (canonical === requestedCopybook) return true;
+  return displayLabel(copybook.id).toUpperCase() === displayLabel(requestedCopybook).toUpperCase();
+}
+
+function qualifiedNameMatches(candidate: string | undefined, requested?: string): boolean {
+  if (!requested) return true;
+  if (!candidate) return false;
+  return candidate.trim().toUpperCase() === requested.trim().toUpperCase();
+}
+
+function inferredEntryMatches(
+  entry: SerializedInferredFieldLineageEntry,
+  requestedFieldName?: string,
+  requestedQualifiedName?: string,
+  requestedCopybook?: string,
+): boolean {
+  if (requestedFieldName && entry.fieldName.toUpperCase() !== requestedFieldName.toUpperCase()) return false;
+  if (!requestedQualifiedName && !requestedCopybook) return true;
+  const leftMatches = copybookMatches(entry.left.copybook, requestedCopybook)
+    && qualifiedNameMatches(entry.left.qualifiedName, requestedQualifiedName);
+  const rightMatches = copybookMatches(entry.right.copybook, requestedCopybook)
+    && qualifiedNameMatches(entry.right.qualifiedName, requestedQualifiedName);
+  return leftMatches || rightMatches;
+}
+
+function buildFieldLineageResponse(
+  lineage: SerializedFieldLineage,
+  query: {
+    language: string;
+    fieldName?: string;
+    qualifiedName?: string;
+    copybook?: string;
+  },
+): Record<string, unknown> {
+  const fieldName = query.fieldName?.trim();
+  const qualifiedName = query.qualifiedName?.trim();
+  const copybook = normalizeLineageCopybookQuery(query.copybook);
+  if (!fieldName && !qualifiedName) {
+    throw new Error("field_lineage requires field_name or qualified_name");
+  }
+
+  const deterministic = lineage.deterministic.filter((entry) => {
+    if (fieldName && entry.fieldName.toUpperCase() !== fieldName.toUpperCase()) return false;
+    if (qualifiedName && !entry.qualifiedNames.some((name) => qualifiedNameMatches(name, qualifiedName))) return false;
+    if (copybook && !entry.copybooks.some((item) => copybookMatches(item, copybook))) return false;
+    return true;
+  });
+  const inferredHighConfidence = lineage.inferredHighConfidence.filter((entry) =>
+    inferredEntryMatches(entry, fieldName, qualifiedName, copybook)
+  );
+  const inferredAmbiguous = lineage.inferredAmbiguous.filter((entry) =>
+    inferredEntryMatches(entry, fieldName, qualifiedName, copybook)
+  );
+
+  return {
+    query: {
+      type: "field_lineage",
+      language: query.language,
+      field_name: fieldName ?? null,
+      qualified_name: qualifiedName ?? null,
+      copybook: copybook ?? null,
+    },
+    summary: {
+      deterministicMatches: deterministic.length,
+      inferredHighConfidenceMatches: inferredHighConfidence.length,
+      inferredAmbiguousMatches: inferredAmbiguous.length,
+    },
+    deterministic,
+    inferredHighConfidence,
+    inferredAmbiguous,
+  };
+}
+
+function codeQueryConsumesCompiledArtifacts(args: Record<string, unknown>): boolean {
+  const queryType = args.query_type as string | undefined;
+  return queryType === "impact" || queryType === "field_lineage";
 }
 
 async function loadCompiledGraph(wiki: Wiki, language: string): Promise<KnowledgeGraph> {
@@ -1783,6 +2163,31 @@ export async function handleTool(
       return JSON.stringify(response, null, 2);
     }
 
+    case "code_procedure_flow": {
+      const filePath = args.path as string;
+      const procedure = args.procedure as string | undefined;
+      const procedureKind = normalizeProcedureKind(args.procedure_kind as string | undefined);
+      const maxDepth = Math.min(50, Math.max(1, Math.floor((args.max_depth as number | undefined) ?? 10)));
+      const model = await loadParsedNormalizedModel(wiki, filePath);
+      const response = buildProcedureFlowResponse(model, { path: filePath, procedure, procedureKind, maxDepth });
+      return JSON.stringify(response, null, 2);
+    }
+
+    case "code_field_lineage": {
+      const language = ((args.language as string | undefined) ?? "cobol").trim().toLowerCase();
+      const fieldName = args.field_name as string | undefined;
+      const qualifiedName = args.qualified_name as string | undefined;
+      const copybook = args.copybook as string | undefined;
+      const lineage = await loadFieldLineageArtifact(wiki, language);
+      const response = buildFieldLineageResponse(lineage, {
+        language,
+        fieldName,
+        qualifiedName,
+        copybook,
+      });
+      return JSON.stringify(response, null, 2);
+    }
+
     // ═══ KNOWLEDGE INGESTION ═══
 
     case "knowledge_ingest_batch": {
@@ -2056,8 +2461,6 @@ export async function handleTool(
       const REBUILD_TOOLS = new Set(["wiki_write", "wiki_delete"]);
       // Tools whose per-call graph/aggregate rebuild should be deferred
       const GRAPH_REBUILD_TOOLS = new Set(["code_parse"]);
-      // Tools that must observe the current compiled graph inside the same batch
-      const GRAPH_CONSUMER_TOOLS = new Set(["code_impact"]);
       let needsRebuild = false;
       let needsTimeline = false;
       let needsGraphRebuild = false;
@@ -2078,7 +2481,10 @@ export async function handleTool(
           continue;
         }
         try {
-          if (needsGraphRebuild && GRAPH_CONSUMER_TOOLS.has(op.tool)) {
+          if (needsGraphRebuild && (
+            op.tool === "code_impact" ||
+            (op.tool === "code_query" && codeQueryConsumesCompiledArtifacts(op.args ?? {}))
+          )) {
             rebuildDeferredGraphs(wiki);
             needsGraphRebuild = false;
           }
@@ -2161,7 +2567,9 @@ export async function handleTool(
       switch (queryType) {
         case "trace_variable": return handleTool(wiki, "code_trace_variable", args, opts);
         case "impact": return handleTool(wiki, "code_impact", args, opts);
-        default: throw new Error(`Unknown code_query query_type: "${queryType}". Expected: trace_variable | impact`);
+        case "procedure_flow": return handleTool(wiki, "code_procedure_flow", args, opts);
+        case "field_lineage": return handleTool(wiki, "code_field_lineage", args, opts);
+        default: throw new Error(`Unknown code_query query_type: "${queryType}". Expected: trace_variable | impact | procedure_flow | field_lineage`);
       }
     }
 

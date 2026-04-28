@@ -2283,6 +2283,67 @@ describe("consolidated tool: code_query", () => {
     expect(Array.isArray(parsed.references)).toBe(true);
   });
 
+  it("query_type:procedure_flow returns PERFORM flow for parsed COBOL", async () => {
+    const wiki = freshWiki();
+    const cobol = `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. SAMPLE.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           PERFORM B000-WORK.
+           STOP RUN.
+       B000-WORK SECTION.
+       B100-STEP.
+           EXIT.`;
+    wiki.rawAdd("SAMPLE.cbl", { content: cobol });
+    await handleTool(wiki, "code_parse", { path: "SAMPLE.cbl" });
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "procedure_flow",
+      path: "SAMPLE.cbl",
+      procedure: "A100-START",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.query.type).toBe("procedure_flow");
+    expect(parsed.sectionCalls).toHaveLength(1);
+    expect(parsed.sectionCalls[0].fromSection).toBe("A000-MAIN");
+    expect(parsed.sectionCalls[0].toSection).toBe("B000-WORK");
+  });
+
+  it("query_type:field_lineage returns deterministic lineage matches", async () => {
+    const wiki = freshWiki();
+    const copybook = `       01  CUSTOMER-REC.
+           05  CUSTOMER-ID       PIC X(10).`;
+    const orderA = `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERA.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+           STOP RUN.`;
+    const orderB = `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERB.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+           STOP RUN.`;
+    wiki.rawAdd("CUSTOMER-REC.cpy", { content: copybook });
+    wiki.rawAdd("ORDERA.cbl", { content: orderA });
+    wiki.rawAdd("ORDERB.cbl", { content: orderB });
+    await handleTool(wiki, "code_parse", { path: "ORDERA.cbl" });
+    await handleTool(wiki, "code_parse", { path: "ORDERB.cbl" });
+    await handleTool(wiki, "code_parse", { path: "CUSTOMER-REC.cpy" });
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      field_name: "CUSTOMER-ID",
+      copybook: "CUSTOMER-REC",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.query.type).toBe("field_lineage");
+    expect(parsed.summary.deterministicMatches).toBe(1);
+    expect(parsed.deterministic[0].fieldName).toBe("CUSTOMER-ID");
+  });
+
   it("query_type:impact throws when no compiled graph exists", async () => {
     const wiki = freshWiki();
     await expect(

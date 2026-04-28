@@ -36,7 +36,7 @@ atlassian:
 
 # Security (optional)
 security:
-  allowed_source_dirs:            # restrict raw_add source_path
+  allowed_source_dirs:            # restrict raw_ingest mode:add source_path
     - /home/user/documents        # absolute path
     - ../shared-data              # relative to config root
 ```
@@ -78,7 +78,7 @@ This creates:
 ## Security
 
 - **Directory traversal protection** — all user-supplied page/filename paths go through `safePath()`, which rejects `../`, absolute paths, and null bytes
-- **Source path restriction** — `raw_add` with `source_path` is restricted to workspace directory by default; configurable via `security.allowed_source_dirs`
+- **Source path restriction** — `raw_ingest` with `mode: "add"` and `source_path` is restricted to workspace directory by default; configurable via `security.allowed_source_dirs`
 - **Atlassian host allowlist** — `atlassian.allowed_hosts` prevents SSRF; requests to non-listed hosts are rejected
 - **No secrets in code** — auth tokens are read from environment variables only
 
@@ -98,9 +98,9 @@ agent-wiki raw-list                           # list raw sources
 agent-wiki raw-verify                         # verify raw file integrity
 agent-wiki lint                               # run health checks
 
-# Direct tool call (all 19 tools)
+# Direct tool call (15 public tools)
 agent-wiki call wiki_search '{"query":"yolo"}'
-agent-wiki call raw_add '{"filename":"doc.pdf","source_path":"/path/to/file"}'
+agent-wiki call raw_ingest '{"mode":"add","filename":"doc.pdf","source_path":"/path/to/file"}'
 agent-wiki call code_parse '{"path":"PAYROLL.cbl"}'
 agent-wiki call wiki_list                     # no args needed
 
@@ -117,7 +117,7 @@ agent-wiki lint --json
 
 ### `call` command
 
-The `call` command provides direct access to all 18 MCP tools without running the server. Arguments are passed as a JSON string:
+The `call` command provides direct access to all public MCP tools without running the server. Arguments are passed as a JSON string:
 
 ```bash
 agent-wiki call <tool_name> '<json_args>' [-w <wiki-path>] [--workspace <path>]

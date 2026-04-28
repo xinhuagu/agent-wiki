@@ -134,7 +134,7 @@ Instead of `raw_list` + `wiki_list`/`wiki_search` + client-side diff to figure o
 
 Returns `{ totalRaw, coveredRaw, uncoveredRaw, coverageRatio, uncovered[], truncated }` — everything the agent needs to pick what to compile next.
 
-**Usage pattern — session-scoped, not per-turn.** Call `raw_coverage` at the **start** of a compilation session to plan, or at the **end** to confirm progress. Do **not** call it every turn as a "live dashboard" — the coverage set changes only when `raw_add` or `wiki_write` runs, so re-polling without those events just burns requests. Cache the result in the agent's working memory until you actually add or digest something.
+**Usage pattern — session-scoped, not per-turn.** Call `raw_coverage` at the **start** of a compilation session to plan, or at the **end** to confirm progress. Do **not** call it every turn as a "live dashboard" — the coverage set changes only when `raw_ingest` or `wiki_write` runs, so re-polling without those events just burns requests. Cache the result in the agent's working memory until you actually add or digest something.
 
 ### `wiki_search` — `knowledge_gap` on miss → skip retry loop
 
@@ -194,8 +194,8 @@ The `batch` tool collapses multiple operations into a single MCP request:
 | Search + read top results | 6 | **1** | 83% |
 | Ingest 50-file directory | 50+ | **1** | 98% |
 
-**`wiki_search_read`** — Search + read top-N results in one call. Returns content inline with `nextReads` for follow-up.
+**`wiki_search` + `wiki_read pages:[...]`** — Search first, then read the top pages in one follow-up call. This replaces the old dedicated `wiki_search_read` surface without losing batching efficiency.
 
-**`knowledge_ingest_batch`** — Scan a directory, import files, extract text with provenance (per-page PDF, per-sheet XLSX, per-slide PPTX), chunk, and pack into digest packs — all in one request.
+**`knowledge_ingest` with `mode: "batch"`** — Scan a directory, import files, extract text with provenance (per-page PDF, per-sheet XLSX, per-slide PPTX), chunk, and pack into digest packs — all in one request.
 
-**`knowledge_digest_write`** — Write LLM-generated summaries back to wiki with structured provenance (`sources`, `sourcePacks`). Batch writes with one index rebuild at the end.
+**`knowledge_ingest` with `mode: "digest_write"`** — Write LLM-generated summaries back to wiki with structured provenance (`sources`, `sourcePacks`). Batch writes with one index rebuild at the end.

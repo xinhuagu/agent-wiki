@@ -74,6 +74,50 @@ describe("COBOL MCP tools integration", () => {
     expect(parsed.references.length).toBeGreaterThan(0);
   });
 
+  it("code_query procedure_flow returns section and paragraph PERFORM flow", async () => {
+    const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+    wiki.rawAdd("PAYROLL.cbl", { content: source });
+
+    await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" });
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "procedure_flow",
+      path: "PAYROLL.cbl",
+      procedure: "A100-INIT",
+    });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.query.type).toBe("procedure_flow");
+    expect(parsed.summary.performRelations).toBeGreaterThanOrEqual(3);
+    expect(parsed.sectionCalls.some((entry: { fromSection: string; toSection: string }) =>
+      entry.fromSection === "A000-MAIN" && entry.toSection === "B000-PROCESS"
+    )).toBe(true);
+    expect(parsed.flowByDepth.length).toBeGreaterThanOrEqual(1);
+    expect(parsed.flowByDepth[0].nodes.some((node: { name: string }) => node.name === "B000-PROCESS")).toBe(true);
+    expect(parsed.flowByDepth[0].nodes.some((node: { name: string }) => node.name === "C000-FINALIZE")).toBe(true);
+  });
+
+  it("code_query procedure_flow supports section-focused traversal", async () => {
+    const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+    wiki.rawAdd("PAYROLL.cbl", { content: source });
+
+    await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" });
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "procedure_flow",
+      path: "PAYROLL.cbl",
+      procedure: "A000-MAIN",
+      procedure_kind: "section",
+    });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.focus.name).toBe("A000-MAIN");
+    expect(parsed.focus.kind).toBe("section");
+    expect(parsed.flowByDepth.length).toBeGreaterThanOrEqual(1);
+    expect(parsed.flowByDepth[0].nodes.some((node: { name: string }) => node.name === "B000-PROCESS")).toBe(true);
+    expect(parsed.flowByDepth[0].nodes.some((node: { name: string }) => node.name === "C000-FINALIZE")).toBe(true);
+    const processNode = parsed.flowByDepth[0].nodes.find((node: { name: string }) => node.name === "B000-PROCESS");
+    expect(processNode.via.some((edge: { viaParagraph: string | null }) => edge.viaParagraph === "A100-INIT")).toBe(true);
+  });
+
   it("code_impact reports affected programs for a resolved copybook", async () => {
     const invoiceSrc = readFileSync(join(FIXTURES, "INVOICE.cbl"), "utf-8");
     const dateUtilsSrc = readFileSync(join(FIXTURES, "DATE-UTILS.cpy"), "utf-8");
@@ -172,6 +216,59 @@ describe("COBOL MCP tools integration", () => {
     expect(lineage.summary.deterministic.fields).toBeGreaterThan(0);
     expect(lineage.deterministic.some((entry: { fieldName: string }) => entry.fieldName === "ZIP-CODE")).toBe(true);
     expect(readFileSync(pagePath, "utf-8")).toContain("CUSTOMER-REC");
+  });
+
+  it("code_query field_lineage returns deterministic matches for a shared copybook field", async () => {
+    const copybook = `
+       01  CUSTOMER-REC.
+           05  CUSTOMER-ID       PIC X(10).
+`;
+    const orderA = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERA.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+    const orderB = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERB.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+
+    wiki.rawAdd("ORDERA.cbl", { content: orderA });
+    wiki.rawAdd("ORDERB.cbl", { content: orderB });
+    wiki.rawAdd("CUSTOMER-REC.cpy", { content: copybook });
+
+    await handleTool(wiki, "code_parse", { path: "ORDERA.cbl" });
+    await handleTool(wiki, "code_parse", { path: "ORDERB.cbl" });
+    await handleTool(wiki, "code_parse", { path: "CUSTOMER-REC.cpy" });
+
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      field_name: "CUSTOMER-ID",
+      copybook: "CUSTOMER-REC",
+    });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.query.type).toBe("field_lineage");
+    expect(parsed.summary.deterministicMatches).toBeGreaterThan(0);
+    expect(parsed.deterministic).toHaveLength(1);
+    expect(parsed.deterministic[0].fieldName).toBe("CUSTOMER-ID");
+    expect(parsed.deterministic[0].programs.map((program: { id: string }) => program.id)).toEqual([
+      "program:ORDERA",
+      "program:ORDERB",
+    ]);
   });
 
   it("code_parse persists inferred field-lineage artifacts for cross-copybook matches", async () => {
@@ -417,6 +514,23 @@ describe("COBOL MCP tools integration", () => {
     expect(impactParsed.impactedByDepth[0].nodes.some((n: { node_id: string }) => n.node_id === "program:PAYROLL")).toBe(true);
   });
 
+  it("code_parse and code_query procedure_flow work for nested source paths", async () => {
+    const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+    wiki.rawAdd("nested/PAYROLL.cbl", { content: source });
+
+    await handleTool(wiki, "code_parse", { path: "nested/PAYROLL.cbl" });
+
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "procedure_flow",
+      path: "nested/PAYROLL.cbl",
+      procedure: "A100-INIT",
+    });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.query.path).toBe("nested/PAYROLL.cbl");
+    expect(parsed.flowByDepth[0].nodes.some((node: { name: string }) => node.name === "B000-PROCESS")).toBe(true);
+  });
+
   it("wiki_rebuild emits deterministic call-graph source order for nested models", async () => {
     const payrollSrc = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
     const invoiceSrc = readFileSync(join(FIXTURES, "INVOICE.cbl"), "utf-8");
@@ -532,6 +646,54 @@ describe("COBOL MCP tools integration", () => {
 
       const graphPath = join(tmp, "raw", "parsed", "cobol", "knowledge-graph.json");
       expect(existsSync(graphPath)).toBe(true);
+    });
+
+    it("batch code_parse followed by code_query field_lineage sees freshly rebuilt derived artifacts", async () => {
+      const copybook = `
+       01  CUSTOMER-REC.
+           05  CUSTOMER-ID       PIC X(10).
+`;
+      const orderA = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERA.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+       MAIN.
+           STOP RUN.
+`;
+      const orderB = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ORDERB.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+       MAIN.
+           STOP RUN.
+`;
+
+      wiki.rawAdd("ORDERA.cbl", { content: orderA });
+      wiki.rawAdd("ORDERB.cbl", { content: orderB });
+      wiki.rawAdd("CUSTOMER-REC.cpy", { content: copybook });
+
+      const result = await handleTool(wiki, "batch", {
+        operations: [
+          { tool: "code_parse", args: { path: "ORDERA.cbl" } },
+          { tool: "code_parse", args: { path: "ORDERB.cbl" } },
+          { tool: "code_parse", args: { path: "CUSTOMER-REC.cpy" } },
+          { tool: "code_query", args: { query_type: "field_lineage", field_name: "CUSTOMER-ID" } },
+        ],
+      });
+      const batch = JSON.parse(result as string);
+
+      expect(batch.results[3].error).toBeUndefined();
+      expect(batch.results[3].result.summary.deterministicMatches).toBeGreaterThan(0);
+      expect(batch.results[3].result.deterministic[0].fieldName).toBe("CUSTOMER-ID");
+
+      const lineagePath = join(tmp, "raw", "parsed", "cobol", "field-lineage.json");
+      expect(existsSync(lineagePath)).toBe(true);
     });
 
     it("wiki_rebuild regenerates knowledge graph from existing parsed artifacts", async () => {

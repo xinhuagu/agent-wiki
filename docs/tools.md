@@ -1,24 +1,16 @@
 # MCP Tools Reference
 
-agent-wiki exposes 19 tools through the Model Context Protocol.
+agent-wiki exposes 15 public tools through the Model Context Protocol.
 
 ## Raw Layer — Immutable Sources
 
 | Tool | Description |
 |------|-------------|
-| `raw_add` | Add a source document (content string, local file, or entire directory). SHA-256 hashed with `.meta.yaml` sidecar. Supports `auto_version` for same-name files and `pattern` filtering for directories. |
-| `raw_fetch` | Download from URL to raw/ (smart arXiv handling — `arxiv.org/abs/XXXX` auto-converts to PDF) |
+| `raw_ingest` | Unified raw ingestion tool. Select `mode`: `add` (content/local file/directory), `fetch` (download from URL), `import_confluence`, or `import_jira`. Preserves immutable raw semantics with `.meta.yaml` sidecars. |
 | `raw_list` | List all raw documents with metadata (path, source URL, hash, size) |
 | `raw_coverage` | Report which raw files have not yet been referenced by any wiki page. Answers "what should I compile next?" Returns coverage ratio + an uncovered list (sortable by `newest`/`oldest`/`largest`, filterable by tag). Matches frontmatter `sources` and inline `raw/...` body references; excludes `raw/parsed/` artifacts. |
 | `raw_read` | Read a raw document — text/SVG return content; PDF/DOCX/XLSX/PPTX extracted automatically; images returned inline (<10MB); other binary return metadata only. Supports pagination to bypass the 10K char default truncation: `pages` for PDF/PPTX ranges, `sheet` for a specific XLSX sheet, `offset`+`limit` for line-based reading of DOCX and text files. Paginated responses include metadata (`total_pages`, `sheet_names`, `total_lines`, etc.) for follow-up reads. |
 | `raw_versions` | List all versions of a file with metadata, returns latest version |
-
-## Atlassian — Confluence & Jira
-
-| Tool | Description |
-|------|-------------|
-| `raw_import_confluence` | Import a Confluence page (+ child pages recursively) into raw/. Preserves hierarchy in `_tree.yaml`. Requires `CONFLUENCE_API_TOKEN` env var. |
-| `raw_import_jira` | Import a Jira issue with fields, description, comments, attachments, and linked issues. Saves JSON + Markdown. Requires `JIRA_API_TOKEN` env var. |
 
 ## Wiki Layer — Compiled Knowledge
 
@@ -28,19 +20,31 @@ agent-wiki exposes 19 tools through the Model Context Protocol.
 | `wiki_write` | Create or update a page (auto-timestamps, auto-classify, auto-route to nested dirs, auto-link). Triggers index rebuild. Pass `return_content: true` to get the final page content back — eliminates a follow-up `wiki_read`. Response includes `autoLinked` count. |
 | `wiki_delete` | Delete a page (guards system pages). Triggers index rebuild — stale indexes and empty dirs are cleaned up. |
 | `wiki_list` | List pages, filter by entity type or tag |
-| `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support. Use `type` or `tags` to filter without a separate `wiki_list` call. Optional hybrid BM25+vector mode: enable `search.hybrid: true` in `.agent-wiki.yaml`, then run `wiki_rebuild` to embed all pages. Returns `knowledge_gap` when no results found — includes suggested page slug, title, type, and tags for `wiki_write`. |
-| `wiki_lint` | Health checks: contradictions (numeric/date, topic-isolated, unit-normalized), orphans, broken links (with "did you mean?" suggestions), SHA-256 integrity. Pass `apply_fixes: true` to auto-repair missing frontmatter. |
-| `wiki_init` | Initialize a new knowledge base (creates wiki/, raw/, schemas/) |
-| `wiki_config` | Show current workspace configuration, paths, and available entity templates |
-| `wiki_rebuild` | Rebuild all `index.md` files (multi-level directory indexes) and `timeline.md` (chronological view). When `search.hybrid: true`, also embeds all pages to build the vector index (downloads ~90 MB model on first run). |
+| `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support. Use `type` or `tags` to filter without a separate `wiki_list` call. Optional hybrid BM25+vector mode: enable `search.hybrid: true` in `.agent-wiki.yaml`, then run `wiki_admin` with `action: "rebuild"` to embed all pages. Returns `knowledge_gap` when no results found — includes suggested page slug, title, type, and tags for `wiki_write`. |
+| `wiki_admin` | Unified wiki maintenance tool. Select `action`: `init`, `config`, `rebuild`, or `lint`. `rebuild` regenerates indexes/timeline and search vectors; `lint` runs health checks and optional auto-fixes. |
 
 ## Code Analysis — Language Plugins
 
 | Tool | Description |
 |------|-------------|
 | `code_parse` | Parse a source file from raw/ into structured code knowledge (AST, normalized model, summary). Generates wiki pages automatically. Currently supports COBOL (.cbl, .cob, .cpy). Optionally traces a variable. |
-| `code_trace_variable` | Trace all references to a variable across a parsed source file. Shows where it is read, written, or passed, grouped by section/paragraph. |
-| `code_impact` | Query the compiled COBOL knowledge graph for downstream impact. Returns affected nodes grouped by dependency depth, with evidence and unresolved/lower-confidence markers. |
+| `code_query` | Unified code query tool. Select `query_type`: `trace_variable`, `impact`, `procedure_flow`, or `field_lineage`. This is the main query surface over parsed and compiled code artifacts. |
+
+### `code_query` query types
+
+| Query Type | Description |
+|------------|-------------|
+| `trace_variable` | Trace all references to a variable across one parsed source file, grouped by section/paragraph. |
+| `impact` | Query the compiled COBOL knowledge graph for downstream impact. Returns affected nodes grouped by dependency depth, with evidence and unresolved/lower-confidence markers. |
+| `procedure_flow` | Query PERFORM flow inside one parsed source file. Returns section-level and paragraph-level flow, plus optional focused traversal from one procedure. |
+| `field_lineage` | Query compiled field-lineage artifacts. Returns deterministic shared-copybook matches plus inferred cross-copybook candidates when present. |
+
+## Orchestration
+
+| Tool | Description |
+|------|-------------|
+| `knowledge_ingest` | Unified knowledge ingestion tool. Select `mode`: `batch` (scan/chunk/source-pack ingest) or `digest_write` (materialize digest items into wiki pages). |
+| `batch` | Execute multiple tool calls in one round trip. Supports deferred rebuild semantics so write-heavy flows only rebuild indexes/graphs once at the end. |
 
 The code analysis system is plugin-based with a language-agnostic `NormalizedCodeModel`:
 
@@ -69,20 +73,24 @@ All language plugins emit a common `NormalizedCodeModel`:
 
 ### Removed Tools
 
-These tools were consolidated into other tools in v0.6.0:
+These tools were consolidated into other tools and are no longer part of the default public MCP surface:
 
 | Former Tool | Replacement |
 |-------------|-------------|
-| `raw_verify` | `wiki_lint` — includes SHA-256 integrity checks |
+| `raw_verify` | `wiki_admin` with `action: "lint"` — includes SHA-256 integrity checks |
 | `wiki_log` | `wiki_read("log.md")` — read the log page directly |
 | `wiki_classify` | `wiki_write` — auto-classifies internally when no type is specified |
 | `wiki_synthesize` | Agent calls `wiki_read` on multiple pages directly |
-| `wiki_schemas` | `wiki_config` — returns entity templates alongside configuration |
-| `wiki_rebuild_index` / `wiki_rebuild_timeline` | `wiki_rebuild` — single tool rebuilds both |
+| `wiki_schemas` | `wiki_admin` with `action: "config"` — returns entity templates alongside configuration |
+| `wiki_rebuild_index` / `wiki_rebuild_timeline` | `wiki_admin` with `action: "rebuild"` — single tool rebuilds both |
+| `raw_add` / `raw_fetch` / `raw_import_confluence` / `raw_import_jira` | `raw_ingest` with `mode` |
+| `wiki_init` / `wiki_config` / `wiki_rebuild` / `wiki_lint` | `wiki_admin` with `action` |
+| `code_trace_variable` / `code_impact` | `code_query` with `query_type` |
+| `knowledge_ingest_batch` / `knowledge_digest_write` | `knowledge_ingest` with `mode` |
 
 ## Directory Structure & Auto-Generated Indexes
 
-Pages can be organized into nested directories. `wiki_rebuild` (and every `wiki_write`/`wiki_delete`) automatically generates `index.md` at each directory level.
+Pages can be organized into nested directories. `wiki_admin` with `action: "rebuild"` (and every `wiki_write`/`wiki_delete`) automatically generates `index.md` at each directory level.
 
 ```
 wiki/
@@ -115,7 +123,7 @@ All `*/index.md` paths are **system-reserved** for auto-generated directory inde
 
 ### Stale cleanup
 
-When the last page in a subtree is deleted, `wiki_rebuild` removes the stale `index.md` and cleans up empty parent directories automatically.
+When the last page in a subtree is deleted, `wiki_admin` with `action: "rebuild"` removes the stale `index.md` and cleans up empty parent directories automatically.
 
 ## Entity Types
 
@@ -189,7 +197,7 @@ search:
   hybrid: true
 ```
 
-2. Run `wiki_rebuild` once to embed all existing pages. The sentence-transformer model (`Xenova/all-MiniLM-L6-v2`) is downloaded from HuggingFace Hub and cached locally.
+2. Run `wiki_admin` with `action: "rebuild"` once to embed all existing pages. The sentence-transformer model (`Xenova/all-MiniLM-L6-v2`) is downloaded from HuggingFace Hub and cached locally.
 
 After setup, every `wiki_write` automatically embeds the new page — no manual steps needed.
 

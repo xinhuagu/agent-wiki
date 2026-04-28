@@ -622,9 +622,11 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
     "raw_ingest",    // add/fetch/import_confluence/import_jira all mutate raw/
     "wiki_admin",    // init/rebuild/lint all mutate state (config is read-only but routed through write queue for safety)
     "knowledge_ingest", // batch/digest_write both mutate state
-    // Legacy aliases (kept for backward compatibility — not listed in public tool surface)
+    // Public tools retained from the original surface (write classification unchanged)
+    "wiki_write", "wiki_delete",
+    // Legacy aliases (not in public surface but remain functional for backward compatibility)
     "raw_add", "raw_fetch", "raw_import_confluence", "raw_import_jira",
-    "wiki_write", "wiki_delete", "wiki_init", "wiki_rebuild",
+    "wiki_init", "wiki_rebuild",
     "wiki_lint", // writes .lint-cache.json + log.md
     "code_parse", // writes parsed artifacts under raw/parsed/
     "knowledge_ingest_batch", // writes to raw/ and raw/digest-packs/
@@ -995,6 +997,76 @@ function buildKnowledgeGap(query: string, wiki: Wiki, forceType?: string): Recor
   };
 }
 
+/** Shared page-content reader used by wiki_search (read_top_n mode) and wiki_search_read. */
+function readPagesContent(
+  wiki: Wiki,
+  paths: string[],
+  sectionFilter: string | undefined,
+  perPageLimit: number,
+  includeToc: boolean,
+): Array<Record<string, unknown>> {
+  const pages: Array<Record<string, unknown>> = [];
+  for (const pagePath of paths) {
+    try {
+      const page = wiki.read(pagePath);
+      if (!page) throw new Error(`Page not found: ${pagePath}`);
+      const fullPath = join(wiki.config.wikiDir, page.path);
+      const raw = readFileSync(fullPath, "utf-8");
+
+      if (sectionFilter) {
+        const sections = splitSections(raw);
+        const target = findSectionByHeading(sections, sectionFilter);
+        if (!target) {
+          pages.push({
+            path: pagePath,
+            content: null,
+            error: `Section "${sectionFilter}" not found`,
+            toc: buildToc(sections) || null,
+          });
+          continue;
+        }
+        const targetIdx = sections.indexOf(target);
+        let hasSubsections = false;
+        const parts = [target.content];
+        for (let i = targetIdx + 1; i < sections.length; i++) {
+          const s = sections[i]!;
+          if (s.level <= target.level && s.heading !== "") break;
+          if (s.heading !== "") hasSubsections = true;
+          parts.push(s.content);
+        }
+        const sectionText = parts.join("\n");
+        const sectionLines = sectionText.split("\n");
+        const truncated = sectionLines.length > perPageLimit;
+        pages.push({
+          path: pagePath,
+          content: truncated ? sectionLines.slice(0, perPageLimit).join("\n") : sectionText,
+          truncated,
+          ...(truncated ? { total_lines: sectionLines.length } : {}),
+          ...(truncated && hasSubsections ? { has_subsections: true } : {}),
+          ...(truncated && includeToc ? { toc: buildToc(sections) } : {}),
+        });
+      } else {
+        const lines = raw.split("\n");
+        const truncated = lines.length > perPageLimit;
+        pages.push({
+          path: pagePath,
+          content: truncated ? lines.slice(0, perPageLimit).join("\n") : raw,
+          truncated,
+          ...(truncated ? { total_lines: lines.length } : {}),
+          ...(truncated && includeToc ? { toc: buildToc(splitSections(raw)) } : {}),
+        });
+      }
+    } catch (err) {
+      pages.push({
+        path: pagePath,
+        content: null,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return pages;
+}
+
 export async function handleTool(
   wiki: Wiki,
   name: string,
@@ -1308,7 +1380,7 @@ export async function handleTool(
       }
       // Combined search+read mode (read_top_n) — supersedes include_content when both are set
       if (args.read_top_n != null) {
-        const readTopN = Math.min(Math.max(1, Math.floor((args.read_top_n as number) ?? 3)), 10);
+        const readTopN = Math.min(Math.max(1, Math.floor(args.read_top_n as number)), 10);
         const sectionFilter = args.section as string | undefined;
         const perPageLimit = Math.min(500, Math.max(1, Math.floor((args.per_page_limit as number) ?? 200)));
         const includeToc = (args.include_toc as boolean) ?? false;
@@ -1325,66 +1397,7 @@ export async function handleTool(
 
         const toRead = uniquePaths.slice(0, readTopN);
         const nextReads = uniquePaths.slice(readTopN);
-
-        const pages: Array<Record<string, unknown>> = [];
-        for (const pagePath of toRead) {
-          try {
-            const page = wiki.read(pagePath);
-            if (!page) throw new Error(`Page not found: ${pagePath}`);
-            const fullPath = join(wiki.config.wikiDir, page.path);
-            const raw = readFileSync(fullPath, "utf-8");
-
-            if (sectionFilter) {
-              const sections = splitSections(raw);
-              const target = findSectionByHeading(sections, sectionFilter);
-              if (!target) {
-                pages.push({
-                  path: pagePath,
-                  content: null,
-                  error: `Section "${sectionFilter}" not found`,
-                  toc: buildToc(sections) || null,
-                });
-                continue;
-              }
-              const targetIdx = sections.indexOf(target);
-              let hasSubsections = false;
-              const parts = [target.content];
-              for (let i = targetIdx + 1; i < sections.length; i++) {
-                const s = sections[i]!;
-                if (s.level <= target.level && s.heading !== "") break;
-                if (s.heading !== "") hasSubsections = true;
-                parts.push(s.content);
-              }
-              const sectionText = parts.join("\n");
-              const sectionLines = sectionText.split("\n");
-              const truncated = sectionLines.length > perPageLimit;
-              pages.push({
-                path: pagePath,
-                content: truncated ? sectionLines.slice(0, perPageLimit).join("\n") : sectionText,
-                truncated,
-                ...(truncated ? { total_lines: sectionLines.length } : {}),
-                ...(truncated && hasSubsections ? { has_subsections: true } : {}),
-                ...(truncated && includeToc ? { toc: buildToc(sections) } : {}),
-              });
-            } else {
-              const lines = raw.split("\n");
-              const truncated = lines.length > perPageLimit;
-              pages.push({
-                path: pagePath,
-                content: truncated ? lines.slice(0, perPageLimit).join("\n") : raw,
-                truncated,
-                ...(truncated ? { total_lines: lines.length } : {}),
-                ...(truncated && includeToc ? { toc: buildToc(splitSections(raw)) } : {}),
-              });
-            }
-          } catch (err) {
-            pages.push({
-              path: pagePath,
-              content: null,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        }
+        const pages = readPagesContent(wiki, toRead, sectionFilter, perPageLimit, includeToc);
 
         return JSON.stringify({
           results,
@@ -1480,7 +1493,7 @@ export async function handleTool(
         }, null, 2);
       }
 
-      // Step 2: Deduplicate — preserve score order, first occurrence wins
+      // Deduplicate — preserve score order, first occurrence wins
       const seen = new Set<string>();
       const uniquePaths: string[] = [];
       for (const r of results) {
@@ -1490,70 +1503,9 @@ export async function handleTool(
         }
       }
 
-      // Step 3: Split into read vs. nextReads
       const toRead = uniquePaths.slice(0, readTopN);
       const nextReads = uniquePaths.slice(readTopN);
-
-      // Step 4: Read each page
-      const pages: Array<Record<string, unknown>> = [];
-      for (const pagePath of toRead) {
-        try {
-          const page = wiki.read(pagePath);
-          if (!page) throw new Error(`Page not found: ${pagePath}`);
-          const fullPath = join(wiki.config.wikiDir, page.path);
-          const raw = readFileSync(fullPath, "utf-8");
-
-          if (sectionFilter) {
-            const sections = splitSections(raw);
-            const target = findSectionByHeading(sections, sectionFilter);
-            if (!target) {
-              pages.push({
-                path: pagePath,
-                content: null,
-                error: `Section "${sectionFilter}" not found`,
-                toc: buildToc(sections) || null,
-              });
-              continue;
-            }
-            const targetIdx = sections.indexOf(target);
-            let hasSubsections = false;
-            const parts = [target.content];
-            for (let i = targetIdx + 1; i < sections.length; i++) {
-              const s = sections[i]!;
-              if (s.level <= target.level && s.heading !== "") break;
-              if (s.heading !== "") hasSubsections = true;
-              parts.push(s.content);
-            }
-            const sectionText = parts.join("\n");
-            const sectionLines = sectionText.split("\n");
-            const truncated = sectionLines.length > perPageLimit;
-            pages.push({
-              path: pagePath,
-              content: truncated ? sectionLines.slice(0, perPageLimit).join("\n") : sectionText,
-              truncated,
-              ...(truncated ? { total_lines: sectionLines.length } : {}),
-              ...(truncated && hasSubsections ? { has_subsections: true } : {}),
-              ...(truncated && includeToc ? { toc: buildToc(sections) } : {}),
-            });
-          } else {
-            const lines = raw.split("\n");
-            const truncated = lines.length > perPageLimit;
-            pages.push({
-              path: pagePath,
-              content: truncated ? lines.slice(0, perPageLimit).join("\n") : raw,
-              truncated,
-              ...(truncated ? { total_lines: lines.length } : {}),
-              ...(truncated && includeToc ? { toc: buildToc(splitSections(raw)) } : {}),
-            });
-          }
-        } catch (err) {
-          pages.push({
-            path: pagePath,
-            content: null,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
+      const pages = readPagesContent(wiki, toRead, sectionFilter, perPageLimit, includeToc);
 
       return JSON.stringify({
         results,

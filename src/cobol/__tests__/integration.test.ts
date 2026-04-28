@@ -91,9 +91,31 @@ describe("COBOL MCP tools integration", () => {
     expect(parsed.sectionCalls.some((entry: { fromSection: string; toSection: string }) =>
       entry.fromSection === "A000-MAIN" && entry.toSection === "B000-PROCESS"
     )).toBe(true);
-    expect(parsed.flowByDepth).toHaveLength(1);
+    expect(parsed.flowByDepth.length).toBeGreaterThanOrEqual(1);
     expect(parsed.flowByDepth[0].nodes.some((node: { name: string }) => node.name === "B000-PROCESS")).toBe(true);
     expect(parsed.flowByDepth[0].nodes.some((node: { name: string }) => node.name === "C000-FINALIZE")).toBe(true);
+  });
+
+  it("code_query procedure_flow supports section-focused traversal", async () => {
+    const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+    wiki.rawAdd("PAYROLL.cbl", { content: source });
+
+    await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" });
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "procedure_flow",
+      path: "PAYROLL.cbl",
+      procedure: "A000-MAIN",
+      procedure_kind: "section",
+    });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.focus.name).toBe("A000-MAIN");
+    expect(parsed.focus.kind).toBe("section");
+    expect(parsed.flowByDepth.length).toBeGreaterThanOrEqual(1);
+    expect(parsed.flowByDepth[0].nodes.some((node: { name: string }) => node.name === "B000-PROCESS")).toBe(true);
+    expect(parsed.flowByDepth[0].nodes.some((node: { name: string }) => node.name === "C000-FINALIZE")).toBe(true);
+    const processNode = parsed.flowByDepth[0].nodes.find((node: { name: string }) => node.name === "B000-PROCESS");
+    expect(processNode.via.some((edge: { viaParagraph: string | null }) => edge.viaParagraph === "A100-INIT")).toBe(true);
   });
 
   it("code_impact reports affected programs for a resolved copybook", async () => {
@@ -490,6 +512,23 @@ describe("COBOL MCP tools integration", () => {
     const impactResult = await handleTool(wiki, "code_impact", { node_id: "program:CALC-TAX" });
     const impactParsed = JSON.parse(impactResult as string);
     expect(impactParsed.impactedByDepth[0].nodes.some((n: { node_id: string }) => n.node_id === "program:PAYROLL")).toBe(true);
+  });
+
+  it("code_parse and code_query procedure_flow work for nested source paths", async () => {
+    const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+    wiki.rawAdd("nested/PAYROLL.cbl", { content: source });
+
+    await handleTool(wiki, "code_parse", { path: "nested/PAYROLL.cbl" });
+
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "procedure_flow",
+      path: "nested/PAYROLL.cbl",
+      procedure: "A100-INIT",
+    });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.query.path).toBe("nested/PAYROLL.cbl");
+    expect(parsed.flowByDepth[0].nodes.some((node: { name: string }) => node.name === "B000-PROCESS")).toBe(true);
   });
 
   it("wiki_rebuild emits deterministic call-graph source order for nested models", async () => {

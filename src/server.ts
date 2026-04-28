@@ -762,7 +762,7 @@ function normalizeProcedureKind(raw?: string): "section" | "paragraph" | undefin
 }
 
 function parsedArtifactStem(filePath: string): string {
-  return basename(filePath, extname(filePath));
+  return filePath.replace(/\.[^.]+$/, "");
 }
 
 async function loadParsedNormalizedModel(wiki: Wiki, filePath: string): Promise<NormalizedCodeModel> {
@@ -940,12 +940,28 @@ function buildProcedureFlowResponse(
   if (!query.procedure) return response;
 
   const focus = resolveProcedure(procedures, query.procedure, query.procedureKind);
-  const adjacency = new Map<string, CodeRelation[]>();
+  const adjacency = new Map<string, Array<CodeRelation & { metadata?: Record<string, unknown> }>>();
   for (const relation of performRelations) {
-    const key = relation.from.toLowerCase();
-    const list = adjacency.get(key) ?? [];
-    list.push(relation);
-    adjacency.set(key, list);
+    const fromKey = relation.from.toLowerCase();
+    const fromList = adjacency.get(fromKey) ?? [];
+    fromList.push(relation);
+    adjacency.set(fromKey, fromList);
+
+    const fromProcedure = procedureByName.get(fromKey);
+    const fromSection = procedureSectionName(fromProcedure);
+    if (fromSection) {
+      const sectionKey = fromSection.toLowerCase();
+      const sectionList = adjacency.get(sectionKey) ?? [];
+      sectionList.push({
+        ...relation,
+        from: fromSection,
+        metadata: {
+          ...(relation.metadata ?? {}),
+          viaParagraph: relation.from,
+        },
+      });
+      adjacency.set(sectionKey, sectionList);
+    }
   }
 
   const flowByDepth: Array<Record<string, unknown>> = [];
@@ -975,6 +991,7 @@ function buildProcedureFlowResponse(
               from: edge.from,
               fromKind: fromProcedure?.kind ?? null,
               fromSection: procedureSectionName(fromProcedure),
+              viaParagraph: typeof edge.metadata?.viaParagraph === "string" ? edge.metadata.viaParagraph : null,
               line: edge.loc.line,
               thru: typeof edge.metadata?.thru === "string" ? edge.metadata.thru : null,
             };

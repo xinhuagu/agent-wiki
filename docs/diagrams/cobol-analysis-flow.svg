@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1100" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+<defs>
+<marker id="arr-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb"/></marker>
+<marker id="arr-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#0891b2"/></marker>
+<marker id="arr-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#059669"/></marker>
+<marker id="arr-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7c3aed"/></marker>
+<marker id="arr-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#ea580c"/></marker>
+<marker id="arr-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#6b7280"/></marker>
+<marker id="arr-data" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#b45309"/></marker>
+<filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="1" stdDeviation="1.2" flood-color="#000" flood-opacity="0.10"/></filter>
+</defs>
+<rect width="1600" height="1100" fill="#ffffff"/>
+<text x="800" y="36" text-anchor="middle" font-size="22" font-weight="700" fill="#111827">How agent-wiki analyzes COBOL files</text>
+<text x="800" y="60" text-anchor="middle" font-size="13" fill="#6b7280">code_parse pipeline · per-file artifacts · cross-file aggregation</text>
+<rect x="40" y="80" width="1520" height="340" rx="12" fill="#fafafa" stroke="#d1d5db" stroke-width="1" stroke-dasharray="6,3"/>
+<text x="60" y="104" font-size="14" font-weight="700" fill="#111827">1 · Single-file processing  —  cobolPlugin (src/cobol/plugin.ts)</text>
+<rect x="80" y="130" width="200" height="70" rx="14" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="180.0" y="159.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">MCP: code_parse</text>
+<text x="180.0" y="178.0" text-anchor="middle" font-size="11" fill="#374151">args.path</text>
+<rect x="305" y="130" width="190" height="70" rx="4" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="400.0" y="159.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">getPluginForFile</text>
+<text x="400.0" y="178.0" text-anchor="middle" font-size="11" fill="#374151">→ cobolPlugin</text>
+<rect x="520" y="130" width="180" height="70" rx="4" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="610.0" y="159.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">wiki.rawRead(path)</text>
+<text x="610.0" y="178.0" text-anchor="middle" font-size="11" fill="#374151">raw/&lt;file&gt;</text>
+<rect x="725" y="130" width="170" height="70" rx="4" fill="#cffafe" stroke="#0891b2" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="810.0" y="159.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">lexer.ts</text>
+<text x="810.0" y="178.0" text-anchor="middle" font-size="11" fill="#374151">tokenize</text>
+<rect x="920" y="130" width="170" height="70" rx="4" fill="#cffafe" stroke="#0891b2" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="1005.0" y="159.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">parser.ts</text>
+<text x="1005.0" y="178.0" text-anchor="middle" font-size="11" fill="#374151">parse</text>
+<polygon points="1125,130 1315,130 1305,200 1115,200" fill="#fef3c7" stroke="#b45309" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="1215.0" y="161.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">CobolAST</text>
+<text x="1215.0" y="179.0" text-anchor="middle" font-size="11" fill="#374151">AST nodes</text>
+<line x1="282" y1="165.0" x2="301" y2="165.0" stroke="#2563eb" stroke-width="2" marker-end="url(#arr-blue)"/>
+<line x1="497" y1="165.0" x2="516" y2="165.0" stroke="#2563eb" stroke-width="2" marker-end="url(#arr-blue)"/>
+<line x1="702" y1="165.0" x2="721" y2="165.0" stroke="#0891b2" stroke-width="2" marker-end="url(#arr-cyan)"/>
+<line x1="897" y1="165.0" x2="916" y2="165.0" stroke="#0891b2" stroke-width="2" marker-end="url(#arr-cyan)"/>
+<line x1="1092" y1="165.0" x2="1111" y2="165.0" stroke="#b45309" stroke-width="2" marker-end="url(#arr-data)"/>
+<rect x="80" y="280" width="210" height="80" rx="4" fill="#cffafe" stroke="#0891b2" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="185.0" y="314.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">extractors.ts</text>
+<text x="185.0" y="333.0" text-anchor="middle" font-size="11" fill="#374151">extractModel(ast)</text>
+<polygon points="327,280 595,280 583,360 315,360" fill="#fef3c7" stroke="#b45309" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="455.0" y="302" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">CobolCodeModel</text>
+<text x="455.0" y="322" text-anchor="middle" font-size="10" fill="#374151">sections · paragraphs · data items</text>
+<text x="455.0" y="337" text-anchor="middle" font-size="10" fill="#374151">CALL · PERFORM · COPY · EXEC SQL/CICS · file-access</text>
+<text x="455.0" y="352" text-anchor="middle" font-size="10" fill="#374151">db2-table refs · cics refs</text>
+<rect x="620" y="280" width="330" height="80" rx="4" fill="#cffafe" stroke="#0891b2" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="785.0" y="325.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">cobolToNormalized</text>
+<text x="785.0" y="302" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">cobolToNormalized</text>
+<text x="785.0" y="322" text-anchor="middle" font-size="10" fill="#374151">+ extractDataflowEdges</text>
+<text x="785.0" y="337" text-anchor="middle" font-size="10" fill="#374151">+ extractCallEdges</text>
+<text x="785.0" y="352" text-anchor="middle" font-size="10" fill="#374151">(variable-tracer.ts)</text>
+<polygon points="985,280 1215,280 1205,360 975,360" fill="#fef3c7" stroke="#b45309" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="1095.0" y="316.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">NormalizedCodeModel</text>
+<text x="1095.0" y="334.0" text-anchor="middle" font-size="11" fill="#374151">units · procedures · symbols · relations</text>
+<rect x="1240" y="280" width="280" height="80" rx="4" fill="#d1fae5" stroke="#059669" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="1380.0" y="325.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">wiki-gen.ts</text>
+<text x="1380.0" y="304" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">wiki-gen.ts</text>
+<text x="1380.0" y="324" text-anchor="middle" font-size="11" fill="#374151">generateProgramPage</text>
+<text x="1380.0" y="340" text-anchor="middle" font-size="11" fill="#374151">generateCopybookPage</text>
+<line x1="292" y1="320.0" x2="311" y2="320.0" stroke="#b45309" stroke-width="2" marker-end="url(#arr-data)"/>
+<line x1="597" y1="320.0" x2="616" y2="320.0" stroke="#0891b2" stroke-width="2" marker-end="url(#arr-cyan)"/>
+<line x1="952" y1="320.0" x2="971" y2="320.0" stroke="#b45309" stroke-width="2" marker-end="url(#arr-data)"/>
+<line x1="1217" y1="320.0" x2="1236" y2="320.0" stroke="#059669" stroke-width="2" marker-end="url(#arr-green)"/>
+<path d="M 1315,165.0 L 1530,165.0 L 1530,250 L 185,250 L 185,276" fill="none" stroke="#0891b2" stroke-width="2" marker-end="url(#arr-cyan)"/>
+<text x="900" y="240" text-anchor="middle" font-size="11" font-weight="400" fill="#6b7280">feed AST into extractor</text>
+<rect x="40" y="440" width="1520" height="200" rx="12" fill="#fafafa" stroke="#d1d5db" stroke-width="1" stroke-dasharray="6,3"/>
+<text x="60" y="464" font-size="14" font-weight="700" fill="#111827">2 · Persistence  —  raw/parsed/cobol/&lt;stem&gt;.*  +  wiki page</text>
+<path d="M 115,498 V 572 A 100.0,8 0 0 0 315,572 V 498 A 100.0,8 0 0 0 115,498 Z" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5" filter="url(#shadow)"/>
+<ellipse cx="215.0" cy="498" rx="100.0" ry="8" fill="#ffffff" stroke="#6b7280" stroke-width="1.5"/>
+<text x="215.0" y="536.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">.ast.json</text>
+<text x="215.0" y="552.0" text-anchor="middle" font-size="11" fill="#374151">raw COBOL AST</text>
+<path d="M 340,498 V 572 A 110.0,8 0 0 0 560,572 V 498 A 110.0,8 0 0 0 340,498 Z" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5" filter="url(#shadow)"/>
+<ellipse cx="450.0" cy="498" rx="110.0" ry="8" fill="#ffffff" stroke="#6b7280" stroke-width="1.5"/>
+<text x="450.0" y="536.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">.normalized.json</text>
+<text x="450.0" y="552.0" text-anchor="middle" font-size="11" fill="#374151">language-agnostic</text>
+<path d="M 585,498 V 572 A 100.0,8 0 0 0 785,572 V 498 A 100.0,8 0 0 0 585,498 Z" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5" filter="url(#shadow)"/>
+<ellipse cx="685.0" cy="498" rx="100.0" ry="8" fill="#ffffff" stroke="#6b7280" stroke-width="1.5"/>
+<text x="685.0" y="536.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">.summary.json</text>
+<text x="685.0" y="552.0" text-anchor="middle" font-size="11" fill="#374151">counts per relation type</text>
+<path d="M 810,498 V 572 A 110.0,8 0 0 0 1030,572 V 498 A 110.0,8 0 0 0 810,498 Z" fill="#fde68a" stroke="#b45309" stroke-width="1.5" filter="url(#shadow)"/>
+<ellipse cx="920.0" cy="498" rx="110.0" ry="8" fill="#ffffff" stroke="#b45309" stroke-width="1.5"/>
+<text x="920.0" y="536.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">.model.json</text>
+<text x="920.0" y="552.0" text-anchor="middle" font-size="11" fill="#374151">COBOL-specific (drives §3)</text>
+<path d="M 1080,490 H 1446 L 1460,504 V 580 H 1080 Z" fill="#d1fae5" stroke="#059669" stroke-width="1.5" filter="url(#shadow)"/>
+<path d="M 1446,490 V 504 H 1460" fill="none" stroke="#059669" stroke-width="1.5"/>
+<text x="1270.0" y="533.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">wiki: cobol/&lt;stem&gt;.md</text>
+<text x="1270.0" y="549.0" text-anchor="middle" font-size="11" fill="#374151">program page or copybook page</text>
+<rect x="830" y="416" width="140" height="18" rx="4" fill="#fafafa" opacity="0.95"/>
+<text x="900" y="429" text-anchor="middle" font-size="11" font-weight="600" fill="#6b7280">writes (rawAddParsedArtifact)</text>
+<circle cx="900" cy="425" r="4" fill="#6b7280"/>
+<path d="M 900,425 C 900,465 215.0,455 215.0,486" fill="none" stroke="#6b7280" stroke-width="1.5" marker-end="url(#arr-gray)"/>
+<path d="M 900,425 C 900,465 450.0,455 450.0,486" fill="none" stroke="#6b7280" stroke-width="1.5" marker-end="url(#arr-gray)"/>
+<path d="M 900,425 C 900,465 685.0,455 685.0,486" fill="none" stroke="#6b7280" stroke-width="1.5" marker-end="url(#arr-gray)"/>
+<path d="M 900,425 C 900,465 920.0,455 920.0,486" fill="none" stroke="#6b7280" stroke-width="1.5" marker-end="url(#arr-gray)"/>
+<path d="M 900,425 C 900,465 1270.0,455 1270.0,486" fill="none" stroke="#059669" stroke-width="1.5" marker-end="url(#arr-green)"/>
+<rect x="40" y="660" width="1520" height="390" rx="12" fill="#fafafa" stroke="#d1d5db" stroke-width="1" stroke-dasharray="6,3"/>
+<text x="60" y="684" font-size="14" font-weight="700" fill="#111827">3 · Cross-file aggregation  —  scans raw/parsed/cobol/*.model.json after every code_parse</text>
+<path d="M 920.0,582 V 694" fill="none" stroke="#7c3aed" stroke-width="2" marker-end="url(#arr-purple)"/>
+<rect x="890.0" y="594" width="60" height="16" rx="3" fill="#fafafa" opacity="0.95"/>
+<text x="920.0" y="606" text-anchor="middle" font-size="10" font-weight="600" fill="#7c3aed">trigger</text>
+<rect x="120" y="700" width="1360" height="38" rx="6" fill="#f5f3ff" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="800" y="724" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">loadCobolModels(parsedDir)   —   read every *.model.json (sorted)</text>
+<rect x="80" y="748" width="420" height="70" rx="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="290.0" y="777.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">rebuildAggregatePages</text>
+<text x="290.0" y="796.0" text-anchor="middle" font-size="11" fill="#374151">wiki-gen.ts: generateCallGraphPage</text>
+<line x1="290.0" y1="820" x2="290.0" y2="898" stroke="#7c3aed" stroke-width="1.7" marker-end="url(#arr-purple)"/>
+<path d="M 120,898 H 446 L 460,912 V 988 H 120 Z" fill="#d1fae5" stroke="#059669" stroke-width="1.5" filter="url(#shadow)"/>
+<path d="M 446,898 V 912 H 460" fill="none" stroke="#059669" stroke-width="1.5"/>
+<text x="290.0" y="941.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">wiki: cobol/call-graph.md</text>
+<text x="290.0" y="957.0" text-anchor="middle" font-size="11" fill="#374151">global PERFORM/CALL graph</text>
+<rect x="540" y="748" width="510" height="70" rx="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="795.0" y="777.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">buildKnowledgeGraph</text>
+<text x="795.0" y="796.0" text-anchor="middle" font-size="11" fill="#374151">graph.ts: KnowledgeGraphBuilder + populateGraphFromCobol → serializeGraph</text>
+<path d="M 565,906 V 980 A 100.0,8 0 0 0 765,980 V 906 A 100.0,8 0 0 0 565,906 Z" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5" filter="url(#shadow)"/>
+<ellipse cx="665.0" cy="906" rx="100.0" ry="8" fill="#ffffff" stroke="#6b7280" stroke-width="1.5"/>
+<text x="665.0" y="944.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">knowledge-graph.json</text>
+<text x="665.0" y="960.0" text-anchor="middle" font-size="11" fill="#374151">nodes · edges · diagnostics</text>
+<path d="M 800,898 H 1026 L 1040,912 V 988 H 800 Z" fill="#d1fae5" stroke="#059669" stroke-width="1.5" filter="url(#shadow)"/>
+<path d="M 1026,898 V 912 H 1040" fill="none" stroke="#059669" stroke-width="1.5"/>
+<text x="920.0" y="941.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">wiki: cobol/system-map.md</text>
+<text x="920.0" y="957.0" text-anchor="middle" font-size="11" fill="#374151">Programs/Copybooks/Datasets</text>
+<path d="M 795.0,820 V 853 H 665.0 V 894" fill="none" stroke="#7c3aed" stroke-width="1.7" marker-end="url(#arr-purple)"/>
+<path d="M 795.0,853 H 920.0 V 894" fill="none" stroke="#7c3aed" stroke-width="1.7" marker-end="url(#arr-purple)"/>
+<rect x="1090" y="748" width="450" height="70" rx="6" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="1315.0" y="777.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">buildDerivedArtifacts</text>
+<text x="1315.0" y="796.0" text-anchor="middle" font-size="11" fill="#374151">field-lineage.ts: buildFieldLineage</text>
+<path d="M 1100,906 V 980 A 100.0,8 0 0 0 1300,980 V 906 A 100.0,8 0 0 0 1100,906 Z" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5" filter="url(#shadow)"/>
+<ellipse cx="1200.0" cy="906" rx="100.0" ry="8" fill="#ffffff" stroke="#6b7280" stroke-width="1.5"/>
+<text x="1200.0" y="944.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">field-lineage.json</text>
+<text x="1200.0" y="960.0" text-anchor="middle" font-size="11" fill="#374151">shared / inferred lineage</text>
+<path d="M 1325,898 H 1526 L 1540,912 V 988 H 1325 Z" fill="#d1fae5" stroke="#059669" stroke-width="1.5" filter="url(#shadow)"/>
+<path d="M 1526,898 V 912 H 1540" fill="none" stroke="#059669" stroke-width="1.5"/>
+<text x="1432.5" y="941.0" text-anchor="middle" font-size="13" font-weight="700" fill="#111827">wiki: cobol/field-lineage.md</text>
+<text x="1432.5" y="957.0" text-anchor="middle" font-size="11" fill="#374151">field-level cross-file index</text>
+<path d="M 1315.0,820 V 853 H 1200.0 V 894" fill="none" stroke="#7c3aed" stroke-width="1.7" marker-end="url(#arr-purple)"/>
+<path d="M 1315.0,853 H 1432.5 V 894" fill="none" stroke="#7c3aed" stroke-width="1.7" marker-end="url(#arr-purple)"/>
+<rect x="880" y="1060" width="680" height="32" rx="6" fill="#ffedd5" stroke="#ea580c" stroke-width="1.4" stroke-dasharray="6,3"/>
+<text x="894" y="1081" font-size="12" font-weight="600" fill="#111827">Optional · MCP code_trace_variable(path, variable)  →  cobolPlugin.traceVariable  →  variable-tracer.ts</text>
+<rect x="60" y="1060" width="800" height="32" rx="6" fill="#ffffff" stroke="#e5e7eb" stroke-width="1"/>
+<rect x="74" y="1071" width="14" height="11" rx="2" fill="#dbeafe" stroke="#2563eb" stroke-width="1.2"/>
+<text x="93" y="1081" font-size="11" fill="#111827">entry</text>
+<rect x="140.5" y="1071" width="14" height="11" rx="2" fill="#cffafe" stroke="#0891b2" stroke-width="1.2"/>
+<text x="159.5" y="1081" font-size="11" fill="#111827">parse / normalize</text>
+<rect x="287.4" y="1071" width="14" height="11" rx="2" fill="#fef3c7" stroke="#b45309" stroke-width="1.2"/>
+<text x="306.4" y="1081" font-size="11" fill="#111827">intermediate model</text>
+<rect x="441.0" y="1071" width="14" height="11" rx="2" fill="#d1fae5" stroke="#059669" stroke-width="1.2"/>
+<text x="460.0" y="1081" font-size="11" fill="#111827">wiki page</text>
+<rect x="534.3" y="1071" width="14" height="11" rx="2" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.2"/>
+<text x="553.3" y="1081" font-size="11" fill="#111827">JSON artifact</text>
+<rect x="654.4" y="1071" width="14" height="11" rx="2" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.2"/>
+<text x="673.4" y="1081" font-size="11" fill="#111827">aggregation</text>
+<rect x="761.1" y="1071" width="14" height="11" rx="2" fill="#ffedd5" stroke="#ea580c" stroke-width="1.2"/>
+<text x="780.1" y="1081" font-size="11" fill="#111827">optional</text>
+</svg>

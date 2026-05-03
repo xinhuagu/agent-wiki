@@ -2179,6 +2179,7 @@ export async function handleTool(
     case "code_impact": {
       const language = ((args.language as string | undefined) ?? "cobol").trim().toLowerCase();
       const requestedNode = args.node_id as string;
+      if (!requestedNode) throw new Error("code_impact requires 'node_id'");
       const kind = normalizeImpactKind(args.kind as string | undefined);
       const maxDepth = Math.min(50, Math.max(1, Math.floor((args.max_depth as number | undefined) ?? 10)));
       const graph = await loadCompiledGraph(wiki, language);

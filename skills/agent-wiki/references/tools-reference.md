@@ -346,7 +346,8 @@ Returns: `{ path, procedure?, flow: [...] }`
 Returns: `{ query, summary, deterministic: [...], inferredHighConfidence: [...], inferredAmbiguous: [...] }`
 
 **query_type: dataflow_edges** — Queries MOVE/COMPUTE/SQL/CALL dataflow edges for one source file. Pass `field + transitive: true` to follow chains. Requires `path`.
-Returns: `{ path, edgeCount, edges: [...] }` or `{ path, field, levels: [...], visited: [...] }` for transitive
+Returns (non-transitive): `{ file, total, edges: [...] }`
+Returns (transitive): `{ file, field, direction, transitive, total_fields, total_edges, levels: [...] }`
 
 ---
 

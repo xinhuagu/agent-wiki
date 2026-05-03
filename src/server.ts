@@ -575,14 +575,15 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           "- `trace_variable`: Trace all references to a variable in a parsed source file — shows where it is read, written, or passed, grouped by section/paragraph.\n" +
           "- `impact`: Query the compiled knowledge graph for downstream impact — returns affected programs, copybooks, or datasets grouped by dependency depth, with evidence and uncertainty markers.\n" +
           "- `procedure_flow`: Query parsed procedure/section PERFORM flow for one source file — returns section-level and paragraph-level flow, optionally focused on one procedure.\n" +
-          "- `field_lineage`: Query compiled field-lineage artifacts — returns deterministic and inferred matches for one field, optionally narrowed to a copybook or qualified name.",
+          "- `field_lineage`: Query compiled field-lineage artifacts — returns deterministic and inferred matches for one field, optionally narrowed to a copybook or qualified name.\n" +
+          "- `dataflow_edges`: Query intra-program MOVE/COMPUTE/ADD assignment edges — returns directed field→field dataflow for a parsed source file, optionally filtered to a specific source or target field.",
         inputSchema: {
           type: "object" as const,
           properties: {
             query_type: {
               type: "string",
-              enum: ["trace_variable", "impact", "procedure_flow", "field_lineage"],
-              description: "Query type: trace_variable, impact, procedure_flow, or field_lineage",
+              enum: ["trace_variable", "impact", "procedure_flow", "field_lineage", "dataflow_edges"],
+              description: "Query type: trace_variable, impact, procedure_flow, field_lineage, or dataflow_edges",
             },
             path: {
               type: "string",
@@ -627,6 +628,14 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             copybook: {
               type: "string",
               description: "[field_lineage] Optional copybook canonical id or logical name (e.g. 'copybook:CUSTOMER-A' or 'CUSTOMER-A')",
+            },
+            from: {
+              type: "string",
+              description: "[dataflow_edges] Optional source field name to filter edges (e.g. 'EMP-SALARY')",
+            },
+            to: {
+              type: "string",
+              description: "[dataflow_edges] Optional target field name to filter edges (e.g. 'WS-TOTAL-SALARY')",
             },
           },
           required: ["query_type"],
@@ -2188,6 +2197,28 @@ export async function handleTool(
       return JSON.stringify(response, null, 2);
     }
 
+    case "code_dataflow_edges": {
+      const filePath = args.path as string;
+      const fromField = (args.from as string | undefined)?.toUpperCase();
+      const toField = (args.to as string | undefined)?.toUpperCase();
+      const model = await loadParsedNormalizedModel(wiki, filePath);
+      let edges = model.relations.filter((r) => r.type === "dataflow");
+      if (fromField) edges = edges.filter((r) => r.from === fromField);
+      if (toField) edges = edges.filter((r) => r.to === toField);
+      return JSON.stringify({
+        file: filePath,
+        total: edges.length,
+        edges: edges.map((r) => ({
+          from: r.from,
+          to: r.to,
+          via: r.metadata?.via,
+          line: r.loc.line,
+          procedure: r.metadata?.procedure,
+          section: r.metadata?.section,
+        })),
+      }, null, 2);
+    }
+
     // ═══ KNOWLEDGE INGESTION ═══
 
     case "knowledge_ingest_batch": {
@@ -2569,7 +2600,8 @@ export async function handleTool(
         case "impact": return handleTool(wiki, "code_impact", args, opts);
         case "procedure_flow": return handleTool(wiki, "code_procedure_flow", args, opts);
         case "field_lineage": return handleTool(wiki, "code_field_lineage", args, opts);
-        default: throw new Error(`Unknown code_query query_type: "${queryType}". Expected: trace_variable | impact | procedure_flow | field_lineage`);
+        case "dataflow_edges": return handleTool(wiki, "code_dataflow_edges", args, opts);
+        default: throw new Error(`Unknown code_query query_type: "${queryType}". Expected: trace_variable | impact | procedure_flow | field_lineage | dataflow_edges`);
       }
     }
 

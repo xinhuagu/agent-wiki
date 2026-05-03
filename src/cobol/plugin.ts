@@ -9,7 +9,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "./parser.js";
 import { extractModel, generateSummary } from "./extractors.js";
-import { traceVariable as cobolTraceVariable } from "./variable-tracer.js";
+import { traceVariable as cobolTraceVariable, extractDataflowEdges } from "./variable-tracer.js";
 import { buildFieldLineage, generateFieldLineagePage } from "./field-lineage.js";
 import { generateProgramPage, generateCopybookPage, generateCallGraphPage } from "./wiki-gen.js";
 import type { CobolAST, DataItemNode } from "./types.js";
@@ -254,12 +254,23 @@ export const cobolPlugin: CodeAnalysisPlugin = {
   },
 
   normalize(ast: unknown): NormalizedCodeModel {
-    const cobolModel = extractModel(ast as CobolAST);
-    return cobolToNormalized(cobolModel);
+    const cobolAst = ast as CobolAST;
+    const cobolModel = extractModel(cobolAst);
+    const normalized = cobolToNormalized(cobolModel);
+    for (const edge of extractDataflowEdges(cobolAst)) {
+      normalized.relations.push({
+        type: "dataflow",
+        from: edge.from,
+        to: edge.to,
+        loc: { line: edge.line, column: 0 },
+        metadata: { via: edge.via, procedure: edge.procedure, section: edge.section },
+      });
+    }
+    return normalized;
   },
 
   generateWikiPages(
-    _model: NormalizedCodeModel,
+    model: NormalizedCodeModel,
     sourceFile: string,
     ast?: unknown,
   ): Array<{ path: string; content: string }> {
@@ -273,7 +284,7 @@ export const cobolPlugin: CodeAnalysisPlugin = {
     if (isCopybook(sourceFile)) {
       return [generateCopybookPage(cobolModel)];
     }
-    return [generateProgramPage(cobolModel, summary)];
+    return [generateProgramPage(cobolModel, summary, model)];
   },
 
   traceVariable(ast: unknown, variable: string): VariableReference[] {

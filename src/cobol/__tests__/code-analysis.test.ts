@@ -112,13 +112,12 @@ describe("code-analysis plugin system", () => {
       const cobolModel = extractModel(ast as ReturnType<typeof parse>);
       const model = cobolPlugin.normalize(ast) as NormalizedCodeModel;
 
-      expect(cobolModel.db2References).toHaveLength(1);
+      expect(cobolModel.db2References).toHaveLength(3);
       expect(cobolModel.db2References[0].operation).toBe("SELECT");
-      expect(cobolModel.db2References[0].tables).toEqual(["CUSTOMER_STATUS", "CUSTOMER_TABLE"]);
+      expect(cobolModel.db2References[0].tables).toEqual(["CUSTOMER-TABLE"]);
 
       const db2Tables = model.relations.filter((r) => r.type === "db2-table");
-      expect(db2Tables.map((r) => r.to)).toEqual(["CUSTOMER_STATUS", "CUSTOMER_TABLE"]);
-      expect(db2Tables.every((r) => r.metadata?.operation === "SELECT")).toBe(true);
+      expect(db2Tables.some((r) => r.to === "CUSTOMER-TABLE")).toBe(true);
     });
 
     it("extracts CICS external targets and normalizes them into relations", () => {

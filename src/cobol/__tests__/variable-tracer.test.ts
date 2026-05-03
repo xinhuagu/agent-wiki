@@ -176,4 +176,32 @@ describe("COBOL extractDataflowEdges — EXEC SQL host variables", () => {
     expect(edge!.procedure).toBeTruthy();
     expect(edge!.section).toBeTruthy();
   });
+
+  it("FETCH INTO: emits SQL:cursor → write-host-var edges using cursor name", () => {
+    const fetchSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. FETCHTEST.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-EMP-ID   PIC X(10).
+       01 WS-EMP-NAME PIC X(50).
+       PROCEDURE DIVISION.
+       FETCH-DATA.
+           EXEC SQL
+               FETCH EMP-CURSOR
+                INTO :WS-EMP-ID, :WS-EMP-NAME
+           END-EXEC.
+           GOBACK.
+    `;
+    const fetchAst = parse(fetchSrc, "FETCHTEST.cbl");
+    const fetchEdges = extractDataflowEdges(fetchAst);
+    const idEdge = fetchEdges.find(
+      (e) => e.from === "SQL:EMP-CURSOR" && e.to === "WS-EMP-ID" && e.via === "EXEC SQL FETCH",
+    );
+    expect(idEdge).toBeDefined();
+    const nameEdge = fetchEdges.find(
+      (e) => e.from === "SQL:EMP-CURSOR" && e.to === "WS-EMP-NAME",
+    );
+    expect(nameEdge).toBeDefined();
+  });
 });

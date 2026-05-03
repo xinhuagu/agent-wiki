@@ -2242,14 +2242,20 @@ export async function handleTool(
           for (const field of frontier) {
             if (direction === "downstream" || direction === "both") {
               for (const e of allEdges.filter((e) => e.from === field)) {
-                levelEdges.push(e);
-                if (!visited.has(e.to)) { visited.add(e.to); nextFields.push(e.to); }
+                if (!visited.has(e.to)) {
+                  visited.add(e.to);
+                  nextFields.push(e.to);
+                  levelEdges.push(e);
+                }
               }
             }
             if (direction === "upstream" || direction === "both") {
               for (const e of allEdges.filter((e) => e.to === field)) {
-                levelEdges.push(e);
-                if (!visited.has(e.from)) { visited.add(e.from); nextFields.push(e.from); }
+                if (!visited.has(e.from)) {
+                  visited.add(e.from);
+                  nextFields.push(e.from);
+                  levelEdges.push(e);
+                }
               }
             }
           }

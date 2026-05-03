@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 import { parse } from "../parser.js";
-import { traceVariable, extractDataflowEdges } from "../variable-tracer.js";
+import { traceVariable, extractDataflowEdges, extractCallEdges } from "../variable-tracer.js";
 
 const FIXTURES = resolve(process.cwd(), "src/cobol/__tests__/fixtures");
 const fixture = (name: string) => readFileSync(resolve(FIXTURES, name), "utf-8");
@@ -203,5 +203,105 @@ describe("COBOL extractDataflowEdges — EXEC SQL host variables", () => {
       (e) => e.from === "SQL:EMP-CURSOR" && e.to === "WS-EMP-NAME",
     );
     expect(nameEdge).toBeDefined();
+  });
+});
+
+describe("COBOL extractCallEdges", () => {
+  const ast = parse(fixture("PAYROLL.cbl"), "PAYROLL.cbl");
+  const edges = extractCallEdges(ast);
+
+  it("emits param → program edge for each USING variable", () => {
+    // CALL "CALC-TAX" USING EMP-SALARY WS-TAX-AMOUNT
+    const salaryEdge = edges.find(
+      (e) => e.from === "EMP-SALARY" && e.to === "CALC-TAX" && e.via === "CALL",
+    );
+    expect(salaryEdge).toBeDefined();
+    const taxEdge = edges.find((e) => e.from === "WS-TAX-AMOUNT" && e.to === "CALC-TAX");
+    expect(taxEdge).toBeDefined();
+  });
+
+  it("handles multiple CALL statements", () => {
+    // CALL "PRINT-REPORT" USING WS-TOTALS
+    const reportEdge = edges.find(
+      (e) => e.to === "PRINT-REPORT" && e.via === "CALL",
+    );
+    expect(reportEdge).toBeDefined();
+  });
+
+  it("populates procedure, section, and line for call edges", () => {
+    const edge = edges.find((e) => e.to === "CALC-TAX");
+    expect(edge).toBeDefined();
+    expect(edge!.procedure).toBeTruthy();
+    expect(edge!.section).toBeTruthy();
+    expect(edge!.line).toBeGreaterThan(0);
+  });
+
+  it("returns empty for program with no CALL statements", () => {
+    const noCallSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. NOCALL.
+       PROCEDURE DIVISION.
+       MAIN.
+           MOVE 1 TO WS-X.
+           STOP RUN.
+    `;
+    const noCallAst = parse(noCallSrc, "NOCALL.cbl");
+    expect(extractCallEdges(noCallAst)).toHaveLength(0);
+  });
+
+  it("ignores BY REFERENCE / BY CONTENT modifiers", () => {
+    const byRefSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. BYREF.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-A PIC X.
+       01 WS-B PIC X.
+       PROCEDURE DIVISION.
+       MAIN.
+           CALL "SUB" USING BY REFERENCE WS-A BY CONTENT WS-B.
+           STOP RUN.
+    `;
+    const byRefAst = parse(byRefSrc, "BYREF.cbl");
+    const byRefEdges = extractCallEdges(byRefAst);
+    expect(byRefEdges.find((e) => e.from === "WS-A")).toBeDefined();
+    expect(byRefEdges.find((e) => e.from === "WS-B")).toBeDefined();
+    expect(byRefEdges.find((e) => e.from === "REFERENCE")).toBeUndefined();
+    expect(byRefEdges.find((e) => e.from === "CONTENT")).toBeUndefined();
+  });
+
+  it("returns empty for CALL without USING clause", () => {
+    const noUsingSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. NOUSING.
+       PROCEDURE DIVISION.
+       MAIN.
+           CALL "PROG-B".
+           STOP RUN.
+    `;
+    const noUsingAst = parse(noUsingSrc, "NOUSING.cbl");
+    expect(extractCallEdges(noUsingAst)).toHaveLength(0);
+  });
+
+  it("dynamic CALL: uses variable name as target program node", () => {
+    // CALL WS-PROG-NAME USING WS-PARM — target is the variable holding the program name
+    const dynSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. DYNCALL.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-PROG-NAME PIC X(8).
+       01 WS-PARM      PIC X(10).
+       PROCEDURE DIVISION.
+       MAIN.
+           CALL WS-PROG-NAME USING WS-PARM.
+           STOP RUN.
+    `;
+    const dynAst = parse(dynSrc, "DYNCALL.cbl");
+    const dynEdges = extractCallEdges(dynAst);
+    // Target is the literal variable name — cross-program resolution is out of scope
+    const edge = dynEdges.find((e) => e.from === "WS-PARM" && e.to === "WS-PROG-NAME");
+    expect(edge).toBeDefined();
+    expect(edge!.via).toBe("CALL");
   });
 });

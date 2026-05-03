@@ -134,8 +134,8 @@ export function generateProgramPage(model: CobolCodeModel, summary: CodeSummary,
     }
   }
 
-  // Dataflow edges from MOVE/COMPUTE/ADD/etc.
-  const dfEdges = (normalized?.relations ?? []).filter((r) => r.type === "dataflow");
+  // Dataflow edges from MOVE/COMPUTE/ADD/EXEC SQL/CALL USING etc.
+  const dfEdges = (normalized?.relations ?? []).filter((r) => r.type === "dataflow" || r.type === "call-param");
   if (dfEdges.length > 0) {
     lines.push("## Dataflow Edges");
     lines.push("");

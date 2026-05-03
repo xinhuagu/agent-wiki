@@ -576,7 +576,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           "- `impact`: Query the compiled knowledge graph for downstream impact — returns affected programs, copybooks, or datasets grouped by dependency depth, with evidence and uncertainty markers.\n" +
           "- `procedure_flow`: Query parsed procedure/section PERFORM flow for one source file — returns section-level and paragraph-level flow, optionally focused on one procedure.\n" +
           "- `field_lineage`: Query compiled field-lineage artifacts — returns deterministic and inferred matches for one field, optionally narrowed to a copybook or qualified name.\n" +
-          "- `dataflow_edges`: Query intra-program MOVE/COMPUTE/ADD assignment edges — returns directed field→field dataflow for a parsed source file, optionally filtered to a specific source or target field.",
+          "- `dataflow_edges`: Query intra-program MOVE/COMPUTE/ADD assignment edges — returns directed field→field dataflow. Filter by `from`/`to`, or set `field`+`transitive: true` to follow chains across the full graph.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -603,7 +603,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             },
             max_depth: {
               type: "number",
-              description: "[impact] Maximum reverse-dependency depth to traverse (default: 10)",
+              description: "[impact/dataflow_edges] Maximum traversal depth (default: 10)",
             },
             language: {
               type: "string",
@@ -631,11 +631,24 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             },
             from: {
               type: "string",
-              description: "[dataflow_edges] Optional source field name to filter edges (e.g. 'EMP-SALARY')",
+              description: "[dataflow_edges] Filter: only edges whose source field matches (e.g. 'EMP-SALARY')",
             },
             to: {
               type: "string",
-              description: "[dataflow_edges] Optional target field name to filter edges (e.g. 'WS-TOTAL-SALARY')",
+              description: "[dataflow_edges] Filter: only edges whose target field matches (e.g. 'WS-TOTAL-SALARY')",
+            },
+            field: {
+              type: "string",
+              description: "[dataflow_edges] Starting field for transitive traversal (requires transitive: true)",
+            },
+            transitive: {
+              type: "boolean",
+              description: "[dataflow_edges] Follow edges transitively from `field` (default: false)",
+            },
+            direction: {
+              type: "string",
+              enum: ["downstream", "upstream", "both"],
+              description: "[dataflow_edges] Traversal direction when transitive: true — downstream (default), upstream, or both",
             },
           },
           required: ["query_type"],
@@ -2201,21 +2214,77 @@ export async function handleTool(
       const filePath = args.path as string;
       const fromField = (args.from as string | undefined)?.toUpperCase();
       const toField = (args.to as string | undefined)?.toUpperCase();
+      const startField = (args.field as string | undefined)?.toUpperCase();
+      const transitive = (args.transitive as boolean | undefined) ?? false;
+      const direction = (args.direction as string | undefined) ?? "downstream";
+      const maxDepth = Math.min(50, Math.max(1, Math.floor((args.max_depth as number | undefined) ?? 10)));
       const model = await loadParsedNormalizedModel(wiki, filePath);
-      let edges = model.relations.filter((r) => r.type === "dataflow");
+      const allEdges = model.relations.filter((r) => r.type === "dataflow");
+
+      const formatEdge = (r: (typeof allEdges)[0]) => ({
+        from: r.from,
+        to: r.to,
+        via: r.metadata?.via,
+        line: r.loc.line,
+        procedure: r.metadata?.procedure,
+        section: r.metadata?.section,
+      });
+
+      if (transitive && startField) {
+        const visited = new Set<string>([startField]);
+        let frontier = [startField];
+        const levels: Array<{ depth: number; fields: string[]; edges: ReturnType<typeof formatEdge>[] }> = [];
+
+        for (let depth = 1; depth <= maxDepth && frontier.length > 0; depth++) {
+          const levelEdges: typeof allEdges = [];
+          const nextFields: string[] = [];
+
+          for (const field of frontier) {
+            if (direction === "downstream" || direction === "both") {
+              for (const e of allEdges.filter((e) => e.from === field)) {
+                if (!visited.has(e.to)) {
+                  visited.add(e.to);
+                  nextFields.push(e.to);
+                  levelEdges.push(e);
+                }
+              }
+            }
+            if (direction === "upstream" || direction === "both") {
+              for (const e of allEdges.filter((e) => e.to === field)) {
+                if (!visited.has(e.from)) {
+                  visited.add(e.from);
+                  nextFields.push(e.from);
+                  levelEdges.push(e);
+                }
+              }
+            }
+          }
+
+          if (levelEdges.length > 0) {
+            levels.push({ depth, fields: nextFields, edges: levelEdges.map(formatEdge) });
+          }
+          frontier = nextFields;
+        }
+
+        const allVisited = [...visited].filter((f) => f !== startField);
+        return JSON.stringify({
+          file: filePath,
+          field: startField,
+          direction,
+          transitive: true,
+          total_fields: allVisited.length,
+          total_edges: levels.reduce((s, l) => s + l.edges.length, 0),
+          levels,
+        }, null, 2);
+      }
+
+      let edges = allEdges;
       if (fromField) edges = edges.filter((r) => r.from === fromField);
       if (toField) edges = edges.filter((r) => r.to === toField);
       return JSON.stringify({
         file: filePath,
         total: edges.length,
-        edges: edges.map((r) => ({
-          from: r.from,
-          to: r.to,
-          via: r.metadata?.via,
-          line: r.loc.line,
-          procedure: r.metadata?.procedure,
-          section: r.metadata?.section,
-        })),
+        edges: edges.map(formatEdge),
       }, null, 2);
     }
 

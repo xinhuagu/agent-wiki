@@ -930,4 +930,81 @@ describe("COBOL MCP tools integration", () => {
       expect(timeline).toContain("COBOL Call Graph");
     });
   });
+
+  describe("dataflow_edges", () => {
+    it("returns flat edge list for a parsed program", async () => {
+      const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+      wiki.rawAdd("PAYROLL.cbl", { content: source });
+      await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" });
+
+      const result = await handleTool(wiki, "code_query", {
+        query_type: "dataflow_edges",
+        path: "PAYROLL.cbl",
+      });
+      const parsed = JSON.parse(result as string);
+
+      expect(parsed.total).toBeGreaterThan(0);
+      const addEdge = parsed.edges.find((e: { from: string; to: string; via: string }) =>
+        e.from === "EMP-SALARY" && e.to === "WS-TOTAL-SALARY" && e.via === "ADD"
+      );
+      expect(addEdge).toBeDefined();
+    });
+
+    it("filters by from field", async () => {
+      const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+      wiki.rawAdd("PAYROLL.cbl", { content: source });
+      await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" });
+
+      const result = await handleTool(wiki, "code_query", {
+        query_type: "dataflow_edges",
+        path: "PAYROLL.cbl",
+        from: "EMP-SALARY",
+      });
+      const parsed = JSON.parse(result as string);
+
+      expect(parsed.edges.every((e: { from: string }) => e.from === "EMP-SALARY")).toBe(true);
+    });
+
+    it("transitive downstream: EMP-SALARY reaches WS-AVG-SALARY via WS-TOTAL-SALARY", async () => {
+      const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+      wiki.rawAdd("PAYROLL.cbl", { content: source });
+      await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" });
+
+      const result = await handleTool(wiki, "code_query", {
+        query_type: "dataflow_edges",
+        path: "PAYROLL.cbl",
+        field: "EMP-SALARY",
+        transitive: true,
+        direction: "downstream",
+      });
+      const parsed = JSON.parse(result as string);
+
+      expect(parsed.transitive).toBe(true);
+      expect(parsed.field).toBe("EMP-SALARY");
+      expect(parsed.direction).toBe("downstream");
+
+      const allFields = parsed.levels.flatMap((l: { fields: string[] }) => l.fields);
+      expect(allFields).toContain("WS-TOTAL-SALARY");
+      expect(allFields).toContain("WS-AVG-SALARY");
+    });
+
+    it("transitive upstream: WS-AVG-SALARY traces back to EMP-SALARY", async () => {
+      const source = readFileSync(join(FIXTURES, "PAYROLL.cbl"), "utf-8");
+      wiki.rawAdd("PAYROLL.cbl", { content: source });
+      await handleTool(wiki, "code_parse", { path: "PAYROLL.cbl" });
+
+      const result = await handleTool(wiki, "code_query", {
+        query_type: "dataflow_edges",
+        path: "PAYROLL.cbl",
+        field: "WS-AVG-SALARY",
+        transitive: true,
+        direction: "upstream",
+      });
+      const parsed = JSON.parse(result as string);
+
+      const allFields = parsed.levels.flatMap((l: { fields: string[] }) => l.fields);
+      expect(allFields).toContain("WS-TOTAL-SALARY");
+      expect(allFields).toContain("EMP-SALARY");
+    });
+  });
 });

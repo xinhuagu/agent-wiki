@@ -372,3 +372,55 @@ export function extractDataflowEdges(ast: CobolAST): DataflowEdge[] {
 
   return edges;
 }
+
+// ---------------------------------------------------------------------------
+// CALL parameter edges
+// ---------------------------------------------------------------------------
+
+// BY REFERENCE / BY CONTENT / BY VALUE modifiers — not variable names.
+const CALL_MODIFIERS = new Set(["REFERENCE", "CONTENT", "VALUE", "ADDRESS"]);
+// Terminators for the USING clause.
+const CALL_USING_STOP = new Set(["GIVING", "RETURNING", "END-CALL", "ON", "EXCEPTION", "OVERFLOW"]);
+
+export function extractCallEdges(ast: CobolAST): DataflowEdge[] {
+  const edges: DataflowEdge[] = [];
+
+  for (const div of ast.divisions) {
+    if (div.name !== "PROCEDURE") continue;
+    for (const sec of div.sections) {
+      for (const para of sec.paragraphs) {
+        for (const stmt of para.statements) {
+          if (stmt.verb !== "CALL") continue;
+
+          const tokens = stmt.rawText.split(/\s+/).map((t) => t.toUpperCase());
+
+          // Program name: first token after CALL (quoted literal or identifier).
+          const callIdx = tokens.indexOf("CALL");
+          if (callIdx < 0 || callIdx + 1 >= tokens.length) continue;
+          const programName = tokens[callIdx + 1].replace(/['"]/g, "");
+
+          // Collect USING params until GIVING / RETURNING / END-CALL.
+          const usingIdx = tokens.indexOf("USING");
+          if (usingIdx < 0) continue;
+
+          for (let i = usingIdx + 1; i < tokens.length; i++) {
+            const tok = tokens[i];
+            if (CALL_USING_STOP.has(tok)) break;
+            if (CALL_MODIFIERS.has(tok)) continue;
+            if (!isDataflowVariable(tok)) continue;
+            edges.push({
+              from: tok,
+              to: programName,
+              via: "CALL",
+              line: stmt.loc.line,
+              procedure: para.name,
+              section: sec.name,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return edges;
+}

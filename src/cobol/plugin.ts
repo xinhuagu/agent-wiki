@@ -9,7 +9,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "./parser.js";
 import { extractModel, generateSummary } from "./extractors.js";
-import { traceVariable as cobolTraceVariable, extractDataflowEdges } from "./variable-tracer.js";
+import { traceVariable as cobolTraceVariable, extractDataflowEdges, extractCallEdges } from "./variable-tracer.js";
 import { buildFieldLineage, generateFieldLineagePage } from "./field-lineage.js";
 import { generateProgramPage, generateCopybookPage, generateCallGraphPage } from "./wiki-gen.js";
 import type { CobolAST, DataItemNode } from "./types.js";
@@ -260,6 +260,15 @@ export const cobolPlugin: CodeAnalysisPlugin = {
     for (const edge of extractDataflowEdges(cobolAst)) {
       normalized.relations.push({
         type: "dataflow",
+        from: edge.from,
+        to: edge.to,
+        loc: { line: edge.line, column: 0 },
+        metadata: { via: edge.via, procedure: edge.procedure, section: edge.section },
+      });
+    }
+    for (const edge of extractCallEdges(cobolAst)) {
+      normalized.relations.push({
+        type: "call-param",
         from: edge.from,
         to: edge.to,
         loc: { line: edge.line, column: 0 },

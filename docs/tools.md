@@ -46,7 +46,7 @@ agent-wiki exposes 15 public tools through the Model Context Protocol.
 | `knowledge_ingest` | Unified knowledge ingestion tool. Select `mode`: `batch` (scan/chunk/source-pack ingest) or `digest_write` (materialize digest items into wiki pages). |
 | `batch` | Execute multiple tool calls in one round trip. Supports deferred rebuild semantics so write-heavy flows only rebuild indexes/graphs once at the end. |
 
-The code analysis system is plugin-based with a language-agnostic `NormalizedCodeModel`:
+The code analysis system is plugin-based with a language-agnostic `NormalizedCodeModel`. See [`code-analysis-plugins.md`](code-analysis-plugins.md) for the full pipeline diagram and the `CodeAnalysisPlugin` interface used to add new languages.
 
 ```
 raw/PAYROLL.cbl

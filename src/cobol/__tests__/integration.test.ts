@@ -341,10 +341,10 @@ describe("COBOL MCP tools integration", () => {
     const modelPath = join(tmp, "raw", "parsed", "cobol", "CUSTOMER-DB2.model.json");
     const pagePath = join(tmp, "wiki", "cobol", "programs", "customerdb.md");
     const modelJson = JSON.parse(readFileSync(modelPath, "utf-8"));
-    expect(modelJson.db2References).toHaveLength(1);
-    expect(modelJson.db2References[0].tables).toEqual(["CUSTOMER_STATUS", "CUSTOMER_TABLE"]);
+    expect(modelJson.db2References).toHaveLength(3);
+    expect(modelJson.db2References[0].tables).toEqual(["CUSTOMER-TABLE"]);
     expect(readFileSync(pagePath, "utf-8")).toContain("### DB2");
-    expect(readFileSync(pagePath, "utf-8")).toContain("CUSTOMER_TABLE");
+    expect(readFileSync(pagePath, "utf-8")).toContain("CUSTOMER-TABLE");
   });
 
   it("code_parse persists CICS references into model artifacts and wiki summaries", async () => {

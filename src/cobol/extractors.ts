@@ -117,7 +117,7 @@ function normalizeOperand(value: string): string {
   return value.replace(/['"]/g, "").toUpperCase();
 }
 
-export function normalizeSqlRawText(rawText: string): string {
+function normalizeSqlRawText(rawText: string): string {
   return rawText
     .toUpperCase()
     .replace(/([A-Z0-9_-])\s*\.\s*([A-Z0-9_-])/g, "$1.$2");

@@ -123,7 +123,7 @@ function normalizeSqlRawText(rawText: string): string {
     .replace(/([A-Z0-9_-])\s*\.\s*([A-Z0-9_-])/g, "$1.$2");
 }
 
-function extractSqlTableNames(rawText: string): string[] {
+export function extractSqlTableNames(rawText: string): string[] {
   const tables = new Set<string>();
   const normalized = normalizeSqlRawText(rawText);
   const patterns = [

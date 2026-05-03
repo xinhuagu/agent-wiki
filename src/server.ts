@@ -587,7 +587,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             },
             path: {
               type: "string",
-              description: "[trace_variable/procedure_flow] Path to source file in raw/ (e.g. 'PAYROLL.cbl')",
+              description: "[trace_variable/procedure_flow/dataflow_edges] Path to source file in raw/ (e.g. 'PAYROLL.cbl')",
             },
             variable: {
               type: "string",
@@ -813,7 +813,7 @@ async function loadFieldLineageArtifact(wiki: Wiki, language: string): Promise<S
   const rawResult = await wiki.rawRead(`parsed/${plugin.id}/field-lineage.json`);
   if (!rawResult || rawResult.content === null) {
     throw new Error(
-      `Compiled field lineage not found for "${plugin.id}". Run code_parse on one or more ${plugin.id.toUpperCase()} files, or run wiki_rebuild after parsing.`
+      `Compiled field lineage not found for "${plugin.id}". Run code_parse on both ${plugin.id.toUpperCase()} program files (.cbl/.cob) AND copybook files (.cpy) — field lineage requires data from both to build the cross-file index.`
     );
   }
   try {

@@ -128,3 +128,52 @@ describe("COBOL extractDataflowEdges", () => {
     expect(addEdge!.line).toBeGreaterThan(0);
   });
 });
+
+describe("COBOL extractDataflowEdges — EXEC SQL host variables", () => {
+  const ast = parse(fixture("CUSTOMER-DB2.cbl"), "CUSTOMER-DB2.cbl");
+  const edges = extractDataflowEdges(ast);
+
+  it("SELECT INTO: emits SQL:table → write-host-var edge", () => {
+    const edge = edges.find(
+      (e) => e.from === "SQL:CUSTOMER-TABLE" && e.to === "WS-CUST-NAME" && e.via === "EXEC SQL SELECT",
+    );
+    expect(edge).toBeDefined();
+  });
+
+  it("SELECT INTO: emits read-host-var → SQL:table edge for WHERE vars", () => {
+    const edge = edges.find(
+      (e) => e.from === "WS-CUST-ID" && e.to === "SQL:CUSTOMER-TABLE" && e.via === "EXEC SQL SELECT",
+    );
+    expect(edge).toBeDefined();
+  });
+
+  it("SELECT INTO: all INTO vars get write edges from SQL table", () => {
+    const writeEdges = edges.filter(
+      (e) => e.from === "SQL:CUSTOMER-TABLE" && e.via === "EXEC SQL SELECT",
+    );
+    const targets = writeEdges.map((e) => e.to).sort();
+    expect(targets).toContain("WS-CUST-NAME");
+    expect(targets).toContain("WS-CUST-BALANCE");
+  });
+
+  it("UPDATE: emits host-var → SQL:table edges", () => {
+    const edge = edges.find(
+      (e) => e.from === "WS-NEW-BALANCE" && e.to === "SQL:CUSTOMER-TABLE" && e.via === "EXEC SQL UPDATE",
+    );
+    expect(edge).toBeDefined();
+  });
+
+  it("INSERT: emits host-var → SQL:table edges", () => {
+    const edge = edges.find(
+      (e) => e.from === "WS-CUST-NAME" && e.to === "SQL:CUSTOMER-TABLE" && e.via === "EXEC SQL INSERT",
+    );
+    expect(edge).toBeDefined();
+  });
+
+  it("populates procedure and section for SQL edges", () => {
+    const edge = edges.find((e) => e.via === "EXEC SQL SELECT");
+    expect(edge).toBeDefined();
+    expect(edge!.procedure).toBeTruthy();
+    expect(edge!.section).toBeTruthy();
+  });
+});

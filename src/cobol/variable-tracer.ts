@@ -267,6 +267,101 @@ function edgesFromStatement(
   return edges;
 }
 
+// ---------------------------------------------------------------------------
+// SQL host variable dataflow edges
+// ---------------------------------------------------------------------------
+
+// Extracts table names from an uppercase SQL rawText string.
+function sqlTableNames(upper: string): string[] {
+  const tables = new Set<string>();
+  const patterns = [
+    /\bFROM\s+([A-Z][A-Z0-9_.-]*)/g,
+    /\bJOIN\s+([A-Z][A-Z0-9_.-]*)/g,
+    /\bUPDATE\s+([A-Z][A-Z0-9_.-]*)/g,
+    /\bINSERT\s+INTO\s+([A-Z][A-Z0-9_.-]*)/g,
+    /\bDELETE\s+FROM\s+([A-Z][A-Z0-9_.-]*)/g,
+  ];
+  for (const pat of patterns) {
+    for (const m of upper.matchAll(pat)) {
+      if (m[1]) tables.add(m[1]);
+    }
+  }
+  return [...tables];
+}
+
+// Host variables in rawText appear as ": VARNAME" because the lexer emits ":" as a
+// separate token.  We match that pattern and return upper-cased variable names.
+const HOST_VAR_RE = /: ([A-Z][A-Z0-9-]+)/g;
+
+function sqlHostVars(upper: string): string[] {
+  return [...upper.matchAll(HOST_VAR_RE)].map((m) => m[1]);
+}
+
+function extractSqlEdgesFromStatement(
+  stmt: StatementNode,
+): Omit<DataflowEdge, "procedure" | "section">[] {
+  if (stmt.verb !== "EXEC") return [];
+  const upper = stmt.rawText.toUpperCase();
+  if (!upper.includes("EXEC SQL ")) return [];
+
+  const opMatch = upper.match(/EXEC\s+SQL\s+([A-Z-]+)/);
+  const op = opMatch?.[1];
+  if (!op) return [];
+
+  const via = `EXEC SQL ${op}`;
+  const line = stmt.loc.line;
+  const tables = sqlTableNames(upper);
+  const edges: Omit<DataflowEdge, "procedure" | "section">[] = [];
+
+  if (op === "SELECT") {
+    // Structure: SELECT cols INTO :writes FROM table WHERE :reads
+    const intoIdx = upper.indexOf(" INTO ");
+    if (intoIdx < 0) return [];
+    const fromIdx = upper.indexOf(" FROM ", intoIdx);
+
+    // Host vars in INTO…FROM zone are written (receiving query results)
+    const writeZone = fromIdx >= 0
+      ? upper.substring(intoIdx + 6, fromIdx)
+      : upper.substring(intoIdx + 6);
+    // Host vars in FROM…END zone are read (WHERE/HAVING filter params)
+    const readZone = fromIdx >= 0 ? upper.substring(fromIdx) : "";
+
+    const writeVars = sqlHostVars(writeZone);
+    const readVars = sqlHostVars(readZone);
+
+    for (const table of tables) {
+      for (const wv of writeVars) {
+        edges.push({ from: `SQL:${table}`, to: wv, via, line });
+      }
+    }
+    for (const rv of readVars) {
+      for (const table of tables) {
+        edges.push({ from: rv, to: `SQL:${table}`, via, line });
+      }
+    }
+  } else if (op === "FETCH") {
+    // FETCH cursor INTO :writes — all host vars after INTO are writes
+    const intoIdx = upper.indexOf(" INTO ");
+    if (intoIdx < 0) return [];
+    const writeVars = sqlHostVars(upper.substring(intoIdx + 6));
+
+    for (const table of tables) {
+      for (const wv of writeVars) {
+        edges.push({ from: `SQL:${table}`, to: wv, via, line });
+      }
+    }
+  } else if (op === "INSERT" || op === "UPDATE" || op === "DELETE") {
+    const hvs = sqlHostVars(upper);
+    for (const hv of hvs) {
+      for (const table of tables) {
+        edges.push({ from: hv, to: `SQL:${table}`, via, line });
+      }
+    }
+  }
+
+  return edges;
+}
+
 export function extractDataflowEdges(ast: CobolAST): DataflowEdge[] {
   const edges: DataflowEdge[] = [];
 
@@ -276,6 +371,9 @@ export function extractDataflowEdges(ast: CobolAST): DataflowEdge[] {
       for (const para of sec.paragraphs) {
         for (const stmt of para.statements) {
           for (const e of edgesFromStatement(stmt)) {
+            edges.push({ ...e, procedure: para.name, section: sec.name });
+          }
+          for (const e of extractSqlEdgesFromStatement(stmt)) {
             edges.push({ ...e, procedure: para.name, section: sec.name });
           }
         }

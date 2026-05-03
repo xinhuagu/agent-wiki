@@ -379,6 +379,8 @@ export function extractDataflowEdges(ast: CobolAST): DataflowEdge[] {
 
 // BY REFERENCE / BY CONTENT / BY VALUE modifiers — not variable names.
 const CALL_MODIFIERS = new Set(["REFERENCE", "CONTENT", "VALUE", "ADDRESS"]);
+// Terminators for the USING clause.
+const CALL_USING_STOP = new Set(["GIVING", "RETURNING", "END-CALL", "ON", "EXCEPTION", "OVERFLOW"]);
 
 export function extractCallEdges(ast: CobolAST): DataflowEdge[] {
   const edges: DataflowEdge[] = [];
@@ -400,11 +402,10 @@ export function extractCallEdges(ast: CobolAST): DataflowEdge[] {
           // Collect USING params until GIVING / RETURNING / END-CALL.
           const usingIdx = tokens.indexOf("USING");
           if (usingIdx < 0) continue;
-          const stopWords = new Set(["GIVING", "RETURNING", "END-CALL", "ON", "EXCEPTION", "OVERFLOW"]);
 
           for (let i = usingIdx + 1; i < tokens.length; i++) {
             const tok = tokens[i];
-            if (stopWords.has(tok)) break;
+            if (CALL_USING_STOP.has(tok)) break;
             if (CALL_MODIFIERS.has(tok)) continue;
             if (!isDataflowVariable(tok)) continue;
             edges.push({

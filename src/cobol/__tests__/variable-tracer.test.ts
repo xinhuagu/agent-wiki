@@ -269,4 +269,39 @@ describe("COBOL extractCallEdges", () => {
     expect(byRefEdges.find((e) => e.from === "REFERENCE")).toBeUndefined();
     expect(byRefEdges.find((e) => e.from === "CONTENT")).toBeUndefined();
   });
+
+  it("returns empty for CALL without USING clause", () => {
+    const noUsingSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. NOUSING.
+       PROCEDURE DIVISION.
+       MAIN.
+           CALL "PROG-B".
+           STOP RUN.
+    `;
+    const noUsingAst = parse(noUsingSrc, "NOUSING.cbl");
+    expect(extractCallEdges(noUsingAst)).toHaveLength(0);
+  });
+
+  it("dynamic CALL: uses variable name as target program node", () => {
+    // CALL WS-PROG-NAME USING WS-PARM — target is the variable holding the program name
+    const dynSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. DYNCALL.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-PROG-NAME PIC X(8).
+       01 WS-PARM      PIC X(10).
+       PROCEDURE DIVISION.
+       MAIN.
+           CALL WS-PROG-NAME USING WS-PARM.
+           STOP RUN.
+    `;
+    const dynAst = parse(dynSrc, "DYNCALL.cbl");
+    const dynEdges = extractCallEdges(dynAst);
+    // Target is the literal variable name — cross-program resolution is out of scope
+    const edge = dynEdges.find((e) => e.from === "WS-PARM" && e.to === "WS-PROG-NAME");
+    expect(edge).toBeDefined();
+    expect(edge!.via).toBe("CALL");
+  });
 });

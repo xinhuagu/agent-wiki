@@ -272,7 +272,7 @@ export const cobolPlugin: CodeAnalysisPlugin = {
         from: edge.from,
         to: edge.to,
         loc: { line: edge.line, column: 0 },
-        metadata: { via: "CALL", procedure: edge.procedure, section: edge.section },
+        metadata: { via: edge.via, procedure: edge.procedure, section: edge.section },
       });
     }
     return normalized;

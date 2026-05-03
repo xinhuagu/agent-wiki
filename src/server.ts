@@ -2157,6 +2157,8 @@ export async function handleTool(
     case "code_trace_variable": {
       const filePath = args.path as string;
       const varName = args.variable as string;
+      if (!filePath) throw new Error("code_trace_variable requires 'path'");
+      if (!varName) throw new Error("code_trace_variable requires 'variable'");
       const plugin = getPluginForFile(filePath);
       if (!plugin) {
         const supported = listPlugins().flatMap((p) => p.extensions).join(", ");
@@ -2187,6 +2189,7 @@ export async function handleTool(
 
     case "code_procedure_flow": {
       const filePath = args.path as string;
+      if (!filePath) throw new Error("code_procedure_flow requires 'path'");
       const procedure = args.procedure as string | undefined;
       const procedureKind = normalizeProcedureKind(args.procedure_kind as string | undefined);
       const maxDepth = Math.min(50, Math.max(1, Math.floor((args.max_depth as number | undefined) ?? 10)));
@@ -2212,6 +2215,7 @@ export async function handleTool(
 
     case "code_dataflow_edges": {
       const filePath = args.path as string;
+      if (!filePath) throw new Error("code_dataflow_edges requires 'path'");
       const fromField = (args.from as string | undefined)?.toUpperCase();
       const toField = (args.to as string | undefined)?.toUpperCase();
       const startField = (args.field as string | undefined)?.toUpperCase();

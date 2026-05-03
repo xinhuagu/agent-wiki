@@ -198,6 +198,7 @@ export function registerPlugin(plugin: CodeAnalysisPlugin): void {
 }
 
 export function getPluginForFile(filename: string): CodeAnalysisPlugin | null {
+  if (!filename) return null;
   const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
   for (const plugin of plugins.values()) {
     if (plugin.extensions.includes(ext)) return plugin;

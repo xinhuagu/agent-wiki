@@ -24,6 +24,15 @@ export interface VariableReference {
   verb: string;
 }
 
+export interface DataflowEdge {
+  from: string;
+  to: string;
+  via: string;
+  line: number;
+  procedure: string;
+  section: string;
+}
+
 // ---------------------------------------------------------------------------
 // Verb classification table
 //
@@ -184,4 +193,95 @@ function classifyStatement(
   }
 
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// Dataflow edge extraction
+// ---------------------------------------------------------------------------
+
+const DATAFLOW_VERBS = new Set([
+  "MOVE", "COMPUTE", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE",
+  "SET", "STRING", "UNSTRING", "READ", "WRITE", "REWRITE",
+  "SORT", "MERGE", "RELEASE", "RETURN",
+]);
+
+// All COBOL verbs and clause keywords that can appear as tokens inside rawText
+const ALL_COBOL_VERBS = new Set([
+  "MOVE", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "SET",
+  "STRING", "UNSTRING", "INSPECT", "ACCEPT", "DISPLAY",
+  "READ", "WRITE", "REWRITE", "DELETE", "START", "OPEN", "CLOSE",
+  "SEARCH", "EVALUATE", "IF", "PERFORM", "CALL", "STOP", "EXIT",
+  "GO", "SORT", "MERGE", "RELEASE", "RETURN", "INITIALIZE",
+  "EXEC", "END-EXEC",
+  // AT END / NOT AT END clause keywords
+  "END", "RUN",
+]);
+
+function isDataflowVariable(tok: string): boolean {
+  if (NON_VARIABLE_KEYWORDS.has(tok)) return false;
+  if (FIGURATIVE.has(tok)) return false;
+  if (ALL_COBOL_VERBS.has(tok)) return false;
+  if (/^[0-9]/.test(tok)) return false;
+  if (/^["']/.test(tok)) return false;
+  if (!/[A-Z]/.test(tok)) return false;
+  return true;
+}
+
+function edgesFromStatement(
+  stmt: StatementNode,
+): Omit<DataflowEdge, "procedure" | "section">[] {
+  const verb = stmt.verb;
+  if (!DATAFLOW_VERBS.has(verb)) return [];
+  const rule = VERB_RULES[verb];
+  if (!rule) return [];
+
+  const tokens = stmt.rawText.split(/\s+/).map((t) => t.toUpperCase());
+  let currentAccess: AccessMode = rule.defaultBefore;
+  const reads: string[] = [];
+  const writes: string[] = [];
+
+  for (const tok of tokens) {
+    if (rule.markers[tok] !== undefined) {
+      currentAccess = rule.markers[tok];
+      continue;
+    }
+    if (!isDataflowVariable(tok)) continue;
+    if (currentAccess === "read") {
+      reads.push(tok);
+    } else if (currentAccess === "write") {
+      writes.push(tok);
+    } else {
+      reads.push(tok);
+      writes.push(tok);
+    }
+  }
+
+  const edges: Omit<DataflowEdge, "procedure" | "section">[] = [];
+  for (const from of reads) {
+    for (const to of writes) {
+      if (from !== to) {
+        edges.push({ from, to, via: verb, line: stmt.loc.line });
+      }
+    }
+  }
+  return edges;
+}
+
+export function extractDataflowEdges(ast: CobolAST): DataflowEdge[] {
+  const edges: DataflowEdge[] = [];
+
+  for (const div of ast.divisions) {
+    if (div.name !== "PROCEDURE") continue;
+    for (const sec of div.sections) {
+      for (const para of sec.paragraphs) {
+        for (const stmt of para.statements) {
+          for (const e of edgesFromStatement(stmt)) {
+            edges.push({ ...e, procedure: para.name, section: sec.name });
+          }
+        }
+      }
+    }
+  }
+
+  return edges;
 }

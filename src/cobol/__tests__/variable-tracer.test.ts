@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 import { parse } from "../parser.js";
-import { traceVariable } from "../variable-tracer.js";
+import { traceVariable, extractDataflowEdges } from "../variable-tracer.js";
 
 const FIXTURES = resolve(process.cwd(), "src/cobol/__tests__/fixtures");
 const fixture = (name: string) => readFileSync(resolve(FIXTURES, name), "utf-8");
@@ -64,5 +64,66 @@ describe("COBOL variable tracer", () => {
   it("returns empty for non-existent variable", () => {
     const refs = traceVariable(ast, "DOES-NOT-EXIST");
     expect(refs).toEqual([]);
+  });
+});
+
+describe("COBOL extractDataflowEdges", () => {
+  const ast = parse(fixture("PAYROLL.cbl"), "PAYROLL.cbl");
+  const edges = extractDataflowEdges(ast);
+
+  it("emits MOVE edge: field-to-field", () => {
+    const minimalSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. TEST.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 SRC-FIELD PIC 9(5).
+       01 DST-FIELD PIC 9(5).
+       PROCEDURE DIVISION.
+       P1.
+           MOVE SRC-FIELD TO DST-FIELD.
+           STOP RUN.
+    `;
+    const minAst = parse(minimalSrc, "TEST.cbl");
+    const minEdges = extractDataflowEdges(minAst);
+    const edge = minEdges.find((e) => e.from === "SRC-FIELD" && e.to === "DST-FIELD");
+    expect(edge).toBeDefined();
+    expect(edge!.via).toBe("MOVE");
+  });
+
+  it("emits ADD edge: EMP-SALARY → WS-TOTAL-SALARY", () => {
+    const edge = edges.find((e) => e.from === "EMP-SALARY" && e.to === "WS-TOTAL-SALARY");
+    expect(edge).toBeDefined();
+    expect(edge!.via).toBe("ADD");
+  });
+
+  it("emits COMPUTE edges: WS-TOTAL-SALARY and WS-EMP-COUNT → WS-AVG-SALARY", () => {
+    const toAvg = edges.filter((e) => e.to === "WS-AVG-SALARY" && e.via === "COMPUTE");
+    const froms = toAvg.map((e) => e.from).sort();
+    expect(froms).toContain("WS-TOTAL-SALARY");
+    expect(froms).toContain("WS-EMP-COUNT");
+  });
+
+  it("does not emit self-edges", () => {
+    const selfEdges = edges.filter((e) => e.from === e.to);
+    expect(selfEdges).toHaveLength(0);
+  });
+
+  it("does not emit edges for literal-only MOVE (MOVE 'Y' TO WS-EOF-FLAG)", () => {
+    const fromLiteral = edges.filter((e) => e.to === "WS-EOF-FLAG" && e.via === "MOVE");
+    expect(fromLiteral).toHaveLength(0);
+  });
+
+  it("records procedure and section for each edge", () => {
+    const addEdge = edges.find((e) => e.via === "ADD" && e.to === "WS-TOTAL-SALARY");
+    expect(addEdge).toBeDefined();
+    expect(addEdge!.procedure).toBeTruthy();
+    expect(addEdge!.section).toBeTruthy();
+  });
+
+  it("records correct line numbers", () => {
+    const addEdge = edges.find((e) => e.from === "EMP-SALARY" && e.to === "WS-TOTAL-SALARY");
+    expect(addEdge).toBeDefined();
+    expect(addEdge!.line).toBeGreaterThan(0);
   });
 });

@@ -205,7 +205,7 @@ const DATAFLOW_VERBS = new Set([
   "SORT", "MERGE", "RELEASE", "RETURN",
 ]);
 
-// All COBOL verbs that can appear as tokens inside rawText (including nested)
+// All COBOL verbs and clause keywords that can appear as tokens inside rawText
 const ALL_COBOL_VERBS = new Set([
   "MOVE", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE", "COMPUTE", "SET",
   "STRING", "UNSTRING", "INSPECT", "ACCEPT", "DISPLAY",
@@ -213,6 +213,8 @@ const ALL_COBOL_VERBS = new Set([
   "SEARCH", "EVALUATE", "IF", "PERFORM", "CALL", "STOP", "EXIT",
   "GO", "SORT", "MERGE", "RELEASE", "RETURN", "INITIALIZE",
   "EXEC", "END-EXEC",
+  // AT END / NOT AT END clause keywords
+  "END", "RUN",
 ]);
 
 function isDataflowVariable(tok: string): boolean {

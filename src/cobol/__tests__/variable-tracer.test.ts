@@ -71,6 +71,26 @@ describe("COBOL extractDataflowEdges", () => {
   const ast = parse(fixture("PAYROLL.cbl"), "PAYROLL.cbl");
   const edges = extractDataflowEdges(ast);
 
+  it("emits MOVE edge: field-to-field", () => {
+    const minimalSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. TEST.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 SRC-FIELD PIC 9(5).
+       01 DST-FIELD PIC 9(5).
+       PROCEDURE DIVISION.
+       P1.
+           MOVE SRC-FIELD TO DST-FIELD.
+           STOP RUN.
+    `;
+    const minAst = parse(minimalSrc, "TEST.cbl");
+    const minEdges = extractDataflowEdges(minAst);
+    const edge = minEdges.find((e) => e.from === "SRC-FIELD" && e.to === "DST-FIELD");
+    expect(edge).toBeDefined();
+    expect(edge!.via).toBe("MOVE");
+  });
+
   it("emits ADD edge: EMP-SALARY → WS-TOTAL-SALARY", () => {
     const edge = edges.find((e) => e.from === "EMP-SALARY" && e.to === "WS-TOTAL-SALARY");
     expect(edge).toBeDefined();

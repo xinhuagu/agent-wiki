@@ -91,6 +91,7 @@ describe("COBOL extractDataflowEdges", () => {
     expect(edge!.via).toBe("MOVE");
   });
 
+
   it("emits ADD edge: EMP-SALARY → WS-TOTAL-SALARY", () => {
     const edge = edges.find((e) => e.from === "EMP-SALARY" && e.to === "WS-TOTAL-SALARY");
     expect(edge).toBeDefined();

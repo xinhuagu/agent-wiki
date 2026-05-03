@@ -117,13 +117,13 @@ function normalizeOperand(value: string): string {
   return value.replace(/['"]/g, "").toUpperCase();
 }
 
-function normalizeSqlRawText(rawText: string): string {
+export function normalizeSqlRawText(rawText: string): string {
   return rawText
     .toUpperCase()
     .replace(/([A-Z0-9_-])\s*\.\s*([A-Z0-9_-])/g, "$1.$2");
 }
 
-function extractSqlTableNames(rawText: string): string[] {
+export function extractSqlTableNames(rawText: string): string[] {
   const tables = new Set<string>();
   const normalized = normalizeSqlRawText(rawText);
   const patterns = [

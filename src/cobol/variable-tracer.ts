@@ -6,6 +6,7 @@
  */
 
 import type { CobolAST, StatementNode } from "./types.js";
+import { extractSqlTableNames } from "./extractors.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -271,27 +272,10 @@ function edgesFromStatement(
 // SQL host variable dataflow edges
 // ---------------------------------------------------------------------------
 
-// Extracts table names from an uppercase SQL rawText string.
-function sqlTableNames(upper: string): string[] {
-  const tables = new Set<string>();
-  const patterns = [
-    /\bFROM\s+([A-Z][A-Z0-9_.-]*)/g,
-    /\bJOIN\s+([A-Z][A-Z0-9_.-]*)/g,
-    /\bUPDATE\s+([A-Z][A-Z0-9_.-]*)/g,
-    /\bINSERT\s+INTO\s+([A-Z][A-Z0-9_.-]*)/g,
-    /\bDELETE\s+FROM\s+([A-Z][A-Z0-9_.-]*)/g,
-  ];
-  for (const pat of patterns) {
-    for (const m of upper.matchAll(pat)) {
-      if (m[1]) tables.add(m[1]);
-    }
-  }
-  return [...tables];
-}
-
 // Host variables in rawText appear as ": VARNAME" because the lexer emits ":" as a
 // separate token.  We match that pattern and return upper-cased variable names.
-const HOST_VAR_RE = /: ([A-Z][A-Z0-9-]+)/g;
+// Note: [A-Z0-9-]* (not +) — single-char host vars are valid COBOL.
+const HOST_VAR_RE = /: ([A-Z][A-Z0-9-]*)/g;
 
 function sqlHostVars(upper: string): string[] {
   return [...upper.matchAll(HOST_VAR_RE)].map((m) => m[1]);
@@ -310,7 +294,10 @@ function extractSqlEdgesFromStatement(
 
   const via = `EXEC SQL ${op}`;
   const line = stmt.loc.line;
-  const tables = sqlTableNames(upper);
+  // Reuse extractors.ts implementation — handles dot-normalization for schema-qualified names.
+  // Known limitation: table patterns also match inner SELECT/FROM in correlated subqueries;
+  // fixing that requires a full SQL parser.
+  const tables = extractSqlTableNames(stmt.rawText);
   const edges: Omit<DataflowEdge, "procedure" | "section">[] = [];
 
   if (op === "SELECT") {
@@ -340,15 +327,17 @@ function extractSqlEdgesFromStatement(
       }
     }
   } else if (op === "FETCH") {
-    // FETCH cursor INTO :writes — all host vars after INTO are writes
+    // FETCH cursor INTO :writes — use cursor name as the synthetic source node.
     const intoIdx = upper.indexOf(" INTO ");
     if (intoIdx < 0) return [];
     const writeVars = sqlHostVars(upper.substring(intoIdx + 6));
 
-    for (const table of tables) {
-      for (const wv of writeVars) {
-        edges.push({ from: `SQL:${table}`, to: wv, via, line });
-      }
+    // Cursor name is the first identifier between FETCH and INTO.
+    const fetchBody = upper.substring(upper.indexOf("FETCH ") + 6, intoIdx).trim();
+    const cursorName = fetchBody.split(/\s+/)[0] || "CURSOR";
+
+    for (const wv of writeVars) {
+      edges.push({ from: `SQL:${cursorName}`, to: wv, via, line });
     }
   } else if (op === "INSERT" || op === "UPDATE" || op === "DELETE") {
     const hvs = sqlHostVars(upper);

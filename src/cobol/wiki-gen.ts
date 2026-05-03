@@ -4,12 +4,13 @@
 
 import type { CobolCodeModel, CodeSummary } from "./extractors.js";
 import type { DataItemNode } from "./types.js";
+import type { NormalizedCodeModel } from "../code-analysis.js";
 
 // ---------------------------------------------------------------------------
 // Program page
 // ---------------------------------------------------------------------------
 
-export function generateProgramPage(model: CobolCodeModel, summary: CodeSummary): { path: string; content: string } {
+export function generateProgramPage(model: CobolCodeModel, summary: CodeSummary, normalized?: NormalizedCodeModel): { path: string; content: string } {
   const id = model.programId || "UNKNOWN";
   const lines: string[] = [];
 
@@ -131,6 +132,21 @@ export function generateProgramPage(model: CobolCodeModel, summary: CodeSummary)
       }
       lines.push("");
     }
+  }
+
+  // Dataflow edges from MOVE/COMPUTE/ADD/etc.
+  const dfEdges = (normalized?.relations ?? []).filter((r) => r.type === "dataflow");
+  if (dfEdges.length > 0) {
+    lines.push("## Dataflow Edges");
+    lines.push("");
+    lines.push("| From | To | Via | Line | Procedure |");
+    lines.push("|------|----|-----|------|-----------|");
+    for (const edge of dfEdges) {
+      lines.push(
+        `| ${edge.from} | ${edge.to} | ${String(edge.metadata?.via ?? "—")} | ${edge.loc.line} | ${String(edge.metadata?.procedure ?? "—")} |`
+      );
+    }
+    lines.push("");
   }
 
   return {

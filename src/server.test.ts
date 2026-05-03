@@ -2362,6 +2362,41 @@ describe("consolidated tool: code_query", () => {
     const wiki = freshWiki();
     await expect(handleTool(wiki, "code_query", {})).rejects.toThrow(/Unknown code_query query_type/);
   });
+
+  it("trace_variable: throws when path is missing", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "code_query", { query_type: "trace_variable", variable: "WS-FOO" })
+    ).rejects.toThrow("code_trace_variable requires 'path'");
+  });
+
+  it("trace_variable: throws when variable is missing", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "code_query", { query_type: "trace_variable", path: "SAMPLE.cbl" })
+    ).rejects.toThrow("code_trace_variable requires 'variable'");
+  });
+
+  it("procedure_flow: throws when path is missing", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "code_query", { query_type: "procedure_flow" })
+    ).rejects.toThrow("code_procedure_flow requires 'path'");
+  });
+
+  it("dataflow_edges: throws when path is missing", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "code_query", { query_type: "dataflow_edges" })
+    ).rejects.toThrow("code_dataflow_edges requires 'path'");
+  });
+
+  it("impact: throws when node_id is missing", async () => {
+    const wiki = freshWiki();
+    await expect(
+      handleTool(wiki, "code_query", { query_type: "impact" })
+    ).rejects.toThrow("code_impact requires 'node_id'");
+  });
 });
 
 describe("consolidated tool: knowledge_ingest", () => {

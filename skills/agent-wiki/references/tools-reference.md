@@ -308,23 +308,46 @@ Query parsed code knowledge.
 
 ```json
 {
-  "query_type": "(required) string — trace_variable | impact",
+  "query_type": "(required) string — trace_variable | impact | procedure_flow | field_lineage | dataflow_edges",
 
-  "path":     "[trace_variable] string — (required) Path in raw/ (e.g. 'PAYROLL.cbl')",
-  "variable": "[trace_variable] string — (required) Variable name (e.g. 'WS-TOTAL-SALARY')",
+  "path":          "[trace_variable/procedure_flow/dataflow_edges] string — (required) Path in raw/ (e.g. 'PAYROLL.cbl')",
+  "variable":      "[trace_variable] string — (required) Variable name (e.g. 'WS-TOTAL-SALARY')",
 
-  "node_id":  "[impact] string — (required) Canonical node ID or logical name (e.g. 'copybook:DATE-UTILS')",
-  "kind":     "[impact] string — Node kind: program | copybook | dataset | job | step",
-  "max_depth":"[impact] number — Max reverse-dependency depth (default: 10)",
-  "language": "[impact] string — Language plugin to use (default: 'cobol')"
+  "node_id":       "[impact] string — (required) Canonical node ID or logical name (e.g. 'copybook:DATE-UTILS')",
+  "kind":          "[impact] string — Node kind: program | copybook | dataset | job | step",
+  "max_depth":     "[impact/dataflow_edges] number — Max traversal depth (default: 10)",
+  "language":      "[impact/field_lineage] string — Language plugin to use (default: 'cobol')",
+
+  "procedure":     "[procedure_flow] string — Optional procedure/section/paragraph name to focus traversal from",
+  "procedure_kind":"[procedure_flow] string — Optional kind filter: section | paragraph",
+
+  "field_name":    "[field_lineage] string — Field name to query (e.g. 'CUSTOMER-ID')",
+  "qualified_name":"[field_lineage] string — Optional qualified field path (e.g. 'CUSTOMER-REC.CUSTOMER-ID')",
+  "copybook":      "[field_lineage] string — Optional copybook canonical id or logical name",
+
+  "from":          "[dataflow_edges] string — Filter: only edges whose source field matches",
+  "to":            "[dataflow_edges] string — Filter: only edges whose target field matches",
+  "field":         "[dataflow_edges] string — Starting field for transitive traversal (requires transitive: true)",
+  "transitive":    "[dataflow_edges] boolean — Follow edges transitively from `field` (default: false)",
+  "direction":     "[dataflow_edges] string — downstream | upstream | both (default: downstream)"
 }
 ```
 
 **query_type: trace_variable** — Traces all references to a variable in a parsed source file.
 Returns: `{ variable, file, references: [...] }`
 
-**query_type: impact** — Queries the compiled knowledge graph for downstream impact.
+**query_type: impact** — Queries the compiled knowledge graph for downstream impact. Requires compiled knowledge-graph artifact (run `code_parse` on COBOL files first).
 Returns: `{ query, source, summary, impactedByDepth: [...], diagnostics }`
+
+**query_type: procedure_flow** — Returns section/paragraph PERFORM flow for one source file.
+Returns: `{ path, procedure?, flow: [...] }`
+
+**query_type: field_lineage** — Queries compiled cross-file field lineage. Requires `field-lineage.json` artifact — built by parsing BOTH `.cbl`/`.cob` program files AND `.cpy` copybook files.
+Returns: `{ query, summary, deterministic: [...], inferredHighConfidence: [...], inferredAmbiguous: [...] }`
+
+**query_type: dataflow_edges** — Queries MOVE/COMPUTE/SQL/CALL dataflow edges for one source file. Pass `field + transitive: true` to follow chains. Requires `path`.
+Returns (non-transitive): `{ file, total, edges: [...] }`
+Returns (transitive): `{ file, field, direction, transitive, total_fields, total_edges, levels: [...] }`
 
 ---
 

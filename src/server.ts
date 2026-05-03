@@ -576,7 +576,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           "- `impact`: Query the compiled knowledge graph for downstream impact — returns affected programs, copybooks, or datasets grouped by dependency depth, with evidence and uncertainty markers.\n" +
           "- `procedure_flow`: Query parsed procedure/section PERFORM flow for one source file — returns section-level and paragraph-level flow, optionally focused on one procedure.\n" +
           "- `field_lineage`: Query compiled field-lineage artifacts — returns deterministic and inferred matches for one field, optionally narrowed to a copybook or qualified name.\n" +
-          "- `dataflow_edges`: Query intra-program MOVE/COMPUTE/ADD assignment edges — returns directed field→field dataflow. Filter by `from`/`to`, or set `field`+`transitive: true` to follow chains across the full graph.",
+          "- `dataflow_edges`: Query field-level dataflow edges — MOVE/COMPUTE/ADD assignment, EXEC SQL host-variable, and CALL USING parameter edges. Filter by `from`/`to`, or set `field`+`transitive: true` to follow chains across the full graph.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -2219,7 +2219,7 @@ export async function handleTool(
       const direction = (args.direction as string | undefined) ?? "downstream";
       const maxDepth = Math.min(50, Math.max(1, Math.floor((args.max_depth as number | undefined) ?? 10)));
       const model = await loadParsedNormalizedModel(wiki, filePath);
-      const allEdges = model.relations.filter((r) => r.type === "dataflow");
+      const allEdges = model.relations.filter((r) => r.type === "dataflow" || r.type === "call-param");
 
       const formatEdge = (r: (typeof allEdges)[0]) => ({
         from: r.from,

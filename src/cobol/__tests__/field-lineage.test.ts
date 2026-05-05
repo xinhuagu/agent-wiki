@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { parse } from "../parser.js";
 import { extractModel } from "../extractors.js";
-import { buildFieldLineage, generateFieldLineagePage } from "../field-lineage.js";
+import { attachCallBoundLineage, buildFieldLineage, generateFieldLineagePage } from "../field-lineage.js";
+import { buildCallBoundLineage } from "../call-boundary-lineage.js";
 
 function model(source: string, filename: string) {
   return extractModel(parse(source, filename));
@@ -295,6 +296,52 @@ describe("COBOL field lineage", () => {
     ]);
 
     expect(lineage).toBeNull();
+  });
+
+  it("renders call-bound section with per-group summary highlighting high-confidence count", () => {
+    const callerSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-REC.
+           05  WS-FIELD-A      PIC X(5).
+           05  WS-OTHER        PIC X(5).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "CALLEE" USING WS-REC.
+           STOP RUN.
+`;
+    const calleeSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-REC.
+           05  LK-FIELD-A      PIC X(5).
+           05  RENAMED-CHILD   PIC X(5).
+       PROCEDURE DIVISION USING LK-REC.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+    const callLineage = buildCallBoundLineage([
+      model(callerSrc, "CALLER.cbl"),
+      model(calleeSrc, "CALLEE.cbl"),
+    ]);
+    const lineage = attachCallBoundLineage(null, callLineage);
+    expect(lineage).not.toBeNull();
+
+    const page = generateFieldLineagePage(lineage!);
+    // No copybook content, so those sections are omitted entirely.
+    expect(page.content).not.toContain("Copybook Usage");
+    expect(page.content).not.toContain("Shared Copybook-Backed Fields");
+    expect(page.content).not.toContain("Inferred Cross-Copybook Candidates");
+    // One name diverges (WS-OTHER ↔ RENAMED-CHILD), so the per-group summary
+    // should report the mixed deterministic/high-confidence breakdown.
+    expect(page.content).toMatch(/\d+ pair\(s\): \d+ deterministic, 1 high-confidence/);
+    expect(page.content).toContain("review below");
   });
 
   it("generates a lineage wiki summary page", () => {

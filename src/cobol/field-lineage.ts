@@ -636,92 +636,105 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
   lines.push("---");
   lines.push("");
 
+  const overviewHasCopybook = lineage.copybookUsage.length > 0
+    || lineage.deterministic.length > 0
+    || lineage.inferredHighConfidence.length > 0
+    || lineage.inferredAmbiguous.length > 0;
   lines.push("## Overview");
   lines.push("");
   lines.push("| Metric | Count |");
   lines.push("|--------|-------|");
-  lines.push(`| Deterministic copybooks | ${lineage.summary.deterministic.copybooks} |`);
-  lines.push(`| Deterministic programs | ${lineage.summary.deterministic.programs} |`);
-  lines.push(`| Deterministic shared fields | ${lineage.summary.deterministic.fields} |`);
-  lines.push(`| Inferred copybooks | ${lineage.summary.inferred.copybooks} |`);
-  lines.push(`| Inferred programs | ${lineage.summary.inferred.programs} |`);
-  lines.push(`| Inferred high-confidence candidates | ${lineage.summary.inferred.highConfidence} |`);
-  lines.push(`| Inferred ambiguous candidates | ${lineage.summary.inferred.ambiguous} |`);
+  if (overviewHasCopybook) {
+    lines.push(`| Deterministic copybooks | ${lineage.summary.deterministic.copybooks} |`);
+    lines.push(`| Deterministic programs | ${lineage.summary.deterministic.programs} |`);
+    lines.push(`| Deterministic shared fields | ${lineage.summary.deterministic.fields} |`);
+    lines.push(`| Inferred copybooks | ${lineage.summary.inferred.copybooks} |`);
+    lines.push(`| Inferred programs | ${lineage.summary.inferred.programs} |`);
+    lines.push(`| Inferred high-confidence candidates | ${lineage.summary.inferred.highConfidence} |`);
+    lines.push(`| Inferred ambiguous candidates | ${lineage.summary.inferred.ambiguous} |`);
+  }
   if (callBound) {
     lines.push(`| Call sites with USING args | ${callBound.summary.callSites} |`);
     lines.push(`| Call-bound field pairs | ${callBound.entries.length} |`);
   }
   lines.push("");
 
-  lines.push("## Copybook Usage");
-  lines.push("");
-  lines.push("Deterministic usage only. Inferred matches below do not affect these counts.");
-  lines.push("");
-  if (lineage.copybookUsage.length === 0) {
-    lines.push("No deterministic shared-copybook usage found.");
+  const hasCopybookContent = lineage.copybookUsage.length > 0
+    || lineage.deterministic.length > 0
+    || lineage.inferredHighConfidence.length > 0
+    || lineage.inferredAmbiguous.length > 0;
+
+  if (hasCopybookContent) {
+    lines.push("## Copybook Usage");
     lines.push("");
-  } else {
-    lines.push("| Copybook | Programs | Field Count |");
-    lines.push("|----------|----------|-------------|");
-    for (const usage of lineage.copybookUsage) {
-      lines.push(`| ${displayLabel(usage.copybookId)} | ${formatPrograms(usage.programs)} | ${usage.fieldCount} |`);
+    lines.push("Deterministic usage only. Inferred matches below do not affect these counts.");
+    lines.push("");
+    if (lineage.copybookUsage.length === 0) {
+      lines.push("No deterministic shared-copybook usage found.");
+      lines.push("");
+    } else {
+      lines.push("| Copybook | Programs | Field Count |");
+      lines.push("|----------|----------|-------------|");
+      for (const usage of lineage.copybookUsage) {
+        lines.push(`| ${displayLabel(usage.copybookId)} | ${formatPrograms(usage.programs)} | ${usage.fieldCount} |`);
+      }
+      lines.push("");
+    }
+
+    lines.push("## Shared Copybook-Backed Fields");
+    lines.push("");
+    if (lineage.deterministic.length === 0) {
+      lines.push("No deterministic shared fields found.");
+    } else {
+      lines.push("| Copybook | Field | Structure | Programs | PIC | Linkage |");
+      lines.push("|----------|-------|-----------|----------|-----|---------|");
+      for (const entry of lineage.deterministic) {
+        lines.push(
+          `| ${formatCopybooks(entry.copybooks)} | ${entry.fieldName} | ${entry.qualifiedNames.join("<br>")} | ${formatPrograms(entry.programs)} | ${entry.pictures.join(", ") || "—"} | ${entry.linkage} |`
+        );
+      }
+    }
+    lines.push("");
+
+    lines.push("## Inferred Cross-Copybook Candidates");
+    lines.push("");
+    lines.push("These candidates are evidence-backed but not deterministic. They are intentionally separated from copybook usage and deterministic participation counts.");
+    lines.push("");
+
+    lines.push("### High Confidence");
+    lines.push("");
+    if (lineage.inferredHighConfidence.length === 0) {
+      lines.push("No high-confidence inferred candidates found.");
+    } else {
+      lines.push("| Field | Left | Right | Programs | Evidence |");
+      lines.push("|-------|------|-------|----------|----------|");
+      for (const entry of lineage.inferredHighConfidence) {
+        const evidence = [
+          entry.evidence.parentContextMatch,
+          entry.evidence.siblingOverlap.length > 0 ? `siblings: ${entry.evidence.siblingOverlap.join(", ")}` : undefined,
+        ].filter((value): value is string => Boolean(value)).join("; ");
+        lines.push(
+          `| ${entry.fieldName} | ${displayLabel(entry.left.copybook.id)}<br>${formatInferredStructure(entry.left)} | ${displayLabel(entry.right.copybook.id)}<br>${formatInferredStructure(entry.right)} | ${formatInferredPrograms(entry.left, entry.right)} | ${evidence || "—"} |`
+        );
+      }
+    }
+    lines.push("");
+
+    lines.push("### Ambiguous");
+    lines.push("");
+    if (lineage.inferredAmbiguous.length === 0) {
+      lines.push("No ambiguous inferred candidates found.");
+    } else {
+      lines.push("| Field | Left | Right | Programs | Ambiguity |");
+      lines.push("|-------|------|-------|----------|-----------|");
+      for (const entry of lineage.inferredAmbiguous) {
+        lines.push(
+          `| ${entry.fieldName} | ${displayLabel(entry.left.copybook.id)}<br>${formatInferredStructure(entry.left)} | ${displayLabel(entry.right.copybook.id)}<br>${formatInferredStructure(entry.right)} | ${formatInferredPrograms(entry.left, entry.right)} | ${entry.evidence.competingMatches} competing match(es) |`
+        );
+      }
     }
     lines.push("");
   }
-
-  lines.push("## Shared Copybook-Backed Fields");
-  lines.push("");
-  if (lineage.deterministic.length === 0) {
-    lines.push("No deterministic shared fields found.");
-  } else {
-    lines.push("| Copybook | Field | Structure | Programs | PIC | Linkage |");
-    lines.push("|----------|-------|-----------|----------|-----|---------|");
-    for (const entry of lineage.deterministic) {
-      lines.push(
-        `| ${formatCopybooks(entry.copybooks)} | ${entry.fieldName} | ${entry.qualifiedNames.join("<br>")} | ${formatPrograms(entry.programs)} | ${entry.pictures.join(", ") || "—"} | ${entry.linkage} |`
-      );
-    }
-  }
-  lines.push("");
-
-  lines.push("## Inferred Cross-Copybook Candidates");
-  lines.push("");
-  lines.push("These candidates are evidence-backed but not deterministic. They are intentionally separated from copybook usage and deterministic participation counts.");
-  lines.push("");
-
-  lines.push("### High Confidence");
-  lines.push("");
-  if (lineage.inferredHighConfidence.length === 0) {
-    lines.push("No high-confidence inferred candidates found.");
-  } else {
-    lines.push("| Field | Left | Right | Programs | Evidence |");
-    lines.push("|-------|------|-------|----------|----------|");
-    for (const entry of lineage.inferredHighConfidence) {
-      const evidence = [
-        entry.evidence.parentContextMatch,
-        entry.evidence.siblingOverlap.length > 0 ? `siblings: ${entry.evidence.siblingOverlap.join(", ")}` : undefined,
-      ].filter((value): value is string => Boolean(value)).join("; ");
-      lines.push(
-        `| ${entry.fieldName} | ${displayLabel(entry.left.copybook.id)}<br>${formatInferredStructure(entry.left)} | ${displayLabel(entry.right.copybook.id)}<br>${formatInferredStructure(entry.right)} | ${formatInferredPrograms(entry.left, entry.right)} | ${evidence || "—"} |`
-      );
-    }
-  }
-  lines.push("");
-
-  lines.push("### Ambiguous");
-  lines.push("");
-  if (lineage.inferredAmbiguous.length === 0) {
-    lines.push("No ambiguous inferred candidates found.");
-  } else {
-    lines.push("| Field | Left | Right | Programs | Ambiguity |");
-    lines.push("|-------|------|-------|----------|-----------|");
-    for (const entry of lineage.inferredAmbiguous) {
-      lines.push(
-        `| ${entry.fieldName} | ${displayLabel(entry.left.copybook.id)}<br>${formatInferredStructure(entry.left)} | ${displayLabel(entry.right.copybook.id)}<br>${formatInferredStructure(entry.right)} | ${formatInferredPrograms(entry.left, entry.right)} | ${entry.evidence.competingMatches} competing match(es) |`
-      );
-    }
-  }
-  lines.push("");
 
   if (callBound && callBound.entries.length > 0) {
     lines.push("## Call Boundary Field Lineage");
@@ -732,7 +745,14 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
     lines.push("");
     const grouped = groupCallBoundByPair(callBound.entries);
     for (const group of grouped) {
+      const detCount = group.entries.filter((e) => e.confidence === "deterministic").length;
+      const highCount = group.entries.filter((e) => e.confidence === "high").length;
       lines.push(`### ${displayLabel(group.callerProgramId)} → ${displayLabel(group.calleeProgramId)}`);
+      lines.push("");
+      const summary = highCount > 0
+        ? `${group.entries.length} pair(s): ${detCount} deterministic, ${highCount} high-confidence (name divergence — review below).`
+        : `${group.entries.length} pair(s), all deterministic.`;
+      lines.push(`*${summary}*`);
       lines.push("");
       lines.push("| Pos | Caller | Callee | Confidence | Evidence |");
       lines.push("|-----|--------|--------|------------|----------|");

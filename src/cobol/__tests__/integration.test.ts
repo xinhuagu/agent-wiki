@@ -390,6 +390,14 @@ describe("COBOL MCP tools integration", () => {
     // even when there's no shared-copybook lineage.
     expect(page).toContain("Call sites with USING args");
     expect(page).toContain("Call-bound field pairs");
+    // Per-group summary draws the eye to the high-confidence tier when present;
+    // here all names align so the summary should report all-deterministic.
+    expect(page).toMatch(/\d+ pair\(s\), all deterministic/);
+    // No copybook lineage in this fixture, so the copybook sections should
+    // be omitted entirely (not rendered with "no data" placeholders).
+    expect(page).not.toContain("Copybook Usage");
+    expect(page).not.toContain("Shared Copybook-Backed Fields");
+    expect(page).not.toContain("Inferred Cross-Copybook Candidates");
   });
 
   it("code_parse persists DB2 references into model artifacts and wiki summaries", async () => {

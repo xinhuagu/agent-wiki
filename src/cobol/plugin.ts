@@ -65,6 +65,40 @@ function flattenDataItems(items: DataItemNode[], parent?: string): CodeSymbol[] 
   return symbols;
 }
 
+/**
+ * Backfill missing array fields on a parsed model loaded from disk so
+ * downstream consumers can rely on the current schema even when reading
+ * artifacts produced by older releases.
+ *
+ * Defensive over the entire CobolCodeModel array surface: even though some
+ * fields date back to the original schema, real-world deployments accumulate
+ * artifacts from many releases — being narrow risks crashing on whichever
+ * field happens to be missing in the oldest file. Fields added across phases
+ * (linkageItems, db2References, cicsReferences, fileAccesses, calls[].usingArgs)
+ * are the most likely to be absent, but this normalization covers all of them.
+ */
+export function migrateLoadedModel(raw: unknown): CobolCodeModel {
+  const m = raw as Partial<CobolCodeModel> & Record<string, unknown>;
+  if (!Array.isArray(m.divisions)) m.divisions = [];
+  if (!Array.isArray(m.sections)) m.sections = [];
+  if (!Array.isArray(m.paragraphs)) m.paragraphs = [];
+  if (!Array.isArray(m.calls)) m.calls = [];
+  if (!Array.isArray(m.performs)) m.performs = [];
+  if (!Array.isArray(m.copies)) m.copies = [];
+  if (!Array.isArray(m.dataItems)) m.dataItems = [];
+  if (!Array.isArray(m.linkageItems)) m.linkageItems = [];
+  if (!Array.isArray(m.fileDefinitions)) m.fileDefinitions = [];
+  if (!Array.isArray(m.db2References)) m.db2References = [];
+  if (!Array.isArray(m.cicsReferences)) m.cicsReferences = [];
+  if (!Array.isArray(m.fileAccesses)) m.fileAccesses = [];
+  for (const call of m.calls) {
+    if (!Array.isArray((call as { usingArgs?: unknown }).usingArgs)) {
+      (call as { usingArgs: string[] }).usingArgs = [];
+    }
+  }
+  return m as CobolCodeModel;
+}
+
 function loadCobolModels(parsedDir: string): CobolCodeModel[] {
   const modelPaths: string[] = [];
 
@@ -88,7 +122,8 @@ function loadCobolModels(parsedDir: string): CobolCodeModel[] {
   const models: CobolCodeModel[] = [];
   for (const full of modelPaths.sort((a, b) => a.localeCompare(b))) {
     try {
-      models.push(JSON.parse(readFileSync(full, "utf-8")));
+      const raw = JSON.parse(readFileSync(full, "utf-8"));
+      models.push(migrateLoadedModel(raw));
     } catch {
       // Skip malformed files
     }

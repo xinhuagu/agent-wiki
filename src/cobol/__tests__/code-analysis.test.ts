@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { readFileSync, mkdtempSync, rmSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, existsSync } from "fs";
 import { join, resolve } from "path";
 import { tmpdir } from "os";
 import { parse } from "../parser.js";
 import { extractModel } from "../extractors.js";
-import { cobolPlugin } from "../plugin.js";
+import { cobolPlugin, migrateLoadedModel } from "../plugin.js";
 import {
   registerPlugin,
   getPluginForFile,
@@ -437,6 +437,101 @@ describe("code-analysis plugin system", () => {
       // Verify page was written to wiki/
       const depsPath = join(tmp, "wiki", "richlang", "deps.md");
       expect(existsSync(depsPath)).toBe(true);
+    });
+  });
+
+  describe("loaded-model schema migration", () => {
+    it("backfills array fields missing from older parsed artifacts", () => {
+      // Simulate a model.json written by an older release before #66 / #67 /
+      // earlier extractor work added these fields. The lineage builders
+      // access .length on these arrays unconditionally, so missing fields
+      // must be normalized to [] at the load boundary.
+      const legacy = {
+        programId: "OLD",
+        sourceFile: "OLD.cbl",
+        divisions: [],
+        sections: [],
+        paragraphs: [],
+        calls: [
+          { target: "X", fromParagraph: "MAIN", loc: { line: 1, column: 1 } },
+        ],
+        performs: [],
+        copies: [],
+        dataItems: [],
+        // Missing: linkageItems, db2References, cicsReferences, fileAccesses,
+        // and calls[].usingArgs.
+      };
+      const migrated = migrateLoadedModel(legacy);
+      expect(migrated.linkageItems).toEqual([]);
+      expect(migrated.db2References).toEqual([]);
+      expect(migrated.cicsReferences).toEqual([]);
+      expect(migrated.fileAccesses).toEqual([]);
+      expect(migrated.calls[0].usingArgs).toEqual([]);
+    });
+
+    it("leaves current-schema models untouched", () => {
+      const current = {
+        programId: "NEW",
+        sourceFile: "NEW.cbl",
+        divisions: [],
+        sections: [],
+        paragraphs: [],
+        calls: [
+          { target: "X", fromParagraph: "MAIN", usingArgs: ["A", "B"], loc: { line: 1, column: 1 } },
+        ],
+        performs: [],
+        copies: [],
+        dataItems: [],
+        linkageItems: [{ name: "LK-REC", level: 1, children: [], loc: { line: 1, column: 1 }, type: "DataItem" }],
+        db2References: [{ tables: ["T"], rawText: "EXEC SQL ...", loc: { line: 1, column: 1 } }],
+        cicsReferences: [],
+        fileAccesses: [],
+      };
+      const migrated = migrateLoadedModel(current);
+      expect(migrated.calls[0].usingArgs).toEqual(["A", "B"]);
+      expect(migrated.linkageItems).toHaveLength(1);
+      expect(migrated.db2References).toHaveLength(1);
+    });
+
+    it("buildDerivedArtifacts does not crash when parsed dir contains legacy artifacts", () => {
+      // End-to-end regression for the production crash we fixed:
+      // Cannot read properties of undefined (reading 'length').
+      // The crash path: loadCobolModels → buildCallBoundLineage / buildDb2TableLineage
+      // accessing .length on a missing field. With migration in place this should
+      // gracefully degrade rather than throw.
+      const tmpDir = mkdtempSync(join(tmpdir(), "cobol-legacy-"));
+      const parsedCobolDir = join(tmpDir, "raw", "parsed", "cobol");
+      try {
+        // Simulate a very old artifact missing nearly every newer field.
+        const veryOld = {
+          programId: "VERYOLD",
+          sourceFile: "VERYOLD.cbl",
+          // No divisions/sections/paragraphs/calls/performs/copies/dataItems/...
+        };
+        // And a less-old artifact that has the original schema but no Phase 1+ fields.
+        const lessOld = {
+          programId: "LESSOLD",
+          sourceFile: "LESSOLD.cbl",
+          divisions: [],
+          sections: [],
+          paragraphs: [],
+          calls: [{ target: "OTHER", fromParagraph: "A", loc: { line: 1, column: 1 } }],
+          performs: [],
+          copies: [],
+          dataItems: [],
+          fileDefinitions: [],
+          // Missing: linkageItems, db2References, cicsReferences, fileAccesses,
+          // and calls[].usingArgs.
+        };
+        mkdirSync(parsedCobolDir, { recursive: true });
+        writeFileSync(join(parsedCobolDir, "VERYOLD.model.json"), JSON.stringify(veryOld));
+        writeFileSync(join(parsedCobolDir, "LESSOLD.model.json"), JSON.stringify(lessOld));
+
+        // The plugin builds artifacts from the parsed dir. Pre-fix this would throw.
+        expect(() => cobolPlugin.buildDerivedArtifacts!(parsedCobolDir)).not.toThrow();
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 });

@@ -806,6 +806,64 @@ describe("server tool: wiki_search", () => {
   });
 });
 
+describe("wiki_search + wiki_search_read: evidence envelope (phase 1)", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("includes an evidence envelope on every wiki_search response", async () => {
+    const wiki = freshWiki();
+    wiki.write("topic.md", "---\ntitle: Transformer Models\nsources: [raw/paper.pdf]\n---\nAttention.");
+    const result = await handleTool(wiki, "wiki_search", { query: "Transformer" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.evidence).toBeDefined();
+    expect(["strong", "weak", "absent"]).toContain(parsed.evidence.confidence);
+    expect(["deterministic", "inferred", "synthesized", "unsupported"]).toContain(
+      parsed.evidence.basis,
+    );
+    expect(typeof parsed.evidence.abstain).toBe("boolean");
+    expect(typeof parsed.evidence.rationale).toBe("string");
+    expect(Array.isArray(parsed.evidence.provenance)).toBe(true);
+  });
+
+  it("returns abstain envelope when no results found", async () => {
+    const wiki = freshWiki();
+    wiki.write("unrelated.md", "---\ntitle: Soup\n---\nA recipe.");
+    const result = await handleTool(wiki, "wiki_search", { query: "kubernetes orchestration" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.results).toHaveLength(0);
+    expect(parsed.evidence.abstain).toBe(true);
+    expect(parsed.evidence.confidence).toBe("absent");
+    expect(parsed.evidence.basis).toBe("unsupported");
+  });
+
+  it("wiki_search_read response carries an evidence envelope", async () => {
+    const wiki = freshWiki();
+    wiki.write("page.md", "---\ntitle: Test\nsources: [raw/source.md]\n---\n## Section\nContent about widgets.");
+    const result = await handleTool(wiki, "wiki_search_read", { query: "widgets", readTopN: 1 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.evidence).toBeDefined();
+    expect(parsed.evidence.rationale).toBeTypeOf("string");
+  });
+
+  it("wiki_search_read downgrades envelope when top page has no sources", async () => {
+    const wiki = freshWiki();
+    // Two pages, both about the topic. The top match has empty sources.
+    wiki.write("a.md", "---\ntitle: Widget Guide\nsources: []\n---\nWidgets and gadgets and gizmos.");
+    wiki.write("b.md", "---\ntitle: Different\nsources: [raw/x.md]\n---\nWidgets in passing.");
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Widget Guide gadgets gizmos", readTopN: 1 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.evidence.rationale).toMatch(/no sources/);
+  });
+
+  it("wiki_search_read does NOT downgrade for explicit synthesis pages", async () => {
+    const wiki = freshWiki();
+    wiki.write("compiled.md", "---\ntitle: Compiled View\nsources: []\nsynthesis: true\n---\nAggregated knowledge here.");
+    const result = await handleTool(wiki, "wiki_search_read", { query: "Compiled aggregated knowledge", readTopN: 1 });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.evidence.rationale).not.toMatch(/no sources/);
+  });
+});
+
 describe("server tool: wiki_search_read", () => {
   beforeEach(cleanUp);
   afterEach(cleanUp);

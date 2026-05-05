@@ -19,6 +19,7 @@ jobs:
     permissions:
       contents: write     # tag + create release
       id-token: write     # npm provenance via OIDC
+      packages: write     # GitHub Packages publish (uses PACKAGES_TOKEN, not GITHUB_TOKEN)
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,3 +64,27 @@ jobs:
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Publish a mirror copy to GitHub Packages under @xinhuagu/agent-wiki.
+      # GitHub Packages requires the npm scope to match the GitHub user/org;
+      # we rewrite package.json in-place before publishing. PACKAGES_TOKEN
+      # is a personal access token with `write:packages` scope (the default
+      # GITHUB_TOKEN cannot publish to user-scoped GH Packages). If the
+      # secret is unset the step exits early so first-time releases without
+      # the secret still succeed.
+      - name: Publish to GitHub Packages
+        env:
+          PACKAGES_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+        run: |
+          if [ -z "$PACKAGES_TOKEN" ]; then
+            echo "PACKAGES_TOKEN secret is unset — skipping GitHub Packages publish."
+            exit 0
+          fi
+          echo "@xinhuagu:registry=https://npm.pkg.github.com" > .npmrc
+          echo "//npm.pkg.github.com/:_authToken=${PACKAGES_TOKEN}" >> .npmrc
+          node -e "
+            const pkg = require('./package.json');
+            pkg.name = '@xinhuagu/agent-wiki';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          npm publish --access public

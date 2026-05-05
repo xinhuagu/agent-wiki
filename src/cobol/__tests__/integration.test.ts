@@ -400,6 +400,65 @@ describe("COBOL MCP tools integration", () => {
     expect(page).not.toContain("Inferred Cross-Copybook Candidates");
   });
 
+  it("code_parse persists DB2 cross-program lineage in field-lineage.json and renders the wiki section", async () => {
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-NAME            PIC X(30).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (NAME)
+             VALUES (:WS-NAME) END-EXEC.
+           STOP RUN.
+`;
+    const reader = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. READER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-NAME            PIC X(30).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL SELECT NAME INTO :WS-NAME
+             FROM CUSTOMERS END-EXEC.
+           STOP RUN.
+`;
+
+    wiki.rawAdd("WRITER.cbl", { content: writer });
+    wiki.rawAdd("READER.cbl", { content: reader });
+
+    await handleTool(wiki, "code_parse", { path: "WRITER.cbl" });
+    const result = await handleTool(wiki, "code_parse", { path: "READER.cbl" });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.artifacts).toContain("raw/parsed/cobol/field-lineage.json");
+    expect(parsed.wikiPages).toContain("cobol/field-lineage.md");
+
+    const lineagePath = join(tmp, "raw", "parsed", "cobol", "field-lineage.json");
+    const pagePath = join(tmp, "wiki", "cobol", "field-lineage.md");
+    const lineage = JSON.parse(readFileSync(lineagePath, "utf-8"));
+
+    expect(lineage.db2Lineage).toBeTruthy();
+    expect(lineage.db2Lineage.summary.sharedTables).toBe(1);
+    expect(lineage.db2Lineage.entries).toHaveLength(1);
+    const entry = lineage.db2Lineage.entries[0];
+    expect(entry.table).toBe("CUSTOMERS");
+    expect(entry.writer.programId).toBe("program:WRITER");
+    expect(entry.writer.operations).toEqual(["INSERT"]);
+    expect(entry.reader.programId).toBe("program:READER");
+    expect(entry.reader.operations).toEqual(["SELECT"]);
+
+    const page = readFileSync(pagePath, "utf-8");
+    expect(page).toContain("DB2 Table Lineage");
+    expect(page).toContain("CUSTOMERS");
+    expect(page).toContain("Shared DB2 tables");
+    expect(page).toContain("DB2 cross-program pairs");
+  });
+
   it("code_parse persists DB2 references into model artifacts and wiki summaries", async () => {
     const source = readFileSync(join(FIXTURES, "CUSTOMER-DB2.cbl"), "utf-8");
     wiki.rawAdd("CUSTOMER-DB2.cbl", { content: source });

@@ -2,6 +2,7 @@ import type { CobolCodeModel } from "./extractors.js";
 import type { DataItemNode, SourceLocation } from "./types.js";
 import { resolveCanonicalId, displayLabel } from "./graph.js";
 import type { CallBoundLineage, SerializedCallBoundLineageEntry } from "./call-boundary-lineage.js";
+import type { Db2Lineage } from "./db2-table-lineage.js";
 
 export type LineageLinkage = "deterministic";
 export type InferredLineageConfidence = "high" | "ambiguous";
@@ -72,6 +73,12 @@ export interface SerializedFieldLineage {
   inferredHighConfidence: SerializedInferredFieldLineageEntry[];
   inferredAmbiguous: SerializedInferredFieldLineageEntry[];
   callBoundLineage?: CallBoundLineage | null;
+  db2Lineage?: Db2Lineage | null;
+}
+
+export interface FieldLineageAttachments {
+  callBound?: CallBoundLineage | null;
+  db2?: Db2Lineage | null;
 }
 
 function emptyCopybookLineage(): SerializedFieldLineage {
@@ -87,13 +94,27 @@ function emptyCopybookLineage(): SerializedFieldLineage {
   };
 }
 
+export function combineFieldLineage(
+  copybookLineage: SerializedFieldLineage | null,
+  attachments: FieldLineageAttachments = {},
+): SerializedFieldLineage | null {
+  const callBound = attachments.callBound ?? null;
+  const db2 = attachments.db2 ?? null;
+  if (!copybookLineage && !callBound && !db2) return null;
+  const base = copybookLineage ?? emptyCopybookLineage();
+  return {
+    ...base,
+    callBoundLineage: callBound,
+    db2Lineage: db2,
+  };
+}
+
+/** @deprecated kept for compatibility — prefer combineFieldLineage. */
 export function attachCallBoundLineage(
   copybookLineage: SerializedFieldLineage | null,
   callLineage: CallBoundLineage | null,
 ): SerializedFieldLineage | null {
-  if (!copybookLineage && !callLineage) return null;
-  const base = copybookLineage ?? emptyCopybookLineage();
-  return { ...base, callBoundLineage: callLineage };
+  return combineFieldLineage(copybookLineage, { callBound: callLineage });
 }
 
 interface FieldConsumer {
@@ -607,6 +628,7 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
 export function generateFieldLineagePage(lineage: SerializedFieldLineage): { path: string; content: string } {
   const lines: string[] = [];
   const callBound = lineage.callBoundLineage ?? null;
+  const db2 = lineage.db2Lineage ?? null;
   const sources = sortUnique([
     ...lineage.copybookUsage.map((entry) => `"raw/${entry.sourceFile}"`),
     ...lineage.copybookUsage.flatMap((entry) => entry.programs.map((program) => `"raw/${program.sourceFile}"`)),
@@ -625,6 +647,10 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
     ...(callBound?.entries.flatMap((entry) => [
       `"raw/${entry.caller.sourceFile}"`,
       `"raw/${entry.callee.sourceFile}"`,
+    ]) ?? []),
+    ...(db2?.entries.flatMap((entry) => [
+      `"raw/${entry.writer.sourceFile}"`,
+      `"raw/${entry.reader.sourceFile}"`,
     ]) ?? []),
   ]);
 
@@ -656,6 +682,10 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
   if (callBound) {
     lines.push(`| Call sites with USING args | ${callBound.summary.callSites} |`);
     lines.push(`| Call-bound field pairs | ${callBound.entries.length} |`);
+  }
+  if (db2) {
+    lines.push(`| Shared DB2 tables | ${db2.summary.sharedTables} |`);
+    lines.push(`| DB2 cross-program pairs | ${db2.entries.length} |`);
   }
   lines.push("");
 
@@ -768,6 +798,25 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
       }
       lines.push("");
     }
+  }
+
+  if (db2 && db2.entries.length > 0) {
+    lines.push("## DB2 Table Lineage");
+    lines.push("");
+    lines.push(`Cross-program field flow inferred from shared DB2 tables. A pair appears when one program writes to a table (\`INSERT\` / \`UPDATE\` / \`DELETE\` / \`MERGE\`) and another reads from it (\`SELECT\` / \`FETCH\`). Host variables on each side are listed; mapping them to specific columns requires a SQL parser and is out of scope here.`);
+    lines.push("");
+    lines.push(`Coverage: ${db2.summary.sharedTables} shared table(s), ${db2.entries.length} writer→reader pair(s).`);
+    lines.push("");
+    lines.push("| Table | Writer | Writer Ops | Writer Host Vars | Reader | Reader Ops | Reader Host Vars |");
+    lines.push("|-------|--------|------------|------------------|--------|------------|------------------|");
+    for (const entry of db2.entries) {
+      const writerVars = entry.writer.hostVars.length > 0 ? entry.writer.hostVars.join(", ") : "—";
+      const readerVars = entry.reader.hostVars.length > 0 ? entry.reader.hostVars.join(", ") : "—";
+      lines.push(
+        `| ${entry.table} | ${displayLabel(entry.writer.programId)} | ${entry.writer.operations.join(", ")} | ${writerVars} | ${displayLabel(entry.reader.programId)} | ${entry.reader.operations.join(", ")} | ${readerVars} |`
+      );
+    }
+    lines.push("");
   }
 
   return {

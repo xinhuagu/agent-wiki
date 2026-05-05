@@ -10,8 +10,9 @@ import { join } from "node:path";
 import { parse } from "./parser.js";
 import { extractModel, generateSummary } from "./extractors.js";
 import { traceVariable as cobolTraceVariable, extractDataflowEdges, extractCallEdges } from "./variable-tracer.js";
-import { attachCallBoundLineage, buildFieldLineage, generateFieldLineagePage } from "./field-lineage.js";
+import { combineFieldLineage, buildFieldLineage, generateFieldLineagePage } from "./field-lineage.js";
 import { buildCallBoundLineage } from "./call-boundary-lineage.js";
+import { buildDb2TableLineage } from "./db2-table-lineage.js";
 import { generateProgramPage, generateCopybookPage, generateCallGraphPage } from "./wiki-gen.js";
 import type { CobolAST, DataItemNode } from "./types.js";
 import type { CobolCodeModel } from "./extractors.js";
@@ -358,7 +359,11 @@ export const cobolPlugin: CodeAnalysisPlugin = {
 
     const copybookLineage = buildFieldLineage(models);
     const callLineage = buildCallBoundLineage(models);
-    const lineage = attachCallBoundLineage(copybookLineage, callLineage);
+    const db2Lineage = buildDb2TableLineage(models);
+    const lineage = combineFieldLineage(copybookLineage, {
+      callBound: callLineage,
+      db2: db2Lineage,
+    });
     if (!lineage) {
       return {
         artifacts: [],

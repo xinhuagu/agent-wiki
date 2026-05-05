@@ -16,6 +16,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { buildSearchEnvelope, downgradeForReadPage } from "./evidence-search.js";
 import { join, resolve, basename, extname } from "node:path";
 import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob, safePath } from "./wiki.js";
 import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
@@ -1772,12 +1773,15 @@ export async function handleTool(
             return true;
           }).slice(0, searchLimit)
         : rawResults;
+      const envelope = buildSearchEnvelope(results, searchQuery);
+
       // Knowledge gap: guide the agent when the search finds nothing
       if (results.length === 0) {
         return JSON.stringify({
           results: [],
           count: 0,
           knowledge_gap: buildKnowledgeGap(searchQuery, wiki, filterType),
+          evidence: envelope,
         }, null, 2);
       }
       // Combined search+read mode (read_top_n) — supersedes include_content when both are set
@@ -1801,17 +1805,29 @@ export async function handleTool(
         const nextReads = uniquePaths.slice(readTopN);
         const pages = readPagesContent(wiki, toRead, sectionFilter, perPageLimit, includeToc);
 
+        // Downgrade envelope based on the top read page's metadata.
+        const topPage = toRead.length > 0 ? wiki.read(toRead[0]!) : null;
+        const readEnvelope = topPage
+          ? downgradeForReadPage(envelope, {
+              sources: topPage.sources,
+              synthesis: topPage.frontmatter.synthesis === true,
+              legacyUnsupported: topPage.frontmatter.legacyUnsupported === true,
+              lastEditISO: topPage.updated,
+            })
+          : envelope;
+
         return JSON.stringify({
           results,
           count: results.length,
           pages,
           pagesRead: pages.length,
           nextReads,
+          evidence: readEnvelope,
         }, null, 2);
       }
 
       if (!args.include_content) {
-        return JSON.stringify({ results, count: results.length }, null, 2);
+        return JSON.stringify({ results, count: results.length, evidence: envelope }, null, 2);
       }
       // Inline page content — eliminates follow-up wiki_read calls
       const inlineBudget = args.inline_budget != null ? (args.inline_budget as number) : Infinity;
@@ -1867,7 +1883,7 @@ export async function handleTool(
           return { ...r, content: null };
         }
       });
-      return JSON.stringify({ results: enriched, count: enriched.length }, null, 2);
+      return JSON.stringify({ results: enriched, count: enriched.length, evidence: envelope }, null, 2);
     }
 
     case "wiki_search_read": {
@@ -1883,6 +1899,8 @@ export async function handleTool(
         ? await wiki.searchHybrid(query, limit)
         : wiki.search(query, limit);
 
+      const envelope = buildSearchEnvelope(results, query);
+
       // Knowledge gap: guide the agent when the search finds nothing
       if (results.length === 0) {
         return JSON.stringify({
@@ -1892,6 +1910,7 @@ export async function handleTool(
           count: 0,
           pagesRead: 0,
           knowledge_gap: buildKnowledgeGap(query, wiki),
+          evidence: envelope,
         }, null, 2);
       }
 
@@ -1909,12 +1928,24 @@ export async function handleTool(
       const nextReads = uniquePaths.slice(readTopN);
       const pages = readPagesContent(wiki, toRead, sectionFilter, perPageLimit, includeToc);
 
+      // Downgrade envelope based on the top read page's metadata.
+      const topPage = toRead.length > 0 ? wiki.read(toRead[0]!) : null;
+      const readEnvelope = topPage
+        ? downgradeForReadPage(envelope, {
+            sources: topPage.sources,
+            synthesis: topPage.frontmatter.synthesis === true,
+            legacyUnsupported: topPage.frontmatter.legacyUnsupported === true,
+            lastEditISO: topPage.updated,
+          })
+        : envelope;
+
       return JSON.stringify({
         results,
         count: results.length,
         pages,
         pagesRead: pages.length,
         nextReads,
+        evidence: readEnvelope,
       }, null, 2);
     }
 
@@ -2017,6 +2048,7 @@ export async function handleTool(
       if (wiki.config.search.hybrid) {
         vectorStats = await wiki.rebuildVectorIndex().catch(() => undefined);
       }
+
       const parts: string[] = ["Index and timeline rebuilt"];
       if (graphStats) {
         parts.push(`Knowledge graph: ${graphStats.nodes} nodes, ${graphStats.edges} edges`);

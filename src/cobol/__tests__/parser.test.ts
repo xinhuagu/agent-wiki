@@ -167,4 +167,45 @@ describe("COBOL parser", () => {
       expect(conditions[1].name).toBe("DATE-INVALID");
     });
   });
+
+  describe("PROGRAM-ID quoted-literal handling", () => {
+    it("strips single quotes around the program name", () => {
+      const src = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. 'MY-PROG'.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+      const ast = parse(src, "quoted.cbl");
+      expect(ast.programId).toBe("MY-PROG");
+    });
+
+    it("strips double quotes around the program name", () => {
+      const src = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. "MY-PROG".
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+      const ast = parse(src, "dq.cbl");
+      expect(ast.programId).toBe("MY-PROG");
+    });
+
+    it("leaves unquoted PROGRAM-ID identifiers untouched", () => {
+      const src = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PLAIN-PROG.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+      const ast = parse(src, "plain.cbl");
+      expect(ast.programId).toBe("PLAIN-PROG");
+    });
+  });
 });

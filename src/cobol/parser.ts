@@ -593,6 +593,12 @@ class Parser {
     // Look through the raw tokens we already parsed.
     // The PROGRAM-ID is stored as tokens: PROGRAM_ID PERIOD? IDENTIFIER PERIOD?
     // We need to scan the tokens in the IDENTIFICATION division region.
+    //
+    // The COBOL spec accepts both `PROGRAM-ID. NAME.` (IDENTIFIER) and
+    // `PROGRAM-ID. 'NAME'.` / `PROGRAM-ID. "NAME".` (quoted LITERAL). The
+    // lexer keeps the surrounding quotes on LITERAL tokens; strip them
+    // here so downstream consumers (filenames, graph node IDs, lineage
+    // entries) get a clean program name.
     for (let i = 0; i < this.tokens.length - 1; i++) {
       if (this.tokens[i].type === "PROGRAM_ID") {
         // Skip period and IS
@@ -601,7 +607,7 @@ class Parser {
           j++;
         }
         if (j < this.tokens.length && (this.tokens[j].type === "IDENTIFIER" || this.tokens[j].type === "LITERAL")) {
-          return this.tokens[j].value;
+          return stripQuotes(this.tokens[j].value);
         }
       }
     }
@@ -612,6 +618,17 @@ class Parser {
 // ---------------------------------------------------------------------------
 // Data item hierarchy builder
 // ---------------------------------------------------------------------------
+
+/** Strip a single matched pair of surrounding ASCII quote characters. */
+function stripQuotes(value: string): string {
+  if (value.length < 2) return value;
+  const first = value[0];
+  const last = value[value.length - 1];
+  if ((first === "'" || first === '"') && first === last) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
 
 /**
  * Flat list of data items with level numbers → nested tree.

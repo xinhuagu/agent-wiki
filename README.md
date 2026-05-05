@@ -95,7 +95,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **Coverage Report** | `raw_coverage` tells the agent which raw sources have not yet been compiled into any wiki page — drives active knowledge completion |
 | **Atlassian Import** | One-command Confluence pages and Jira issues with full hierarchy |
 | **File Versioning** | Auto-version same-name files, query latest, list all versions |
-| **COBOL Code Analysis** | AST parser with unified `code_query` access for variable tracing, impact, procedure flow, and field lineage |
+| **COBOL Code Analysis** | AST parser handling fixed-format (with mainframe alphanumeric sequence areas) and free-format. Extracts CALL/PERFORM/COPY structure, LINKAGE SECTION, EXEC SQL, EXEC CICS, and file access modes. Cross-file knowledge graph with depth-bounded impact queries. Three field-lineage families: shared-copybook reuse, `CALL ... USING` boundary flow, and cross-program data flow via shared DB2 tables. |
 | **Skill Install** | One-command install as native skill for Claude Code and compatible clients |
 | **Git-Native** | Plain Markdown — diffable, blameable, revertable |
 | **3D Graph Viewer** | Built-in — realtime 3D graph of pages and `[[wikilinks]]`, edits push live over SSE. Run `agent-wiki web`. |

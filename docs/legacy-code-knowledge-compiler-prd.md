@@ -255,16 +255,16 @@ This is important both for trust and for agent behavior.
 
 ## Functional Requirements
 
-### Phase 1: COBOL core compiler
+### Phase 1: COBOL core compiler — **delivered**
 
-- Parse `.cbl`, `.cob`, `.cpy`
-- Normalize program structure
-- Generate program and copybook wiki pages
-- Build aggregate call graph page
-- Support variable tracing
-- Persist parse and model artifacts to `raw/parsed/cobol/`
+- Parse `.cbl`, `.cob`, `.cpy` (fixed-format with alphanumeric sequence areas + free-format)
+- Normalize program structure into `CobolCodeModel` and the language-agnostic `NormalizedCodeModel`
+- Generate program and copybook wiki pages with External Dependencies blocks (DB2 / CICS / file access)
+- Build aggregate call graph page (`wiki/cobol/call-graph.md`)
+- Support variable tracing and intra-program dataflow edges (MOVE/COMPUTE/EXEC SQL host vars/CALL USING)
+- Persist parse and model artifacts to `raw/parsed/cobol/`, with load-time schema migration for older artifacts
 
-### Phase 2: Batch/runtime compiler
+### Phase 2: Batch/runtime compiler — **not started**
 
 - Parse JCL jobs and steps
 - Map job step -> invoked program
@@ -272,19 +272,23 @@ This is important both for trust and for agent behavior.
 - Generate batch-flow wiki pages
 - Build job/program/file relationship graph
 
-### Phase 3: Data usage and lineage
+### Phase 3: Data usage and lineage — **delivered for COBOL side**
 
-- Identify read/write access patterns to files and tables
-- Link fields across copybooks and programs where possible
-- Surface record and field lineage candidates
-- Support impact queries over field and file changes
+- Identify read/write access patterns to files and tables (DB2 + file access classification)
+- Link fields across copybooks and programs through three lineage families:
+  - shared copybook field reuse (deterministic + inferred)
+  - `CALL ... USING` boundary flow (caller WORKING-STORAGE ↔ callee LINKAGE positional matching with structural evidence)
+  - cross-program flow via shared DB2 tables (writer/reader pairs with host-variable evidence)
+- Surface deterministic vs inferred vs high-confidence evidence per entry
+- Cross-file lineage relying on JCL-mediated dataflow remains pending Phase 2
 
-### Phase 4: Impact analysis surface
+### Phase 4: Impact analysis surface — **delivered**
 
-- Query affected programs for a changed copybook
-- Query affected jobs for a changed program
-- Query likely downstream artifacts for a changed field
-- Return evidence chains and uncertainty markers
+- Query affected programs for a changed copybook (`code_query` `impact`, `kind: copybook`)
+- Query affected callers for a changed program (`code_query` `impact`, `kind: program`)
+- Query likely downstream artifacts for a changed field via `code_query` `field_lineage`
+- Return evidence chains, depth grouping, and unresolved/lower-confidence markers
+- Job-level impact (changed program → affected jobs) remains pending Phase 2
 
 ## Non-Functional Requirements
 
@@ -392,27 +396,33 @@ Adoption metrics:
 
 ## Roadmap
 
-### Next 6 weeks
+### Delivered
 
-- harden COBOL compiler outputs
-- improve generated program pages
-- add richer aggregate pages
-- define the cross-artifact graph schema
-- define evaluation fixtures and baseline metrics
+- COBOL parser and extractor: programs, copybooks, sections, paragraphs, data items including LINKAGE, `CALL ... USING` arguments, `EXEC SQL`, `EXEC CICS`, file access modes
+- Lexer handles fixed-format with alphanumeric sequence areas (mainframe change-control prefixes like `XX0001` / `XX0002`) plus free-format
+- Per-file wiki pages with External Dependencies sections (DB2 / CICS / file access tables) and aggregate `system-map.md` / `call-graph.md`
+- Cross-file knowledge graph with 5 node types and 8+ edge types (CALLS, COPIES, READS_WRITES, db2-table, cics-program / -transaction / -map / -file, file-access)
+- `code_query` impact surface: depth-bounded traversal, unresolved/lower-confidence markers, evidence chains
+- Field lineage families:
+  - shared copybook field reuse (deterministic + inferred high-confidence + ambiguous)
+  - cross-program flow at `CALL ... USING` boundaries (deterministic + name-suffix-tiered high)
+  - cross-program flow via shared DB2 tables (writer/reader pairs with host variables)
+- Schema migration on artifact load so older parsed `.model.json` files keep working without re-parse
 
-### 6-12 weeks
+### In flight / near term
 
-- add JCL parsing
-- add job/step/program linking
-- add dataset extraction and batch flow pages
-- expose first impact-analysis queries
+- JCL parsing (job, step, dataset, proc include)
+- Job step → program linking via the graph layer
+- Batch flow wiki pages
+- Evaluation fixtures and accuracy metrics on a real-corpus benchmark
 
-### 3-6 months
+### Deferred (with rationale)
 
-- add file/table access classification
-- add first field-lineage capabilities
-- add retrieval evidence and abstain signals for compiler-generated knowledge
-- build modernization-oriented summary pages and reports
+- DB2 column-level lineage (would require a SQL parser; deferred per scoping in #67)
+- Dataset-mediated cross-program lineage (corpus dogfood found 0 candidates; reopen on real demand)
+- Program-variant identity (multiple files declaring the same `PROGRAM-ID`; quality-of-life, not blocking — see closed #75)
+- Modernization-oriented summary pages and reports
+- Retrieval-side abstain / evidence-sufficiency signals on compiler outputs
 
 ## Open Questions (Resolved)
 

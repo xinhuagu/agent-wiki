@@ -59,7 +59,7 @@ After every successful `code_parse`, the plugin scans `raw/parsed/<lang>/*.model
 |------|--------|---------|
 | `rebuildAggregatePages(parsedDir)` | `wiki/<lang>/call-graph.md` | Global call/perform graph across all parsed files |
 | `buildKnowledgeGraph(parsedDir)` | `raw/parsed/<lang>/knowledge-graph.json` + `wiki/<lang>/system-map.md` | Cross-file knowledge graph (Programs, Copybooks, Datasets, Jobs, Steps) with edge confidence; consumed by `code_query` `impact` |
-| `buildDerivedArtifacts(parsedDir)` | `raw/parsed/<lang>/field-lineage.json` + `wiki/<lang>/field-lineage.md` | Field-level lineage (deterministic shared-copybook + inferred cross-copybook) |
+| `buildDerivedArtifacts(parsedDir)` | `raw/parsed/<lang>/field-lineage.json` + `wiki/<lang>/field-lineage.md` | Field-level lineage covering three families: (1) deterministic + inferred cross-copybook field reuse, (2) cross-program field flow at static `CALL ... USING` boundaries, (3) cross-program data flow via shared DB2 tables. The aggregated artifact carries optional `callBoundLineage` and `db2Lineage` sections; the wiki page renders each family in its own block, with empty families omitted. Loaded `.model.json` files are normalized via `migrateLoadedModel` so artifacts produced by older releases keep working without re-parsing. |
 
 Aggregation runs synchronously inside `code_parse` by default. The `batch` MCP tool defers it (`skipGraphRebuild`) so that bulk ingest only rebuilds aggregates once at the end.
 
@@ -130,15 +130,17 @@ The model intentionally drops language-specific structure (COBOL `PIC` clauses, 
 
 ```
 src/cobol/
-├── plugin.ts          implements CodeAnalysisPlugin, wires the rest together
-├── lexer.ts           tokenizer
-├── parser.ts          AST builder → CobolAST
-├── extractors.ts      CobolAST → CobolCodeModel
-├── variable-tracer.ts dataflow + call-param edges, traceVariable
-├── graph.ts           KnowledgeGraphBuilder, populateGraphFromCobol, serializeGraph
-├── field-lineage.ts   buildFieldLineage (cross-file field index)
-├── wiki-gen.ts        program / copybook / call-graph page renderers
-└── types.ts           CobolAST, DataItemNode, etc.
+├── plugin.ts                implements CodeAnalysisPlugin, wires the rest together
+├── lexer.ts                 tokenizer (fixed-format with alphanumeric sequence area + free-format)
+├── parser.ts                AST builder → CobolAST
+├── extractors.ts            CobolAST → CobolCodeModel (calls + usingArgs, linkageItems, db2/cics/file refs)
+├── variable-tracer.ts       dataflow + call-param edges, traceVariable, extractUsingArgs helper
+├── graph.ts                 KnowledgeGraphBuilder, populateGraphFromCobol, serializeGraph
+├── field-lineage.ts         buildFieldLineage (cross-copybook field index) + combineFieldLineage
+├── call-boundary-lineage.ts buildCallBoundLineage (caller USING ↔ callee LINKAGE positional matching)
+├── db2-table-lineage.ts     buildDb2TableLineage (writer/reader pairs across shared DB2 tables)
+├── wiki-gen.ts              program / copybook / call-graph page renderers
+└── types.ts                 CobolAST, DataItemNode, etc.
 ```
 
 Outputs after parsing one program:

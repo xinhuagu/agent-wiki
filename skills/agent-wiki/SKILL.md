@@ -80,8 +80,8 @@ If not in CWD, use `-w /path/to/config/root` on every call.
 
 | Tool | Purpose |
 |------|---------|
-| `code_parse` | Parse source file into AST + normalized model + wiki pages |
-| `code_trace_variable` | Trace all references to a variable in parsed code |
+| `code_parse` | Parse source file into AST + normalized model + per-file wiki page; refreshes cross-file lineage and the knowledge graph |
+| `code_query` | Unified query surface for parsed code — pick a `query_type`: `trace_variable`, `impact`, `procedure_flow`, `field_lineage`, or `dataflow_edges` |
 
 ## Common Workflows
 
@@ -126,11 +126,15 @@ agent-wiki call wiki_lint
 # First add the source file
 agent-wiki call raw_add '{"filename":"PAYROLL.cbl","source_path":"/path/to/PAYROLL.cbl"}'
 
-# Parse it (generates AST, normalized model, wiki pages)
+# Parse it — generates AST, normalized model, COBOL-specific model,
+# per-file wiki page, and refreshes cross-file lineage / system map.
 agent-wiki call code_parse '{"path":"PAYROLL.cbl"}'
 
-# Trace a variable
-agent-wiki call code_trace_variable '{"path":"PAYROLL.cbl","variable":"WS-TOTAL-SALARY"}'
+# Query parsed code (unified surface — pick a query_type)
+agent-wiki call code_query '{"query_type":"trace_variable","path":"PAYROLL.cbl","variable":"WS-TOTAL-SALARY"}'
+agent-wiki call code_query '{"query_type":"impact","node_id":"copybook:DATE-UTILS"}'
+agent-wiki call code_query '{"query_type":"procedure_flow","path":"PAYROLL.cbl"}'
+agent-wiki call code_query '{"query_type":"field_lineage","field_name":"CUSTOMER-ID"}'
 ```
 
 ## Writing Wiki Pages with Long Content

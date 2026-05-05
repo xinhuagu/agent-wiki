@@ -27,7 +27,7 @@ agent-wiki exposes 15 public tools through the Model Context Protocol.
 
 | Tool | Description |
 |------|-------------|
-| `code_parse` | Parse a source file from raw/ into structured code knowledge (AST, normalized model, summary). Generates wiki pages automatically. Currently supports COBOL (.cbl, .cob, .cpy). Optionally traces a variable. |
+| `code_parse` | Parse a source file from raw/ into structured code knowledge (AST, normalized model, summary). Generates wiki pages automatically. Currently supports COBOL (.cbl, .cob, .cpy) — extracts CALL/PERFORM/COPY structure, data items including LINKAGE SECTION, EXEC SQL/CICS references, file access modes, and CALL USING positional arguments. Each parse refreshes three cross-file lineage families (shared-copybook fields, CALL boundary flow, DB2 table flow) and the cross-file knowledge graph. Optionally traces a variable. |
 | `code_query` | Unified code query tool. Select `query_type`: `trace_variable`, `impact`, `procedure_flow`, or `field_lineage`. This is the main query surface over parsed and compiled code artifacts. |
 
 ### `code_query` query types
@@ -37,7 +37,7 @@ agent-wiki exposes 15 public tools through the Model Context Protocol.
 | `trace_variable` | Trace all references to a variable across one parsed source file, grouped by section/paragraph. |
 | `impact` | Query the compiled COBOL knowledge graph for downstream impact. Returns affected nodes grouped by dependency depth, with evidence and unresolved/lower-confidence markers. |
 | `procedure_flow` | Query PERFORM flow inside one parsed source file. Returns section-level and paragraph-level flow, plus optional focused traversal from one procedure. |
-| `field_lineage` | Query compiled field-lineage artifacts. Returns deterministic shared-copybook matches plus inferred cross-copybook candidates when present. |
+| `field_lineage` | Query compiled field-lineage artifacts. Returns matches across three lineage families: deterministic shared-copybook reuse, inferred cross-copybook candidates (high-confidence + ambiguous), CALL boundary field flow (caller USING ↔ callee LINKAGE), and DB2 cross-program data flow via shared tables (writer/reader pairs with host variables). Each family appears only if the corresponding parsed evidence exists. |
 
 ## Orchestration
 

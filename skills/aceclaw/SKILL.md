@@ -117,7 +117,7 @@ agent-wiki call code_parse '{"path": "PAYROLL.cbl"}'
 
 ### Trace variable usage
 ```bash
-agent-wiki call code_trace_variable '{"path": "PAYROLL.cbl", "variable": "WS-TOTAL-SALARY"}'
+agent-wiki call code_query '{"query_type": "trace_variable", "path": "PAYROLL.cbl", "variable": "WS-TOTAL-SALARY"}'
 ```
 
 ## Admin Operations
@@ -166,7 +166,7 @@ Based on $ARGUMENTS:
 5. If user asks to import from Confluence/Jira: use `raw_import_confluence` or `raw_import_jira`
 6. If user asks to import a directory of files: use `knowledge_ingest_batch`
 7. **When adding ANY COBOL file (.cbl, .cob, .cpy) via `raw_add`: ALWAYS run `code_parse` immediately after.** This is mandatory — never add a COBOL file without parsing it.
-8. If user asks about code analysis or variables: use `code_parse` or `code_trace_variable`
+8. If user asks about code analysis or variables: use `code_parse`, then `code_query` with the appropriate `query_type` (`trace_variable`, `impact`, `procedure_flow`, `field_lineage`, `dataflow_edges`)
 9. If user asks to check health: use `wiki_lint`
 10. **When performing multiple operations, ALWAYS use `batch` to combine them into a single call.**
 11. Present results in clear, structured format

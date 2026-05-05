@@ -71,4 +71,52 @@ describe("COBOL lexer", () => {
     const levels = tokens.filter((t) => t.type === "LEVEL_NUMBER");
     expect(levels.length).toBeGreaterThanOrEqual(5);
   });
+
+  it("does not misclassify truly free-format COBOL (code starts at col 1) as fixed-format", () => {
+    // Free-format keeps code at col 1. Even though "IDENTI", "PROGRA", "PROCED"
+    // pass the alphanumeric seq-area check, col 7 is a real letter (not in the
+    // indicator set " */-dD"), so the heuristic must reject those lines.
+    const source = [
+      "IDENTIFICATION DIVISION.",
+      "PROGRAM-ID. FREEFMT.",
+      "PROCEDURE DIVISION.",
+      "A000-MAIN SECTION.",
+      "A100.",
+      "    MOVE 1 TO X.",
+      "    STOP RUN.",
+    ].join("\n");
+    const tokens = tokenize(source);
+    const values = tokens.map((t) => t.value);
+    // If misclassified as fixed-format, slice(7,) would drop the first 7 chars,
+    // losing the verbs entirely. Asserting the verbs survive proves the file
+    // stayed free-format.
+    expect(values).toContain("IDENTIFICATION");
+    expect(values).toContain("PROGRAM-ID");
+    expect(values).toContain("MOVE");
+    expect(values).toContain("STOP");
+  });
+
+  it("treats lines with alphabetic sequence-area prefixes as fixed-format and skips comment indicators", () => {
+    // Real-world mainframe pattern: change-control IDs like XX0001 / XX0002
+    // occupy cols 1-6 instead of pure digits. The * at col 7 marks the line
+    // as a comment and should be stripped, not tokenized.
+    const source = [
+      "XX0001*    EXEC SQL                                              ",
+      "XX0001*       OPEN C-T51                                      ",
+      "XX0001*    END-EXEC                                              ",
+      "XX0002     EXEC SQL                                              ",
+      "XX0002        SELECT NAME FROM CUSTOMERS                         ",
+      "XX0002     END-EXEC                                              ",
+    ].join("\n");
+    const tokens = tokenize(source);
+    const values = tokens.map((t) => t.value);
+    // Comment-prefixed lines (XX0001*) must be stripped entirely.
+    expect(values).not.toContain("XX0001");
+    expect(values).not.toContain("XX0002");
+    // Non-comment XX0001/XX0002 lines (those that start with the prefix
+    // followed by a space, not *) still feed code into the token stream.
+    expect(values).toContain("EXEC");
+    expect(values).toContain("SELECT");
+    expect(values).toContain("CUSTOMERS");
+  });
 });

@@ -78,7 +78,9 @@ interface SourceLine {
 }
 
 function isFixedFormat(lines: string[]): boolean {
-  // Heuristic: if ≥60 % of non-blank lines have cols 1-6 as digits/spaces
+  // Heuristic: if ≥60 % of non-blank lines have cols 1-6 as alphanumeric/space
+  // (the "sequence area" — COBOL spec allows any character; common mainframe
+  // change-control prefixes like "XX0001", "XX0002" mix letters and digits)
   // and col 7 as space or indicator, treat as fixed-format.
   let fixed = 0;
   let total = 0;
@@ -88,7 +90,7 @@ function isFixedFormat(lines: string[]): boolean {
     if (line.length >= 7) {
       const seq = line.slice(0, 6);
       const ind = line[6];
-      const seqOk = /^[\d ]{6}$/.test(seq);
+      const seqOk = /^[A-Za-z0-9 ]{6}$/.test(seq);
       const indOk = " */-dD".includes(ind);
       if (seqOk && indOk) fixed++;
     }

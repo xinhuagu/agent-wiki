@@ -169,6 +169,32 @@ describe("KnowledgeGraphBuilder", () => {
     expect(impact.get(1)?.map((n) => n.id).sort()).toEqual(["program:PROG1", "program:PROG2"]);
     expect(impact.get(2)?.map((n) => n.id)).toEqual(["program:PROG3"]);
   });
+
+  it("respects maxDepth when traversing impact", () => {
+    const b = new KnowledgeGraphBuilder();
+    b.addNode({ id: "copybook:CPY", kind: "Copybook" });
+    b.addNode({ id: "program:PROG1", kind: "Program" });
+    b.addNode({ id: "program:PROG2", kind: "Program" });
+
+    b.addEdge({
+      from: "program:PROG1", to: "copybook:CPY", kind: "COPIES",
+      confidence: "deterministic",
+      evidence: { sourceFile: "PROG1.cbl", line: 5 },
+    });
+    b.addEdge({
+      from: "program:PROG2", to: "program:PROG1", kind: "CALLS",
+      confidence: "deterministic",
+      evidence: { sourceFile: "PROG2.cbl", line: 10 },
+    });
+
+    const shallow = b.impactOf("copybook:CPY", 1);
+    expect(shallow.get(1)?.map((n) => n.id)).toEqual(["program:PROG1"]);
+    expect(shallow.get(2)).toBeUndefined();
+
+    const deep = b.impactOf("copybook:CPY", 2);
+    expect(deep.get(1)?.map((n) => n.id)).toEqual(["program:PROG1"]);
+    expect(deep.get(2)?.map((n) => n.id)).toEqual(["program:PROG2"]);
+  });
 });
 
 // ---------------------------------------------------------------------------

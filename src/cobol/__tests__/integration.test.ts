@@ -215,7 +215,11 @@ describe("COBOL MCP tools integration", () => {
     const lineage = JSON.parse(readFileSync(lineagePath, "utf-8"));
     expect(lineage.summary.deterministic.fields).toBeGreaterThan(0);
     expect(lineage.deterministic.some((entry: { fieldName: string }) => entry.fieldName === "ZIP-CODE")).toBe(true);
-    expect(readFileSync(pagePath, "utf-8")).toContain("CUSTOMER-REC");
+    const page = readFileSync(pagePath, "utf-8");
+    expect(page).toContain("CUSTOMER-REC");
+    // No CALL USING in this fixture, so the call-boundary section should be absent.
+    expect(page).not.toContain("Call Boundary Field Lineage");
+    expect(page).not.toContain("Call sites with USING args");
   });
 
   it("code_query field_lineage returns deterministic matches for a shared copybook field", async () => {
@@ -326,6 +330,66 @@ describe("COBOL MCP tools integration", () => {
     expect(lineage.summary.inferred.programs).toBe(2);
     expect(lineage.inferredHighConfidence.some((entry: { fieldName: string }) => entry.fieldName === "CUSTOMER-ID")).toBe(true);
     expect(readFileSync(pagePath, "utf-8")).toContain("Inferred Cross-Copybook Candidates");
+  });
+
+  it("code_parse persists call-boundary lineage in field-lineage.json and renders the wiki section", async () => {
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-CUSTOMER-REC.
+           05  WS-CUST-ID       PIC X(10).
+           05  WS-CUST-NAME     PIC X(30).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "CALLEE" USING WS-CUSTOMER-REC.
+           STOP RUN.
+`;
+    const callee = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-CUSTOMER-REC.
+           05  LK-CUST-ID       PIC X(10).
+           05  LK-CUST-NAME     PIC X(30).
+       PROCEDURE DIVISION USING LK-CUSTOMER-REC.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+
+    wiki.rawAdd("CALLER.cbl", { content: caller });
+    wiki.rawAdd("CALLEE.cbl", { content: callee });
+
+    await handleTool(wiki, "code_parse", { path: "CALLER.cbl" });
+    const result = await handleTool(wiki, "code_parse", { path: "CALLEE.cbl" });
+    const parsed = JSON.parse(result as string);
+
+    expect(parsed.artifacts).toContain("raw/parsed/cobol/field-lineage.json");
+    expect(parsed.wikiPages).toContain("cobol/field-lineage.md");
+
+    const lineagePath = join(tmp, "raw", "parsed", "cobol", "field-lineage.json");
+    const pagePath = join(tmp, "wiki", "cobol", "field-lineage.md");
+    const lineage = JSON.parse(readFileSync(lineagePath, "utf-8"));
+
+    expect(lineage.callBoundLineage).toBeTruthy();
+    expect(lineage.callBoundLineage.summary.callSites).toBe(1);
+    const fieldNames = lineage.callBoundLineage.entries.map((e: { caller: { fieldName: string } }) => e.caller.fieldName);
+    expect(fieldNames).toContain("WS-CUSTOMER-REC");
+    expect(fieldNames).toContain("WS-CUST-ID");
+
+    const page = readFileSync(pagePath, "utf-8");
+    expect(page).toContain("Call Boundary Field Lineage");
+    expect(page).toContain("CALLER → CALLEE");
+    expect(page).toContain("WS-CUSTOMER-REC.WS-CUST-ID");
+    expect(page).toContain("LK-CUSTOMER-REC.LK-CUST-ID");
+    // Overview surfaces call-bound coverage so users see the page has data
+    // even when there's no shared-copybook lineage.
+    expect(page).toContain("Call sites with USING args");
+    expect(page).toContain("Call-bound field pairs");
   });
 
   it("code_parse persists DB2 references into model artifacts and wiki summaries", async () => {

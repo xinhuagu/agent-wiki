@@ -1,6 +1,7 @@
 import type { CobolCodeModel } from "./extractors.js";
 import type { DataItemNode, SourceLocation } from "./types.js";
 import { resolveCanonicalId, displayLabel } from "./graph.js";
+import type { CallBoundLineage, SerializedCallBoundLineageEntry } from "./call-boundary-lineage.js";
 
 export type LineageLinkage = "deterministic";
 export type InferredLineageConfidence = "high" | "ambiguous";
@@ -70,6 +71,29 @@ export interface SerializedFieldLineage {
   deterministic: SerializedFieldLineageEntry[];
   inferredHighConfidence: SerializedInferredFieldLineageEntry[];
   inferredAmbiguous: SerializedInferredFieldLineageEntry[];
+  callBoundLineage?: CallBoundLineage | null;
+}
+
+function emptyCopybookLineage(): SerializedFieldLineage {
+  return {
+    summary: {
+      deterministic: { copybooks: 0, programs: 0, fields: 0 },
+      inferred: { copybooks: 0, programs: 0, highConfidence: 0, ambiguous: 0 },
+    },
+    copybookUsage: [],
+    deterministic: [],
+    inferredHighConfidence: [],
+    inferredAmbiguous: [],
+  };
+}
+
+export function attachCallBoundLineage(
+  copybookLineage: SerializedFieldLineage | null,
+  callLineage: CallBoundLineage | null,
+): SerializedFieldLineage | null {
+  if (!copybookLineage && !callLineage) return null;
+  const base = copybookLineage ?? emptyCopybookLineage();
+  return { ...base, callBoundLineage: callLineage };
 }
 
 interface FieldConsumer {
@@ -582,6 +606,7 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
 
 export function generateFieldLineagePage(lineage: SerializedFieldLineage): { path: string; content: string } {
   const lines: string[] = [];
+  const callBound = lineage.callBoundLineage ?? null;
   const sources = sortUnique([
     ...lineage.copybookUsage.map((entry) => `"raw/${entry.sourceFile}"`),
     ...lineage.copybookUsage.flatMap((entry) => entry.programs.map((program) => `"raw/${program.sourceFile}"`)),
@@ -597,6 +622,10 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
       ...entry.left.programs.map((program) => `"raw/${program.sourceFile}"`),
       ...entry.right.programs.map((program) => `"raw/${program.sourceFile}"`),
     ]),
+    ...(callBound?.entries.flatMap((entry) => [
+      `"raw/${entry.caller.sourceFile}"`,
+      `"raw/${entry.callee.sourceFile}"`,
+    ]) ?? []),
   ]);
 
   lines.push("---");
@@ -618,6 +647,10 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
   lines.push(`| Inferred programs | ${lineage.summary.inferred.programs} |`);
   lines.push(`| Inferred high-confidence candidates | ${lineage.summary.inferred.highConfidence} |`);
   lines.push(`| Inferred ambiguous candidates | ${lineage.summary.inferred.ambiguous} |`);
+  if (callBound) {
+    lines.push(`| Call sites with USING args | ${callBound.summary.callSites} |`);
+    lines.push(`| Call-bound field pairs | ${callBound.entries.length} |`);
+  }
   lines.push("");
 
   lines.push("## Copybook Usage");
@@ -690,8 +723,62 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
   }
   lines.push("");
 
+  if (callBound && callBound.entries.length > 0) {
+    lines.push("## Call Boundary Field Lineage");
+    lines.push("");
+    lines.push(`Cross-program field flow at static \`CALL ... USING\` sites. Top-level entries link a caller's USING argument to the callee's matching LINKAGE record by position; child entries descend into matching group children. Confidence is \`deterministic\` when names align (after stripping a short prefix like \`WS-\`/\`LK-\`) and \`high\` when only structure aligns.`);
+    lines.push("");
+    lines.push(`Coverage: ${callBound.summary.callSites} call site(s), ${callBound.entries.length} field pair(s).`);
+    lines.push("");
+    const grouped = groupCallBoundByPair(callBound.entries);
+    for (const group of grouped) {
+      lines.push(`### ${displayLabel(group.callerProgramId)} → ${displayLabel(group.calleeProgramId)}`);
+      lines.push("");
+      lines.push("| Pos | Caller | Callee | Confidence | Evidence |");
+      lines.push("|-----|--------|--------|------------|----------|");
+      for (const entry of group.entries) {
+        const evidence = [
+          entry.evidence.shapeMatch,
+          entry.evidence.nameSuffixMatch ? "name-aligned" : null,
+          entry.evidence.levelMatch ? "same-level" : null,
+        ].filter((value): value is string => Boolean(value)).join(", ");
+        lines.push(
+          `| ${entry.position} | ${entry.caller.qualifiedName} | ${entry.callee.qualifiedName} | ${entry.confidence} | ${evidence} |`
+        );
+      }
+      lines.push("");
+    }
+  }
+
   return {
     path: "cobol/field-lineage.md",
     content: lines.join("\n"),
   };
+}
+
+interface CallBoundGroup {
+  callerProgramId: string;
+  calleeProgramId: string;
+  entries: SerializedCallBoundLineageEntry[];
+}
+
+function groupCallBoundByPair(entries: SerializedCallBoundLineageEntry[]): CallBoundGroup[] {
+  const groups = new Map<string, CallBoundGroup>();
+  for (const entry of entries) {
+    const key = `${entry.caller.programId}→${entry.callee.programId}`;
+    const group = groups.get(key);
+    if (group) {
+      group.entries.push(entry);
+    } else {
+      groups.set(key, {
+        callerProgramId: entry.caller.programId,
+        calleeProgramId: entry.callee.programId,
+        entries: [entry],
+      });
+    }
+  }
+  return [...groups.values()].sort((a, b) =>
+    a.callerProgramId.localeCompare(b.callerProgramId)
+    || a.calleeProgramId.localeCompare(b.calleeProgramId)
+  );
 }

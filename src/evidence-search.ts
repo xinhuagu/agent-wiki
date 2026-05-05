@@ -3,34 +3,25 @@
  * list so wiki_search and wiki_search_read can signal "weak / abstain"
  * instead of treating every BM25 hit as authoritative.
  *
- * See docs/evidence-envelope.md ("Small-corpus abstain rule").
+ * See docs/evidence-envelope.md.
  *
- * Confidence rules (Caveat 2):
- *   - top1 below absolute floor (BM25 < 2.0)              → absent + abstain
- *   - top1 below cached corpus 30th percentile             → absent + abstain
- *   - top1 ≥ 2× top2                                       → strong
- *   - top1 < 2× top2                                       → weak
- *   - 0 results                                            → absent + abstain
+ * Confidence rules:
+ *   - 0 results                                      → absent + abstain
+ *   - top1 below absolute floor (BM25 < 2.0)         → absent + abstain
+ *   - top1 ≥ 2× top2                                 → strong
+ *   - top1 < 2× top2                                 → weak
+ *
+ * The original design also had a corpus 30th-percentile cutoff. That was
+ * dropped because the percentile would have to come from real query logs
+ * to be meaningful — sampling page titles as queries (the only feasible
+ * cold-start source) produces a best-case score distribution, not a
+ * typical-query one, and so over-flags real queries as abstain. The
+ * absolute floor catches the obvious-junk case; relative-confidence
+ * signaling lives in the top1/top2 ratio rule.
  */
 
 import type { SearchResult } from "./search.js";
 import type { EvidenceEnvelope, EvidenceConfidence } from "./evidence.js";
-
-export interface CorpusSearchStats {
-  /**
-   * 30th percentile of typical-query BM25 top1 scores. Computed by sampling
-   * page titles as queries during wiki_admin rebuild. `null` when the corpus
-   * is too small to produce a stable estimate.
-   */
-  p30: number | null;
-  /** Number of indexed pages when the stats were computed. */
-  indexedPages: number;
-  /** ISO timestamp of last computation. */
-  computedAt: string;
-}
-
-/** Filesystem location for the cached stats, relative to the wiki root. */
-export const SEARCH_STATS_PATH = ".agent-wiki/search-distribution.json";
 
 /** Absolute floor below which any top1 BM25 score is "weak in absolute terms". */
 export const ABSOLUTE_FLOOR = 2.0;
@@ -38,12 +29,11 @@ export const ABSOLUTE_FLOOR = 2.0;
 /** top1/top2 ratio that splits "strong" from "weak". */
 const TOP1_OVER_TOP2_STRONG = 2.0;
 
-/** Below this many indexed pages, percentile cutoff is unreliable; rely on absolute floor only. */
-export const SMALL_CORPUS_THRESHOLD = 20;
+/** Provenance fan-out — top N pages cited in the envelope on a non-abstain match. */
+const PROVENANCE_LIMIT = 3;
 
 export function buildSearchEnvelope(
   results: SearchResult[],
-  stats: CorpusSearchStats | null,
   query: string,
 ): EvidenceEnvelope {
   if (results.length === 0) {
@@ -59,28 +49,18 @@ export function buildSearchEnvelope(
   const top1 = results[0]!.score;
 
   if (top1 < ABSOLUTE_FLOOR) {
+    // Abstain: provenance stays empty so callers can't accidentally treat
+    // the weak hits as supporting evidence. Mention the top hits in the
+    // rationale so a debugger can still see what the engine returned.
+    const sample = results.slice(0, PROVENANCE_LIMIT).map((r) => r.path).join(", ");
     return {
-      provenance: results.slice(0, 3).map((r) => ({ wikiPage: `wiki/${r.path}` })),
+      provenance: [],
       confidence: "absent",
       basis: "unsupported",
       abstain: true,
       rationale:
         `Top match score ${top1.toFixed(2)} is below the absolute floor (${ABSOLUTE_FLOOR}). ` +
-        `Treat as no usable result.`,
-    };
-  }
-
-  const useRelativeFloor =
-    stats?.p30 != null && stats.indexedPages >= SMALL_CORPUS_THRESHOLD;
-  if (useRelativeFloor && top1 < stats!.p30!) {
-    return {
-      provenance: results.slice(0, 3).map((r) => ({ wikiPage: `wiki/${r.path}` })),
-      confidence: "absent",
-      basis: "unsupported",
-      abstain: true,
-      rationale:
-        `Top match score ${top1.toFixed(2)} is below the corpus 30th percentile ` +
-        `(${stats!.p30!.toFixed(2)}). Likely a poor match.`,
+        `Treat as no usable result. Engine returned weak hits: ${sample}.`,
     };
   }
 
@@ -95,7 +75,7 @@ export function buildSearchEnvelope(
         `multiple plausible answers — read several before relying on the top result.`;
 
   return {
-    provenance: results.slice(0, 3).map((r) => ({ wikiPage: `wiki/${r.path}` })),
+    provenance: results.slice(0, PROVENANCE_LIMIT).map((r) => ({ wikiPage: `wiki/${r.path}` })),
     confidence,
     basis: "synthesized",
     abstain: false,
@@ -142,7 +122,7 @@ export function downgradeForReadPage(
   let staleNote = "";
   if (page.lastEditISO) {
     const ageMs = now.getTime() - new Date(page.lastEditISO).getTime();
-    if (ageMs > NINETY_DAYS_MS) {
+    if (Number.isFinite(ageMs) && ageMs > NINETY_DAYS_MS) {
       const days = Math.floor(ageMs / (24 * 60 * 60 * 1000));
       staleNote = ` Page last edited ${days} days ago.`;
     }
@@ -152,8 +132,13 @@ export function downgradeForReadPage(
     return envelope; // no change
   }
 
+  // If the downgrade landed at "absent", clear provenance so downstream
+  // code doesn't treat the weak hits as supporting evidence.
+  const provenance = confidence === "absent" ? [] : envelope.provenance;
+
   return {
     ...envelope,
+    provenance,
     confidence,
     abstain: confidence === "absent" ? true : envelope.abstain,
     rationale:
@@ -167,53 +152,4 @@ function stepDown(c: EvidenceConfidence): EvidenceConfidence {
   if (c === "strong") return "weak";
   if (c === "weak") return "absent";
   return "absent";
-}
-
-/**
- * Compute the corpus's search-distribution stats by sampling page titles as
- * queries. Cheap proxy for "what does a typical user search look like" —
- * gives the percentile cutoff that buildSearchEnvelope uses.
- *
- * Below SMALL_CORPUS_THRESHOLD pages, the percentile is too noisy; return
- * `p30: null` and let buildSearchEnvelope fall back to the absolute floor.
- */
-export function computeSearchDistribution(
-  pageTitles: string[],
-  runQuery: (q: string) => { score: number }[],
-): CorpusSearchStats {
-  const indexedPages = pageTitles.length;
-  if (indexedPages < SMALL_CORPUS_THRESHOLD) {
-    return {
-      p30: null,
-      indexedPages,
-      computedAt: new Date().toISOString(),
-    };
-  }
-
-  // Sample up to 50 titles for percentile computation. On very large corpora
-  // we don't need all titles — 50 evenly-spaced gives a stable estimate.
-  const step = Math.max(1, Math.floor(indexedPages / 50));
-  const top1Scores: number[] = [];
-  for (let i = 0; i < indexedPages; i += step) {
-    const title = pageTitles[i]!;
-    if (!title.trim()) continue;
-    const hits = runQuery(title);
-    if (hits.length > 0) top1Scores.push(hits[0]!.score);
-  }
-
-  if (top1Scores.length === 0) {
-    return {
-      p30: null,
-      indexedPages,
-      computedAt: new Date().toISOString(),
-    };
-  }
-
-  top1Scores.sort((a, b) => a - b);
-  const idx = Math.floor(top1Scores.length * 0.3);
-  return {
-    p30: top1Scores[idx]!,
-    indexedPages,
-    computedAt: new Date().toISOString(),
-  };
 }

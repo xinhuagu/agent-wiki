@@ -1,81 +1,59 @@
 import { describe, it, expect } from "vitest";
 import {
   buildSearchEnvelope,
-  computeSearchDistribution,
   downgradeForReadPage,
   ABSOLUTE_FLOOR,
-  SMALL_CORPUS_THRESHOLD,
 } from "./evidence-search.js";
 import type { SearchResult } from "./search.js";
-import type { CorpusSearchStats } from "./evidence-search.js";
 
 function r(path: string, score: number): SearchResult {
   return { path, score, snippet: "" };
 }
 
 describe("buildSearchEnvelope", () => {
-  it("returns absent + abstain on empty result list", () => {
-    const env = buildSearchEnvelope([], null, "anything");
+  it("returns absent + abstain on empty result list, with empty provenance", () => {
+    const env = buildSearchEnvelope([], "anything");
     expect(env.confidence).toBe("absent");
     expect(env.abstain).toBe(true);
     expect(env.basis).toBe("unsupported");
     expect(env.provenance).toEqual([]);
   });
 
-  it("abstains when top1 is below the absolute floor regardless of stats", () => {
-    const env = buildSearchEnvelope([r("a.md", ABSOLUTE_FLOOR - 0.1)], null, "weak query");
+  it("abstains when top1 is below the absolute floor and clears provenance", () => {
+    const env = buildSearchEnvelope(
+      [r("a.md", ABSOLUTE_FLOOR - 0.1), r("b.md", 0.1)],
+      "weak query",
+    );
     expect(env.confidence).toBe("absent");
     expect(env.abstain).toBe(true);
+    expect(env.provenance).toEqual([]);
+    // Rationale still mentions what came back so a debugger can see it.
+    expect(env.rationale).toMatch(/a\.md/);
     expect(env.rationale).toMatch(/absolute floor/);
   });
 
-  it("abstains when top1 is below the corpus 30th percentile (large corpus)", () => {
-    const stats: CorpusSearchStats = {
-      p30: 5.0,
-      indexedPages: SMALL_CORPUS_THRESHOLD + 5,
-      computedAt: new Date().toISOString(),
-    };
-    const env = buildSearchEnvelope([r("a.md", 4.5)], stats, "below percentile");
-    expect(env.confidence).toBe("absent");
-    expect(env.abstain).toBe(true);
-    expect(env.rationale).toMatch(/percentile/);
-  });
-
-  it("ignores corpus percentile on a small corpus and falls back to absolute floor only", () => {
-    const stats: CorpusSearchStats = {
-      p30: 10.0, // would normally classify a 5.0 score as absent
-      indexedPages: SMALL_CORPUS_THRESHOLD - 1, // too small
-      computedAt: new Date().toISOString(),
-    };
-    const env = buildSearchEnvelope([r("a.md", 5.0), r("b.md", 1.0)], stats, "small corpus");
-    // 5.0 is above absolute floor, percentile is ignored — should NOT abstain.
-    expect(env.abstain).toBe(false);
-    expect(env.confidence).not.toBe("absent");
-  });
-
   it("returns strong when top1 dominates top2 (≥ 2× ratio)", () => {
-    const env = buildSearchEnvelope([r("a.md", 10), r("b.md", 4)], null, "clear winner");
+    const env = buildSearchEnvelope([r("a.md", 10), r("b.md", 4)], "clear winner");
     expect(env.confidence).toBe("strong");
     expect(env.abstain).toBe(false);
     expect(env.basis).toBe("synthesized");
   });
 
   it("returns weak when top1 is close to top2 (< 2× ratio)", () => {
-    const env = buildSearchEnvelope([r("a.md", 5), r("b.md", 4)], null, "ambiguous");
+    const env = buildSearchEnvelope([r("a.md", 5), r("b.md", 4)], "ambiguous");
     expect(env.confidence).toBe("weak");
     expect(env.abstain).toBe(false);
     expect(env.rationale).toMatch(/multiple plausible/);
   });
 
   it("returns strong when there is only one result above the floor", () => {
-    const env = buildSearchEnvelope([r("a.md", 5)], null, "single result");
-    // ratio = Infinity, treated as strong
+    const env = buildSearchEnvelope([r("a.md", 5)], "single result");
     expect(env.confidence).toBe("strong");
   });
 
-  it("populates provenance with up to top 3 wiki pages", () => {
+  it("populates provenance with up to top 3 wiki pages on non-abstain", () => {
     const results = [r("a.md", 10), r("b.md", 4), r("c.md", 3), r("d.md", 2)];
-    const env = buildSearchEnvelope(results, null, "x");
+    const env = buildSearchEnvelope(results, "x");
     expect(env.provenance).toHaveLength(3);
     expect(env.provenance.map((p) => p.wikiPage)).toEqual([
       "wiki/a.md",
@@ -88,7 +66,6 @@ describe("buildSearchEnvelope", () => {
 describe("downgradeForReadPage", () => {
   const baseEnvelope = buildSearchEnvelope(
     [{ path: "p.md", score: 10, snippet: "" }, { path: "q.md", score: 4, snippet: "" }],
-    null,
     "test",
   );
 
@@ -96,6 +73,7 @@ describe("downgradeForReadPage", () => {
     const env = downgradeForReadPage(baseEnvelope, { sources: ["raw/x.md"] });
     expect(env.confidence).toBe(baseEnvelope.confidence);
     expect(env.rationale).toBe(baseEnvelope.rationale);
+    expect(env.provenance).toEqual(baseEnvelope.provenance);
   });
 
   it("leaves envelope unchanged for explicit synthesis pages without sources", () => {
@@ -118,10 +96,11 @@ describe("downgradeForReadPage", () => {
     expect(env.rationale).toMatch(/legacyUnsupported/);
   });
 
-  it("drops two tiers when both unsupported and legacy flags fire (strong → absent)", () => {
+  it("drops two tiers when both flags fire (strong → absent), clearing provenance", () => {
     const env = downgradeForReadPage(baseEnvelope, { sources: [], legacyUnsupported: true });
     expect(env.confidence).toBe("absent");
     expect(env.abstain).toBe(true);
+    expect(env.provenance).toEqual([]);
   });
 
   it("notes stale page in rationale without changing tier", () => {
@@ -133,35 +112,12 @@ describe("downgradeForReadPage", () => {
     expect(env.confidence).toBe(baseEnvelope.confidence);
     expect(env.rationale).toMatch(/last edited \d+ days ago/);
   });
-});
 
-describe("computeSearchDistribution", () => {
-  it("returns null p30 on a small corpus, even with high scores", () => {
-    const titles = ["a", "b", "c", "d", "e"];
-    const stats = computeSearchDistribution(titles, () => [{ score: 100 }]);
-    expect(stats.p30).toBeNull();
-    expect(stats.indexedPages).toBe(5);
-  });
-
-  it("computes a percentile when corpus is large enough", () => {
-    const n = SMALL_CORPUS_THRESHOLD + 30;
-    const titles = Array.from({ length: n }, (_, i) => `page-${i}`);
-    // Scores cycle 1..10 deterministically
-    const stats = computeSearchDistribution(titles, (q) => {
-      const i = parseInt(q.split("-")[1] ?? "0", 10);
-      return [{ score: (i % 10) + 1 }];
+  it("ignores malformed lastEditISO and does not add a stale note", () => {
+    const env = downgradeForReadPage(baseEnvelope, {
+      sources: ["raw/x.md"],
+      lastEditISO: "not-a-date",
     });
-    expect(stats.p30).not.toBeNull();
-    expect(stats.indexedPages).toBe(n);
-    // p30 is the 30th percentile of the sorted top1 score sample,
-    // bounded between min and max scores observed.
-    expect(stats.p30!).toBeGreaterThanOrEqual(1);
-    expect(stats.p30!).toBeLessThanOrEqual(10);
-  });
-
-  it("returns null p30 when all queries return empty", () => {
-    const titles = Array.from({ length: SMALL_CORPUS_THRESHOLD + 5 }, (_, i) => `page-${i}`);
-    const stats = computeSearchDistribution(titles, () => []);
-    expect(stats.p30).toBeNull();
+    expect(env.rationale).toBe(baseEnvelope.rationale);
   });
 });

@@ -15,12 +15,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import {
-  buildSearchEnvelope,
-  computeSearchDistribution,
-  downgradeForReadPage,
-} from "./evidence-search.js";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { buildSearchEnvelope, downgradeForReadPage } from "./evidence-search.js";
 import { join, resolve, basename, extname } from "node:path";
 import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob, safePath } from "./wiki.js";
 import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
@@ -1404,17 +1400,6 @@ function buildKnowledgeGap(query: string, wiki: Wiki, forceType?: string): Recor
   };
 }
 
-/** Load cached search-distribution stats; returns null when the cache doesn't exist yet. */
-function loadSearchStats(wiki: Wiki): import("./evidence-search.js").CorpusSearchStats | null {
-  try {
-    const path = join(wiki.config.workspace, ".agent-wiki", "search-distribution.json");
-    if (!existsSync(path)) return null;
-    return JSON.parse(readFileSync(path, "utf-8"));
-  } catch {
-    return null;
-  }
-}
-
 /** Shared page-content reader used by wiki_search (read_top_n mode) and wiki_search_read. */
 function readPagesContent(
   wiki: Wiki,
@@ -1788,8 +1773,7 @@ export async function handleTool(
             return true;
           }).slice(0, searchLimit)
         : rawResults;
-      const searchStats = loadSearchStats(wiki);
-      const envelope = buildSearchEnvelope(results, searchStats, searchQuery);
+      const envelope = buildSearchEnvelope(results, searchQuery);
 
       // Knowledge gap: guide the agent when the search finds nothing
       if (results.length === 0) {
@@ -1915,8 +1899,7 @@ export async function handleTool(
         ? await wiki.searchHybrid(query, limit)
         : wiki.search(query, limit);
 
-      const stats = loadSearchStats(wiki);
-      const envelope = buildSearchEnvelope(results, stats, query);
+      const envelope = buildSearchEnvelope(results, query);
 
       // Knowledge gap: guide the agent when the search finds nothing
       if (results.length === 0) {
@@ -2064,23 +2047,6 @@ export async function handleTool(
       let vectorStats: { pagesProcessed: number; errors: number } | undefined;
       if (wiki.config.search.hybrid) {
         vectorStats = await wiki.rebuildVectorIndex().catch(() => undefined);
-      }
-
-      // Refresh the search-distribution stats used by wiki_search abstain.
-      // Cheap on small corpora; sampled on large ones (see computeSearchDistribution).
-      try {
-        const titles = [...pageCache.values()]
-          .map((p) => p.title)
-          .filter((t) => typeof t === "string" && t.trim().length > 0);
-        const stats = computeSearchDistribution(titles, (q) => wiki.search(q, 5));
-        const dir = join(wiki.config.workspace, ".agent-wiki");
-        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        writeFileSync(
-          join(dir, "search-distribution.json"),
-          JSON.stringify(stats, null, 2),
-        );
-      } catch {
-        // Stats are advisory; never fail rebuild because of them.
       }
 
       const parts: string[] = ["Index and timeline rebuilt"];

@@ -96,19 +96,20 @@ Implementation: `src/cobol/evidence-mapping.ts` (`cobolTierToEvidence`).
 
 This is one-way: the envelope is computed from the tier; the tier is not reconstructed from the envelope. Future COBOL lineage families (e.g., dataset-mediated, column-level DB2) extend the tier table; the envelope mapping is mechanical.
 
-## Small-corpus abstain rule (Caveat 2)
+## Abstain rule (Caveat 2)
 
-For `wiki_search`, the abstain decision combines two checks. Take the **stricter** of the two — if either says abstain, the envelope sets `abstain: true` and `confidence: "absent"`.
+For `wiki_search`, the abstain decision uses an absolute floor on the top1 BM25 score. If `top1 < 2.0`, the envelope sets `abstain: true`, `confidence: "absent"`, and clears `provenance` so callers do not treat the weak hits as supporting evidence.
 
-1. **Relative**: BM25 score below the 30th percentile of the corpus's score distribution for non-trivial queries. (Recomputed on `wiki_admin rebuild`; cached as a workspace stat.)
-2. **Absolute floor**: BM25 score below `2.0` regardless of distribution. (Calibrated by inspection on the bundled fixtures; revisit when corpus characteristics change.)
+The original design also called for a relative cutoff — BM25 score below the corpus 30th percentile — recomputed during `wiki_admin rebuild`. That part was dropped during Phase 1 implementation: any cold-start sampling we could plausibly do (page titles as queries) measures best-case retrieval, not typical-query strength, and over-flags real queries as abstain. A real percentile cutoff requires actual user query logs; until those exist, the absolute floor is the only honest signal.
 
-A 20-page wiki has unstable percentiles, so the absolute floor catches "weak in absolute terms" even when relative ranking looks reasonable. Conversely, a 10000-page wiki may have everything above 2.0; the percentile then carries the load.
+Phase 1 confidence derivations:
 
-Additional Phase 1 derivations:
-- top1 score `> 2 ×` top2 score → `confidence: "strong"` (clear winner)
-- top1 within `1.2 ×` top2 score → `confidence: "weak"` (multiple plausible matches; consumer should read both)
+- top1 score `≥ 2 ×` top2 score → `confidence: "strong"` (clear winner)
+- top1 within `2 ×` top2 score → `confidence: "weak"` (multiple plausible matches; consumer should read several)
+- top1 below absolute floor (`< 2.0`) → `confidence: "absent"`, `abstain: true`
 - 0 results → existing `knowledge_gap` response, plus envelope with `abstain: true`, `basis: "unsupported"`
+
+The 2.0 floor was calibrated by inspection on the bundled fixtures; revisit when corpus characteristics change. If `wiki_admin` ever starts logging real queries (Phase 4 dashboard candidate), a percentile cutoff can be reintroduced — informed by typical-query data rather than self-search noise.
 
 ## Unsupported-write telemetry (Caveat 1)
 

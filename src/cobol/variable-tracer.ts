@@ -382,6 +382,21 @@ const CALL_MODIFIERS = new Set(["REFERENCE", "CONTENT", "VALUE", "ADDRESS"]);
 // Terminators for the USING clause.
 const CALL_USING_STOP = new Set(["GIVING", "RETURNING", "END-CALL", "ON", "EXCEPTION", "OVERFLOW"]);
 
+export function extractUsingArgs(rawText: string): string[] {
+  const tokens = rawText.split(/\s+/).map((t) => t.toUpperCase());
+  const usingIdx = tokens.indexOf("USING");
+  if (usingIdx < 0) return [];
+  const args: string[] = [];
+  for (let i = usingIdx + 1; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (CALL_USING_STOP.has(tok)) break;
+    if (CALL_MODIFIERS.has(tok)) continue;
+    if (!isDataflowVariable(tok)) continue;
+    args.push(tok);
+  }
+  return args;
+}
+
 export function extractCallEdges(ast: CobolAST): DataflowEdge[] {
   const edges: DataflowEdge[] = [];
 
@@ -399,17 +414,9 @@ export function extractCallEdges(ast: CobolAST): DataflowEdge[] {
           if (callIdx < 0 || callIdx + 1 >= tokens.length) continue;
           const programName = tokens[callIdx + 1].replace(/['"]/g, "");
 
-          // Collect USING params until GIVING / RETURNING / END-CALL.
-          const usingIdx = tokens.indexOf("USING");
-          if (usingIdx < 0) continue;
-
-          for (let i = usingIdx + 1; i < tokens.length; i++) {
-            const tok = tokens[i];
-            if (CALL_USING_STOP.has(tok)) break;
-            if (CALL_MODIFIERS.has(tok)) continue;
-            if (!isDataflowVariable(tok)) continue;
+          for (const arg of extractUsingArgs(stmt.rawText)) {
             edges.push({
-              from: tok,
+              from: arg,
               to: programName,
               via: "CALL",
               line: stmt.loc.line,

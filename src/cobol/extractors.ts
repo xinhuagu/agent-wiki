@@ -13,6 +13,7 @@ import type {
   SourceLocation,
   StatementNode,
 } from "./types.js";
+import { extractUsingArgs } from "./variable-tracer.js";
 
 // ---------------------------------------------------------------------------
 // Code model types
@@ -24,10 +25,11 @@ export interface CobolCodeModel {
   divisions: { name: string; loc: SourceLocation }[];
   sections: { name: string; division: string; loc: SourceLocation }[];
   paragraphs: { name: string; section: string; loc: SourceLocation }[];
-  calls: { target: string; fromParagraph: string; loc: SourceLocation }[];
+  calls: { target: string; fromParagraph: string; usingArgs: string[]; loc: SourceLocation }[];
   performs: { target: string; fromParagraph: string; thru?: string; loc: SourceLocation }[];
   copies: { copybook: string; replacing?: string[]; loc: SourceLocation }[];
   dataItems: DataItemNode[];
+  linkageItems: DataItemNode[];
   fileDefinitions: { fd: string; recordName?: string; loc: SourceLocation }[];
   db2References: { operation?: string; tables: string[]; rawText: string; loc: SourceLocation }[];
   cicsReferences: {
@@ -77,6 +79,7 @@ export function extractModel(ast: CobolAST): CobolCodeModel {
     performs: [],
     copies: [],
     dataItems: [],
+    linkageItems: [],
     fileDefinitions: [],
     db2References: [],
     cicsReferences: [],
@@ -97,6 +100,9 @@ export function extractModel(ast: CobolAST): CobolCodeModel {
       // Data items
       if (sec.dataItems.length > 0) {
         model.dataItems.push(...sec.dataItems);
+        if (sec.name.toUpperCase() === "LINKAGE") {
+          model.linkageItems.push(...sec.dataItems);
+        }
       }
 
       // Paragraphs and statements
@@ -305,6 +311,7 @@ function extractStatementRelations(
       model.calls.push({
         target: target.replace(/['"]/g, ""),
         fromParagraph: paragraph,
+        usingArgs: extractUsingArgs(stmt.rawText),
         loc: stmt.loc,
       });
     }

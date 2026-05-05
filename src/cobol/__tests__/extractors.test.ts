@@ -42,6 +42,13 @@ describe("COBOL extractors", () => {
       expect(targets).toContain("PRINT-REPORT");
     });
 
+    it("extracts CALL USING positional args", () => {
+      const calcTax = model.calls.find((c) => c.target === "CALC-TAX");
+      expect(calcTax!.usingArgs).toEqual(["EMP-SALARY", "WS-TAX-AMOUNT"]);
+      const printReport = model.calls.find((c) => c.target === "PRINT-REPORT");
+      expect(printReport!.usingArgs).toEqual(["WS-TOTALS"]);
+    });
+
     it("extracts PERFORM relations", () => {
       expect(model.performs.length).toBeGreaterThanOrEqual(2);
       const targets = model.performs.map((p) => p.target);
@@ -112,6 +119,95 @@ describe("COBOL extractors", () => {
       expect(model.dataItems.length).toBeGreaterThan(0);
       const invoice = model.dataItems.find((d) => d.name === "WS-INVOICE-NUM");
       expect(invoice).toBeDefined();
+    });
+  });
+
+  describe("CALL USING arg extraction", () => {
+    it("returns empty usingArgs when CALL has no USING clause", () => {
+      const src = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. NOPARM.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "OTHER".
+           STOP RUN.
+`;
+      const model = extractModel(parse(src, "NOPARM.cbl"));
+      expect(model.calls).toHaveLength(1);
+      expect(model.calls[0].usingArgs).toEqual([]);
+    });
+
+    it("skips BY REFERENCE / BY CONTENT / BY VALUE modifiers", () => {
+      const src = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WITHMOD.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "T" USING BY REFERENCE A BY CONTENT B BY VALUE C.
+           STOP RUN.
+`;
+      const model = extractModel(parse(src, "WITHMOD.cbl"));
+      expect(model.calls[0].usingArgs).toEqual(["A", "B", "C"]);
+    });
+
+    it("stops at GIVING / RETURNING / END-CALL", () => {
+      const src = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WITHGIV.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "TARGET" USING WS-IN WS-OUT GIVING WS-RC.
+           STOP RUN.
+`;
+      const model = extractModel(parse(src, "WITHGIV.cbl"));
+      expect(model.calls[0].usingArgs).toEqual(["WS-IN", "WS-OUT"]);
+    });
+  });
+
+  describe("LINKAGE SECTION extraction", () => {
+    it("populates linkageItems with LINKAGE-only top-level records, in source order", () => {
+      const src = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-LOCAL          PIC X(10).
+       LINKAGE SECTION.
+       01  LK-FIRST.
+           05  LK-FIRST-ID    PIC 9(8).
+       01  LK-SECOND          PIC X(20).
+       PROCEDURE DIVISION USING LK-FIRST LK-SECOND.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+      const model = extractModel(parse(src, "CALLEE.cbl"));
+      expect(model.linkageItems.map((item) => item.name)).toEqual(["LK-FIRST", "LK-SECOND"]);
+      expect(model.linkageItems[0].children.map((c) => c.name)).toEqual(["LK-FIRST-ID"]);
+      // dataItems still includes both LINKAGE and WORKING-STORAGE items
+      const allNames = model.dataItems.map((item) => item.name);
+      expect(allNames).toContain("WS-LOCAL");
+      expect(allNames).toContain("LK-FIRST");
+      expect(allNames).toContain("LK-SECOND");
+    });
+
+    it("returns empty linkageItems when no LINKAGE section is present", () => {
+      const src = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. NOLINK.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-X               PIC X(5).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+      const model = extractModel(parse(src, "NOLINK.cbl"));
+      expect(model.linkageItems).toEqual([]);
     });
   });
 });

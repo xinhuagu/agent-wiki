@@ -79,19 +79,23 @@ export function resolveAuth(authEnv: string): string {
   const value = process.env[authEnv];
   if (!value) {
     throw new Error(
-      `Environment variable "${authEnv}" is not set. ` +
-        `Set it to "email:api-token" for Atlassian Cloud authentication.`
+      `Environment variable "${authEnv}" is not set. Set it to one of:\n` +
+        `  - "email:api-token"  (Atlassian Cloud Basic auth — auto-encoded)\n` +
+        `  - "Bearer <pat>"     (Server / Data Center, explicit prefix)\n` +
+        `  - "<pat>"            (Server / Data Center, bare PAT — Bearer added automatically)\n` +
+        `Pass a different env var name via the tool's authEnv parameter if your deployment uses a custom convention.`
     );
   }
-  // If it looks like email:token, auto-encode as Basic auth
-  if (
-    value.includes(":") &&
-    !value.startsWith("Basic ") &&
-    !value.startsWith("Bearer ")
-  ) {
+  // Already prefixed — pass through verbatim.
+  if (value.startsWith("Basic ") || value.startsWith("Bearer ")) {
+    return value;
+  }
+  // email:token shape → Cloud Basic auth.
+  if (value.includes(":")) {
     return `Basic ${Buffer.from(value).toString("base64")}`;
   }
-  return value;
+  // Bare token (no colon, no prefix) → Server / DC Bearer convention.
+  return `Bearer ${value}`;
 }
 
 export function validateHost(host: string, allowed: string[]): void {
@@ -130,39 +134,66 @@ function writeMeta(filePath: string, meta: RawMeta): void {
 //  CONFLUENCE
 // ═══════════════════════════════════════════════════════════════
 
+export type AtlassianDeployment = "cloud" | "server";
+
 export function parseConfluenceUrl(
   url: string
-): { host: string; pageId: string } {
-  const match = url.match(/https?:\/\/([^/]+)\/wiki\/.*?pages\/(\d+)/);
-  if (!match) {
-    throw new Error(
-      `Cannot parse Confluence URL: "${url}". ` +
-        `Expected: https://company.atlassian.net/wiki/spaces/SPACE/pages/12345/...`
-    );
+): { host: string; pageId: string; deployment: AtlassianDeployment } {
+  // Cloud: https://{host}/wiki/spaces/SPACE/pages/12345/...
+  const cloudMatch = url.match(/https?:\/\/([^/]+)\/wiki\/.*?pages\/(\d+)/);
+  if (cloudMatch) {
+    return { host: cloudMatch[1]!, pageId: cloudMatch[2]!, deployment: "cloud" };
   }
-  return { host: match[1]!, pageId: match[2]! };
+  // Server / Data Center: https://{host}/spaces/SPACE/pages/12345/...
+  // (no `/wiki/` segment; everything else identical)
+  const serverMatch = url.match(/https?:\/\/([^/]+)\/(?!wiki\/).*?pages\/(\d+)/);
+  if (serverMatch) {
+    return { host: serverMatch[1]!, pageId: serverMatch[2]!, deployment: "server" };
+  }
+  throw new Error(
+    `Cannot parse Confluence URL: "${url}". ` +
+      `Expected one of:\n` +
+      `  - Cloud:  https://company.atlassian.net/wiki/spaces/SPACE/pages/12345/...\n` +
+      `  - Server: https://confluence.example.com/spaces/SPACE/pages/12345/...`
+  );
 }
 
-export async function confluenceImport(
-  url: string,
-  rawDir: string,
-  config: AtlassianConfig,
-  opts: {
-    recursive?: boolean;
-    depth?: number;
-    authEnv?: string;
-  } = {}
-): Promise<ConfluenceImportResult> {
-  const { host, pageId } = parseConfluenceUrl(url);
-  validateHost(host, config.allowedHosts);
+/**
+ * Internal normalized shape — same regardless of Cloud vs Server / DC origin.
+ * Platform-specific clients below project their respective response schemas
+ * into these types so the rest of confluenceImport can stay platform-agnostic.
+ */
+interface NormalizedConfluencePage {
+  id: string;
+  title: string;
+  html: string;
+}
+interface NormalizedConfluenceAttachment {
+  title: string;
+  downloadLink: string;
+  mediaType: string;
+  fileSize: number;
+}
+interface NormalizedConfluenceChild {
+  id: string;
+  title: string;
+}
 
-  const authHeader = resolveAuth(opts.authEnv ?? "CONFLUENCE_API_TOKEN");
-  const maxDepth = opts.depth ?? (opts.recursive ? 50 : 0);
-  const baseApi = `https://${host}/wiki/api/v2`;
-  const files: string[] = [];
-  let pageCount = 0;
+interface ConfluenceClient {
+  getPage(pid: string): Promise<NormalizedConfluencePage>;
+  getAttachments(pid: string): Promise<NormalizedConfluenceAttachment[]>;
+  getChildren(pid: string): Promise<NormalizedConfluenceChild[]>;
+}
 
-  // ── API helpers ──
+function buildConfluenceClient(
+  host: string,
+  deployment: AtlassianDeployment,
+  authHeader: string,
+): ConfluenceClient {
+  const baseApi =
+    deployment === "cloud"
+      ? `https://${host}/wiki/api/v2`
+      : `https://${host}/rest/api`;
 
   async function api(endpoint: string): Promise<any> {
     const resp = await fetch(`${baseApi}${endpoint}`, {
@@ -181,41 +212,130 @@ export async function confluenceImport(
     return resp.json();
   }
 
-  async function getPage(
-    pid: string
-  ): Promise<{ id: string; title: string; spaceId?: string; html: string }> {
-    const data = await api(`/pages/${pid}?body-format=storage`);
+  if (deployment === "cloud") {
     return {
-      id: data.id,
-      title: data.title,
-      spaceId: data.spaceId,
-      html: data.body?.storage?.value ?? "",
+      async getPage(pid) {
+        const data = await api(`/pages/${pid}?body-format=storage`);
+        return {
+          id: data.id,
+          title: data.title,
+          html: data.body?.storage?.value ?? "",
+        };
+      },
+      async getAttachments(pid) {
+        const results: NormalizedConfluenceAttachment[] = [];
+        let cursor: string | null = null;
+        do {
+          const qs = cursor ? `?limit=50&cursor=${cursor}` : "?limit=50";
+          const data = await api(`/pages/${pid}/attachments${qs}`);
+          for (const r of data.results ?? []) {
+            results.push({
+              title: r.title ?? r.id,
+              downloadLink: r._links?.download ? `https://${host}/wiki${r._links.download}` : "",
+              mediaType: r.mediaType ?? "application/octet-stream",
+              fileSize: r.fileSize ?? 0,
+            });
+          }
+          const nextLink: string | undefined = data._links?.next;
+          cursor = nextLink
+            ? new URL(nextLink, baseApi).searchParams.get("cursor")
+            : null;
+        } while (cursor);
+        return results;
+      },
+      async getChildren(pid) {
+        const results: NormalizedConfluenceChild[] = [];
+        let cursor: string | null = null;
+        do {
+          const qs = cursor ? `?limit=50&cursor=${cursor}` : "?limit=50";
+          const data = await api(`/pages/${pid}/children/page${qs}`);
+          for (const r of data.results ?? []) {
+            results.push({ id: r.id, title: r.title });
+          }
+          const nextLink: string | undefined = data._links?.next;
+          cursor = nextLink
+            ? new URL(nextLink, baseApi).searchParams.get("cursor")
+            : null;
+        } while (cursor);
+        return results;
+      },
     };
   }
 
-  async function getAttachments(
-    pid: string
-  ): Promise<Array<{ title: string; downloadLink: string; mediaType: string; fileSize: number }>> {
-    const results: Array<{ title: string; downloadLink: string; mediaType: string; fileSize: number }> = [];
-    let cursor: string | null = null;
-    do {
-      const qs = cursor ? `?limit=50&cursor=${cursor}` : "?limit=50";
-      const data = await api(`/pages/${pid}/attachments${qs}`);
-      for (const r of data.results ?? []) {
-        results.push({
-          title: r.title ?? r.id,
-          downloadLink: r._links?.download ? `https://${host}/wiki${r._links.download}` : "",
-          mediaType: r.mediaType ?? "application/octet-stream",
-          fileSize: r.fileSize ?? 0,
-        });
+  // Server / Data Center — /rest/api/content/* endpoints, start+limit pagination,
+  // body returned via ?expand=body.storage.
+  return {
+    async getPage(pid) {
+      const data = await api(`/content/${pid}?expand=body.storage`);
+      return {
+        id: String(data.id),
+        title: data.title ?? "",
+        html: data.body?.storage?.value ?? "",
+      };
+    },
+    async getAttachments(pid) {
+      const results: NormalizedConfluenceAttachment[] = [];
+      let start = 0;
+      const limit = 50;
+      while (true) {
+        const data = await api(
+          `/content/${pid}/child/attachment?limit=${limit}&start=${start}&expand=metadata,extensions`
+        );
+        const batch = data.results ?? [];
+        for (const r of batch) {
+          const dl = r._links?.download;
+          results.push({
+            title: r.title ?? r.id,
+            downloadLink: dl ? `https://${host}${dl}` : "",
+            mediaType: r.metadata?.mediaType ?? r.extensions?.mediaType ?? "application/octet-stream",
+            fileSize: r.extensions?.fileSize ?? 0,
+          });
+        }
+        if (batch.length < limit) break;
+        start += limit;
       }
-      const nextLink: string | undefined = data._links?.next;
-      cursor = nextLink
-        ? new URL(nextLink, baseApi).searchParams.get("cursor")
-        : null;
-    } while (cursor);
-    return results;
-  }
+      return results;
+    },
+    async getChildren(pid) {
+      const results: NormalizedConfluenceChild[] = [];
+      let start = 0;
+      const limit = 50;
+      while (true) {
+        const data = await api(`/content/${pid}/child/page?limit=${limit}&start=${start}`);
+        const batch = data.results ?? [];
+        for (const r of batch) {
+          results.push({ id: String(r.id), title: r.title });
+        }
+        if (batch.length < limit) break;
+        start += limit;
+      }
+      return results;
+    },
+  };
+}
+
+export async function confluenceImport(
+  url: string,
+  rawDir: string,
+  config: AtlassianConfig,
+  opts: {
+    recursive?: boolean;
+    depth?: number;
+    authEnv?: string;
+  } = {}
+): Promise<ConfluenceImportResult> {
+  const { host, pageId, deployment } = parseConfluenceUrl(url);
+  validateHost(host, config.allowedHosts);
+
+  const authHeader = resolveAuth(opts.authEnv ?? "CONFLUENCE_API_TOKEN");
+  const maxDepth = opts.depth ?? (opts.recursive ? 50 : 0);
+  const client = buildConfluenceClient(host, deployment, authHeader);
+  const files: string[] = [];
+  let pageCount = 0;
+
+  const getPage = (pid: string) => client.getPage(pid);
+  const getAttachments = (pid: string) => client.getAttachments(pid);
+  const getChildren = (pid: string) => client.getChildren(pid);
 
   async function downloadAttachment(
     attUrl: string,
@@ -245,24 +365,6 @@ export async function confluenceImport(
     }
   }
 
-  async function getChildren(pid: string): Promise<Array<{ id: string; title: string }>> {
-    const results: Array<{ id: string; title: string }> = [];
-    let cursor: string | null = null;
-    do {
-      const qs = cursor ? `?limit=50&cursor=${cursor}` : "?limit=50";
-      const data = await api(`/pages/${pid}/children/page${qs}`);
-      for (const r of data.results ?? []) {
-        results.push({ id: r.id, title: r.title });
-      }
-      // Pagination: extract cursor from next link if present
-      const nextLink: string | undefined = data._links?.next;
-      cursor = nextLink
-        ? new URL(nextLink, baseApi).searchParams.get("cursor")
-        : null;
-    } while (cursor);
-    return results;
-  }
-
   // ── Recursive import ──
 
   async function importPage(
@@ -288,9 +390,10 @@ export async function confluenceImport(
       mkdirSync(dirname(absPath), { recursive: true });
       writeFileSync(absPath, page.html);
       const h = hash(page.html);
+      const pageUrlPrefix = deployment === "cloud" ? "/wiki/spaces" : "/spaces";
       writeMeta(absPath, {
         path: relPath,
-        sourceUrl: `https://${host}/wiki/spaces/${space}/pages/${pid}`,
+        sourceUrl: `https://${host}${pageUrlPrefix}/${space}/pages/${pid}`,
         downloadedAt: new Date().toISOString(),
         sha256: h,
         size: Buffer.byteLength(page.html),
@@ -362,15 +465,18 @@ export async function confluenceImport(
 
 export function parseJiraUrl(
   url: string
-): { host: string; issueKey: string } {
+): { host: string; issueKey: string; deployment: AtlassianDeployment } {
   const match = url.match(/https?:\/\/([^/]+)\/browse\/([A-Z][A-Z0-9]+-\d+)/);
   if (!match) {
     throw new Error(
       `Cannot parse Jira URL: "${url}". ` +
-        `Expected: https://company.atlassian.net/browse/PROJ-123`
+        `Expected: https://{host}/browse/PROJ-123 (works for both Cloud and Server / Data Center)`
     );
   }
-  return { host: match[1]!, issueKey: match[2]! };
+  // Cloud Jira always lives on *.atlassian.net; anything else is self-hosted.
+  const host = match[1]!;
+  const deployment: AtlassianDeployment = host.endsWith(".atlassian.net") ? "cloud" : "server";
+  return { host, issueKey: match[2]!, deployment };
 }
 
 export async function jiraImport(
@@ -385,7 +491,7 @@ export async function jiraImport(
     authEnv?: string;
   } = {}
 ): Promise<JiraImportResult> {
-  const { host, issueKey } = parseJiraUrl(url);
+  const { host, issueKey, deployment } = parseJiraUrl(url);
   validateHost(host, config.allowedHosts);
 
   const authHeader = resolveAuth(opts.authEnv ?? "JIRA_API_TOKEN");
@@ -394,11 +500,16 @@ export async function jiraImport(
   const wantAttachments = opts.includeAttachments ?? true;
   const wantLinks = opts.includeLinks ?? true;
 
-  const baseApi = `https://${host}/rest/api/3`;
+  // Cloud always supports v3. Server / DC supports v3 on recent releases and
+  // v2 on older ones — try v3 first and fall back to v2 on a 404 from the
+  // primary issue endpoint. apiVersion holds whichever the first request
+  // ended up using; subsequent requests reuse it without re-probing.
+  let apiVersion: "3" | "2" = "3";
+  let baseApi = `https://${host}/rest/api/${apiVersion}`;
   const files: string[] = [];
   const imported = new Set<string>();
 
-  async function api(endpoint: string): Promise<any> {
+  async function api(endpoint: string, allowFallback = false): Promise<any> {
     const resp = await fetch(`${baseApi}${endpoint}`, {
       headers: {
         Authorization: authHeader,
@@ -407,6 +518,15 @@ export async function jiraImport(
       },
     });
     if (!resp.ok) {
+      // v3 → v2 fallback for older Server / DC. Only honored on the first
+      // call (`allowFallback=true` from the initial issue request) so we
+      // don't oscillate between versions on later 404s caused by genuinely
+      // missing resources.
+      if (resp.status === 404 && allowFallback && apiVersion === "3" && deployment === "server") {
+        apiVersion = "2";
+        baseApi = `https://${host}/rest/api/2`;
+        return api(endpoint, false);
+      }
       const body = await resp.text().catch(() => "");
       throw new Error(
         `Jira API ${resp.status} ${resp.statusText} — ${endpoint}\n${body.slice(0, 500)}`
@@ -450,8 +570,11 @@ export async function jiraImport(
     if (imported.has(key)) return;
     imported.add(key);
 
+    // First call may trigger v3 → v2 fallback on older Server / DC; honor that
+    // here, then subsequent calls reuse whichever version succeeded.
     const issue = await api(
-      `/issue/${key}?expand=renderedFields,names&fields=*all`
+      `/issue/${key}?expand=renderedFields,names&fields=*all`,
+      true
     );
     const f = issue.fields ?? {};
     const rf = issue.renderedFields ?? {};

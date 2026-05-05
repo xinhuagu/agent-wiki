@@ -52,8 +52,8 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           "Ingest raw source documents into the knowledge base. Select `mode` to control the ingestion method:\n" +
           "- `add`: Add a local file or content string (immutable, SHA-256 verified). Supports directory imports. Single images (<10MB) returned inline — you MUST immediately call wiki_write to describe them.\n" +
           "- `fetch`: Download a file from a URL into raw/ (arXiv abstract URLs auto-converted to PDF). Single images returned inline — you MUST immediately call wiki_write to describe them.\n" +
-          "- `import_confluence`: Recursively import Confluence pages with attachments and hierarchy. Requires CONFLUENCE_API_TOKEN env var ('email:api-token').\n" +
-          "- `import_jira`: Import a Jira issue with comments, attachments, and linked issues. Requires JIRA_API_TOKEN env var ('email:api-token').",
+          "- `import_confluence`: Recursively import Confluence pages with attachments and hierarchy. Supports both Cloud (`*.atlassian.net/wiki/...`) and Server / Data Center (`{host}/spaces/...`). Defaults to reading the CONFLUENCE_API_TOKEN env var; pass `auth_env` to point at any other variable. Token format accepted: `email:api-token` (Cloud Basic), `Bearer <pat>` (explicit), or a bare PAT (Bearer prefix added automatically).\n" +
+          "- `import_jira`: Import a Jira issue with comments, attachments, and linked issues. Supports both Cloud and Server / Data Center; auto-falls-back to REST API v2 on older Server / DC. Defaults to reading the JIRA_API_TOKEN env var; pass `auth_env` to point at any other variable. Token format accepted: `email:api-token` (Cloud Basic), `Bearer <pat>` (explicit), or a bare PAT (Bearer prefix added automatically).",
         inputSchema: {
           type: "object" as const,
           properties: {

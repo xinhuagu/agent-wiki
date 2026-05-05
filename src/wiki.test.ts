@@ -2099,24 +2099,43 @@ import {
 } from "./atlassian.js";
 
 describe("Confluence URL parsing", () => {
-  it("parses standard Confluence page URL", () => {
+  it("parses Cloud URL with /wiki/ segment and tags it as cloud", () => {
     const result = parseConfluenceUrl(
       "https://acme.atlassian.net/wiki/spaces/ENG/pages/12345/Architecture-Overview"
     );
     expect(result.host).toBe("acme.atlassian.net");
     expect(result.pageId).toBe("12345");
+    expect(result.deployment).toBe("cloud");
   });
 
-  it("rejects invalid URL", () => {
+  it("parses Server / Data Center URL without /wiki/ and tags it as server", () => {
+    const result = parseConfluenceUrl(
+      "https://confluence.example.com/spaces/ENG/pages/12345/Architecture-Overview"
+    );
+    expect(result.host).toBe("confluence.example.com");
+    expect(result.pageId).toBe("12345");
+    expect(result.deployment).toBe("server");
+  });
+
+  it("rejects invalid URL with both shapes mentioned in the error", () => {
     expect(() => parseConfluenceUrl("https://example.com/not-confluence")).toThrow(/Cannot parse/);
+    expect(() => parseConfluenceUrl("https://example.com/not-confluence")).toThrow(/Cloud[\s\S]+Server/);
   });
 });
 
 describe("Jira URL parsing", () => {
-  it("parses standard Jira issue URL", () => {
+  it("parses Cloud URL on *.atlassian.net and tags it as cloud", () => {
     const result = parseJiraUrl("https://acme.atlassian.net/browse/PROJ-123");
     expect(result.host).toBe("acme.atlassian.net");
     expect(result.issueKey).toBe("PROJ-123");
+    expect(result.deployment).toBe("cloud");
+  });
+
+  it("parses Server / Data Center URL on a self-hosted domain and tags it as server", () => {
+    const result = parseJiraUrl("https://jira.example.com/browse/PROJ-456");
+    expect(result.host).toBe("jira.example.com");
+    expect(result.issueKey).toBe("PROJ-456");
+    expect(result.deployment).toBe("server");
   });
 
   it("rejects invalid URL", () => {
@@ -2163,6 +2182,25 @@ describe("resolveAuth", () => {
     } finally {
       delete process.env.__TEST_AUTH__;
     }
+  });
+
+  it("auto-prefixes Bearer for a bare PAT (no colon, no prefix)", () => {
+    process.env.__TEST_AUTH__ = "abc123-personal-access-token";
+    try {
+      expect(resolveAuth("__TEST_AUTH__")).toBe("Bearer abc123-personal-access-token");
+    } finally {
+      delete process.env.__TEST_AUTH__;
+    }
+  });
+
+  it("error message lists all three accepted forms", () => {
+    expect(() => resolveAuth("DEFINITELY_NOT_SET_VAR")).toThrow(/email:api-token/);
+    expect(() => resolveAuth("DEFINITELY_NOT_SET_VAR")).toThrow(/Bearer/);
+    expect(() => resolveAuth("DEFINITELY_NOT_SET_VAR")).toThrow(/Server.*Data Center/);
+  });
+
+  it("error message points to authEnv as the customization escape hatch", () => {
+    expect(() => resolveAuth("DEFINITELY_NOT_SET_VAR")).toThrow(/authEnv/);
   });
 });
 

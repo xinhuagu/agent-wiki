@@ -102,6 +102,59 @@ describe("COBOL field lineage", () => {
     expect(lineage).toBeNull();
   });
 
+  it("does not infer same-name fields when PIC conflicts", () => {
+    const customerNumericId = `
+       01  NUMERIC-REC.
+           05  CUSTOMER-ID       PIC 9(8).
+           05  CUSTOMER-NAME     PIC X(30).
+`;
+
+    const lineage = buildFieldLineage([
+      model(customerA, "CUSTOMER-A.cpy"),
+      model(customerNumericId, "CUSTOMER-NUMERIC.cpy"),
+      model(program("BILLINGA", "CUSTOMER-A"), "BILLINGA.cbl"),
+      model(program("BILLINGN", "CUSTOMER-NUMERIC"), "BILLINGN.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const conflictingId = [
+      ...lineage!.inferredHighConfidence,
+      ...lineage!.inferredAmbiguous,
+    ].find((entry) => entry.fieldName === "CUSTOMER-ID");
+    expect(conflictingId).toBeUndefined();
+    const matchingName = lineage!.inferredHighConfidence.find((entry) => entry.fieldName === "CUSTOMER-NAME");
+    expect(matchingName).toBeDefined();
+  });
+
+  it("does not infer same-name fields when USAGE conflicts", () => {
+    const customerCompId = `
+       01  COMP-REC.
+           05  CUSTOMER-ID       PIC 9(8) USAGE COMP-3.
+           05  CUSTOMER-NAME     PIC X(30).
+`;
+    const customerDispId = `
+       01  DISP-REC.
+           05  CUSTOMER-ID       PIC 9(8) USAGE DISPLAY.
+           05  CUSTOMER-NAME     PIC X(30).
+`;
+
+    const lineage = buildFieldLineage([
+      model(customerCompId, "CUSTOMER-COMP.cpy"),
+      model(customerDispId, "CUSTOMER-DISP.cpy"),
+      model(program("BILLINGC", "CUSTOMER-COMP"), "BILLINGC.cbl"),
+      model(program("BILLINGD", "CUSTOMER-DISP"), "BILLINGD.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const conflictingId = [
+      ...lineage!.inferredHighConfidence,
+      ...lineage!.inferredAmbiguous,
+    ].find((entry) => entry.fieldName === "CUSTOMER-ID");
+    expect(conflictingId).toBeUndefined();
+    const matchingName = lineage!.inferredHighConfidence.find((entry) => entry.fieldName === "CUSTOMER-NAME");
+    expect(matchingName).toBeDefined();
+  });
+
   it("marks competing cross-copybook matches as ambiguous", () => {
     const customerC = `
        01  PARTY-REC.

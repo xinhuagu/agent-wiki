@@ -1,21 +1,21 @@
 /**
  * Cross-program field lineage across CALL USING boundaries.
  *
- * Phase 2: build deterministic record-level lineage entries. For each parsed
- * caller's CALL site, when the callee resolves to a parsed program and arity
- * matches, link USING argument #N (resolved against the caller's data items)
- * to LINKAGE record #N in the callee. Field-level descent and weaker tiers
- * are out of scope for this phase.
+ * Phase 2: deterministic record-level lineage entries.
+ * Phase 3: descend into matching group children by position, emit entries
+ * tiered by name-suffix evidence (deterministic if names match after
+ * stripping a short prefix, high if structure matches but names diverge).
  */
 
 import type { CobolCodeModel } from "./extractors.js";
 import type { DataItemNode, SourceLocation } from "./types.js";
 import { resolveCanonicalId } from "./graph.js";
 
-export type CallBoundConfidence = "deterministic";
+export type CallBoundConfidence = "deterministic" | "high";
 
 export interface CallBoundFieldShape {
   fieldName: string;
+  qualifiedName: string;
   level: number;
   picture?: string;
   usage?: string;
@@ -33,6 +33,7 @@ export interface CallBoundEvidence {
   shapeMatch: "both-group" | "scalar-match";
   pictureMatch: boolean;
   levelMatch: boolean;
+  nameSuffixMatch: boolean;
 }
 
 export interface SerializedCallBoundLineageEntry {
@@ -62,9 +63,10 @@ function findTopLevelDataItem(items: DataItemNode[], name: string): DataItemNode
   return items.find((item) => item.name.toUpperCase() === upper);
 }
 
-function shapeOf(item: DataItemNode): CallBoundFieldShape {
+function shapeOf(item: DataItemNode, qualifiedName: string): CallBoundFieldShape {
   return {
     fieldName: item.name,
+    qualifiedName,
     level: item.level,
     picture: item.picture,
     usage: item.usage,
@@ -73,16 +75,34 @@ function shapeOf(item: DataItemNode): CallBoundFieldShape {
   };
 }
 
+const PREFIX_PATTERN = /^[A-Z]{1,4}-/;
+
+function nameSuffix(name: string): string {
+  const upper = name.toUpperCase();
+  return PREFIX_PATTERN.test(upper) ? upper.replace(PREFIX_PATTERN, "") : upper;
+}
+
+function nameSuffixMatch(a: string, b: string): boolean {
+  const upperA = a.toUpperCase();
+  const upperB = b.toUpperCase();
+  if (upperA === upperB) return true;
+  const sa = nameSuffix(upperA);
+  const sb = nameSuffix(upperB);
+  return sa === sb && sa.length > 0;
+}
+
 function compareShape(
   caller: CallBoundFieldShape,
   callee: CallBoundFieldShape,
 ): CallBoundEvidence | null {
+  const nameMatch = nameSuffixMatch(caller.fieldName, callee.fieldName);
   if (caller.isGroup && callee.isGroup) {
     return {
       arityMatch: true,
       shapeMatch: "both-group",
       pictureMatch: true,
       levelMatch: caller.level === callee.level,
+      nameSuffixMatch: nameMatch,
     };
   }
   if (!caller.isGroup && !callee.isGroup) {
@@ -96,16 +116,86 @@ function compareShape(
       shapeMatch: "scalar-match",
       pictureMatch: true,
       levelMatch: caller.level === callee.level,
+      nameSuffixMatch: nameMatch,
     };
   }
   return null;
 }
 
-function buildRationale(evidence: CallBoundEvidence, position: number): string {
+function buildRationale(
+  evidence: CallBoundEvidence,
+  position: number,
+  isTopLevel: boolean,
+): string {
   const parts = [`Position ${position}`];
   parts.push(evidence.shapeMatch === "both-group" ? "both group records" : "matching scalar PIC");
   if (evidence.levelMatch) parts.push("same level");
+  if (evidence.nameSuffixMatch) parts.push("matching name suffix");
+  else if (!isTopLevel) parts.push("name suffix differs");
   return parts.join("; ");
+}
+
+function emitPair(
+  callerItem: DataItemNode,
+  calleeItem: DataItemNode,
+  callerQualified: string,
+  calleeQualified: string,
+  position: number,
+  isTopLevel: boolean,
+  callerProgramId: string,
+  calleeProgramId: string,
+  callerSourceFile: string,
+  calleeSourceFile: string,
+  callSite: SourceLocation,
+  entries: SerializedCallBoundLineageEntry[],
+): void {
+  const callerShape = shapeOf(callerItem, callerQualified);
+  const calleeShape = shapeOf(calleeItem, calleeQualified);
+  const evidence = compareShape(callerShape, calleeShape);
+  if (!evidence) return;
+
+  const confidence: CallBoundConfidence =
+    isTopLevel || evidence.nameSuffixMatch ? "deterministic" : "high";
+
+  entries.push({
+    confidence,
+    position,
+    caller: {
+      ...callerShape,
+      programId: callerProgramId,
+      sourceFile: callerSourceFile,
+    },
+    callee: {
+      ...calleeShape,
+      programId: calleeProgramId,
+      sourceFile: calleeSourceFile,
+    },
+    callSite,
+    evidence,
+    rationale: buildRationale(evidence, position, isTopLevel),
+  });
+
+  if (callerShape.isGroup && calleeShape.isGroup) {
+    const pairs = Math.min(callerItem.children.length, calleeItem.children.length);
+    for (let k = 0; k < pairs; k++) {
+      const childCaller = callerItem.children[k]!;
+      const childCallee = calleeItem.children[k]!;
+      emitPair(
+        childCaller,
+        childCallee,
+        `${callerQualified}.${childCaller.name}`,
+        `${calleeQualified}.${childCallee.name}`,
+        position,
+        false,
+        callerProgramId,
+        calleeProgramId,
+        callerSourceFile,
+        calleeSourceFile,
+        callSite,
+        entries,
+      );
+    }
+  }
 }
 
 export function buildCallBoundLineage(models: CobolCodeModel[]): CallBoundLineage | null {
@@ -128,6 +218,8 @@ export function buildCallBoundLineage(models: CobolCodeModel[]): CallBoundLineag
       if (callee.linkageItems.length !== call.usingArgs.length) continue;
 
       callSites++;
+      const callerProgramId = `program:${resolveCanonicalId(caller)}`;
+      const calleeProgramId = `program:${resolveCanonicalId(callee)}`;
 
       for (let i = 0; i < call.usingArgs.length; i++) {
         const callerArgName = call.usingArgs[i]!;
@@ -135,28 +227,20 @@ export function buildCallBoundLineage(models: CobolCodeModel[]): CallBoundLineag
         if (!callerItem) continue;
         const calleeRecord = callee.linkageItems[i]!;
 
-        const callerShape = shapeOf(callerItem);
-        const calleeShape = shapeOf(calleeRecord);
-        const evidence = compareShape(callerShape, calleeShape);
-        if (!evidence) continue;
-
-        entries.push({
-          confidence: "deterministic",
-          position: i,
-          caller: {
-            ...callerShape,
-            programId: `program:${resolveCanonicalId(caller)}`,
-            sourceFile: caller.sourceFile,
-          },
-          callee: {
-            ...calleeShape,
-            programId: `program:${resolveCanonicalId(callee)}`,
-            sourceFile: callee.sourceFile,
-          },
-          callSite: call.loc,
-          evidence,
-          rationale: buildRationale(evidence, i),
-        });
+        emitPair(
+          callerItem,
+          calleeRecord,
+          callerItem.name,
+          calleeRecord.name,
+          i,
+          true,
+          callerProgramId,
+          calleeProgramId,
+          caller.sourceFile,
+          callee.sourceFile,
+          call.loc,
+          entries,
+        );
       }
     }
   }
@@ -167,6 +251,7 @@ export function buildCallBoundLineage(models: CobolCodeModel[]): CallBoundLineag
     a.caller.programId.localeCompare(b.caller.programId)
     || a.callee.programId.localeCompare(b.callee.programId)
     || a.position - b.position
+    || a.caller.qualifiedName.localeCompare(b.caller.qualifiedName)
   );
 
   return {

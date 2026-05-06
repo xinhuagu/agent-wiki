@@ -382,6 +382,62 @@ describe("COBOL field lineage", () => {
     expect(page.content).toContain("shape-mismatch");
   });
 
+  it("renders the Excluded table rows in pinned kind order, not parser-emit order", () => {
+    // Caller has TWO problematic CALLs in this order in source:
+    //   1. CALL "MISSING" — unresolved-callee (literal, not in corpus)
+    //   2. CALL "CALLEE" with arity mismatch
+    // The diagnostic emit order is unresolved-callee, then arity-mismatch.
+    // The pinned CALL_BOUND_KIND_ORDER also lists unresolved-callee before
+    // arity-mismatch, so the rendered table must reflect that order
+    // independent of parser order. Construct a case where the parser-emit
+    // order and pinned order DIFFER to make the test meaningful: emit
+    // arity-mismatch first, then unresolved-callee.
+    const callerSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-A               PIC X(5).
+       01  WS-B               PIC X(5).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "CALLEE" USING WS-A WS-B.
+           CALL "MISSING" USING WS-A.
+           STOP RUN.
+`;
+    const calleeSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-A               PIC X(5).
+       PROCEDURE DIVISION USING LK-A.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+    const callLineage = buildCallBoundLineage([
+      model(callerSrc, "CALLER.cbl"),
+      model(calleeSrc, "CALLEE.cbl"),
+    ]);
+    expect(callLineage).not.toBeNull();
+    // Sanity check: parser-emit order has arity-mismatch BEFORE unresolved-callee.
+    expect(callLineage!.diagnostics.map((d) => d.kind)).toEqual([
+      "arity-mismatch",
+      "unresolved-callee",
+    ]);
+    const lineage = attachCallBoundLineage(null, callLineage);
+    const page = generateFieldLineagePage(lineage!);
+    // Rendered table must have unresolved-callee row BEFORE arity-mismatch row,
+    // matching CALL_BOUND_KIND_ORDER, not the parser order.
+    const unresolvedAt = page.content.indexOf("| unresolved-callee |");
+    const arityAt = page.content.indexOf("| arity-mismatch |");
+    expect(unresolvedAt).toBeGreaterThan(0);
+    expect(arityAt).toBeGreaterThan(0);
+    expect(unresolvedAt).toBeLessThan(arityAt);
+  });
+
   it("omits the Excluded section when there are no diagnostics", () => {
     // Same shape on both sides — the call resolves cleanly and no diagnostic fires.
     const callerSrc = `

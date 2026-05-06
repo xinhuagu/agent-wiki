@@ -851,20 +851,26 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
 // severity / "earliness in pipeline" so the user reads roughly upstream-to-
 // downstream. Pinned here so the wiki page is byte-stable across rebuilds
 // regardless of which diagnostic fired first in the parsed corpus.
-const CALL_BOUND_KIND_ORDER = [
+//
+// Typed against the union so removing a valid kind from the type fails
+// typecheck. The renderer additionally falls back to rendering any kinds
+// not listed here at the end of the table, so a future contributor adding
+// a new kind doesn't silently drop its data — they'll see it appended,
+// notice the missing pinned position, and update this array.
+const CALL_BOUND_KIND_ORDER: readonly CallBoundLineage["diagnostics"][number]["kind"][] = [
   "unresolved-callee",
   "dynamic-call",
   "arity-mismatch",
   "shape-mismatch",
   "caller-arg-not-top-level",
-] as const;
+];
 
-const DB2_KIND_ORDER = [
+const DB2_KIND_ORDER: readonly Db2Lineage["diagnostics"][number]["kind"][] = [
   "non-classifiable-op",
   "writer-only",
   "reader-only",
   "self-loop",
-] as const;
+];
 
 /**
  * Render an "Excluded by diagnostic" subsection under a lineage family.
@@ -894,6 +900,15 @@ function renderCallBoundExclusions(
     const sampleText = `\`${sample.target}\` in ${displayLabel(sample.callerProgramId)} (line ${sample.callSite.line})`;
     lines.push(`| ${kind} | ${count} | ${sampleText} |`);
   }
+  // Fallback: any kinds not in the pinned order render at the end (in
+  // insertion order). Prevents silent data loss when a new kind is added
+  // to the type union without updating CALL_BOUND_KIND_ORDER.
+  const known = new Set<string>(CALL_BOUND_KIND_ORDER);
+  for (const [kind, { count, sample }] of byKind) {
+    if (known.has(kind)) continue;
+    const sampleText = `\`${sample.target}\` in ${displayLabel(sample.callerProgramId)} (line ${sample.callSite.line})`;
+    lines.push(`| ${kind} | ${count} | ${sampleText} |`);
+  }
   lines.push("");
 }
 
@@ -913,16 +928,28 @@ function renderDb2Exclusions(
   lines.push("");
   lines.push("| Kind | Count | Sample |");
   lines.push("|------|-------|--------|");
-  for (const kind of DB2_KIND_ORDER) {
-    const bucket = byKind.get(kind);
-    if (!bucket) continue;
-    const { count, sample } = bucket;
+  const renderRow = (
+    kind: string,
+    count: number,
+    sample: { programId?: string; table?: string; operation?: string },
+  ): void => {
     const parts: string[] = [];
     if (sample.programId) parts.push(displayLabel(sample.programId));
     if (sample.table) parts.push(`table \`${sample.table}\``);
     if (sample.operation) parts.push(`op \`${sample.operation}\``);
     const sampleText = parts.length > 0 ? parts.join(", ") : "—";
     lines.push(`| ${kind} | ${count} | ${sampleText} |`);
+  };
+  for (const kind of DB2_KIND_ORDER) {
+    const bucket = byKind.get(kind);
+    if (!bucket) continue;
+    renderRow(kind, bucket.count, bucket.sample);
+  }
+  // Fallback for kinds not in DB2_KIND_ORDER — see CALL renderer for rationale.
+  const known = new Set<string>(DB2_KIND_ORDER);
+  for (const [kind, { count, sample }] of byKind) {
+    if (known.has(kind)) continue;
+    renderRow(kind, count, sample);
   }
   lines.push("");
 }

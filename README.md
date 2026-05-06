@@ -6,7 +6,7 @@ Instead of retrieving raw fragments every query (RAG), your agent compiles, refi
 
 Works with Claude Code, Cursor, Windsurf, and any MCP client. Also installable as a native skill for Claude Code. No LLM built in — your agent IS the intelligence.
 
-[![npm](https://img.shields.io/npm/v/@agent-wiki/mcp-server?label=%40agent-wiki%2Fmcp-server)](https://www.npmjs.com/package/@agent-wiki/mcp-server)
+[![npm](https://img.shields.io/npm/v/@agent-wiki/mcp?label=%40agent-wiki%2Fmcp)](https://www.npmjs.com/package/@agent-wiki/mcp)
 [![CI](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 [![MCP](https://img.shields.io/badge/protocol-MCP-blue)](https://modelcontextprotocol.io)
@@ -31,7 +31,7 @@ Add to your MCP client config:
   "mcpServers": {
     "agent-wiki": {
       "command": "npx",
-      "args": ["-y", "@agent-wiki/mcp-server", "serve", "--wiki-path", "/path/to/knowledge"]
+      "args": ["-y", "@agent-wiki/mcp", "serve", "--wiki-path", "/path/to/knowledge"]
     }
   }
 }
@@ -40,7 +40,7 @@ Add to your MCP client config:
 ### Option B: Native Skill (Claude Code)
 
 ```bash
-npm install -g @agent-wiki/mcp-server
+npm install -g @agent-wiki/mcp
 
 # Install as Claude Code plugin
 agent-wiki install claude-code
@@ -49,7 +49,7 @@ agent-wiki install claude-code
 ### Option C: CLI only
 
 ```bash
-npx @agent-wiki/mcp-server call wiki_search '{"query": "deployment"}'
+npx @agent-wiki/mcp call wiki_search '{"query": "deployment"}'
 ```
 
 ### Option D: 3D Graph Viewer
@@ -57,7 +57,7 @@ npx @agent-wiki/mcp-server call wiki_search '{"query": "deployment"}'
 See your wiki as a realtime 3D knowledge graph — edits push live via SSE. Included in the main package, no separate install needed.
 
 ```bash
-npm install -g @agent-wiki/mcp-server
+npm install -g @agent-wiki/mcp
 agent-wiki web --wiki-path ./wiki --open
 ```
 

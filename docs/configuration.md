@@ -63,7 +63,7 @@ Resolution priority: CLI `--workspace` > `AGENT_WIKI_WORKSPACE` env > config fil
 Code and data live in separate directories. The tool is stateless — all state lives in the workspace:
 
 ```
-npx @agent-wiki/mcp-server serve --wiki-path ./config --workspace ./data
+npx @agent-wiki/mcp serve --wiki-path ./config --workspace ./data
 ```
 
 This creates:

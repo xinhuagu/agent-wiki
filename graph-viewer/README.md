@@ -6,7 +6,7 @@ Edit a `.md` file — the graph updates live.
 ## Zero coupling with core
 
 This package is **physically and functionally independent** from
-`@agent-wiki/mcp-server`:
+`@agent-wiki/mcp`:
 
 - Core `agent-wiki` does not import, require, or depend on this package.
 - This package reads a wiki directory as plain Markdown (frontmatter +
@@ -23,7 +23,7 @@ After publishing, three equivalent ways to launch:
 ```bash
 # 1. Through the core CLI (thin handoff — installs nothing in core, resolves
 #    and spawns this package at runtime). Needs both packages installed.
-npm install -g @agent-wiki/mcp-server @agent-wiki/graph-viewer
+npm install -g @agent-wiki/mcp @agent-wiki/graph-viewer
 agent-wiki web --wiki-path ./wiki --open
 
 # 2. Standalone binary, after installing this package:

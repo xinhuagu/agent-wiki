@@ -17,10 +17,10 @@
  *   - MCP server interface
  *
  * Usage as MCP server:
- *   npx @agent-wiki/mcp-server
+ *   npx @agent-wiki/mcp
  *
  * Usage as library:
- *   import { Wiki } from "@agent-wiki/mcp-server";
+ *   import { Wiki } from "@agent-wiki/mcp";
  *   const wiki = new Wiki("/path/to/kb");
  *   wiki.rawAdd("paper.md", { content: "...", sourceUrl: "..." });
  *   wiki.write("concept-gil.md", content);

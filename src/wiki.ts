@@ -1364,15 +1364,17 @@ _Chronological view of all knowledge in this wiki._
 
     // Parse incoming content to inject timestamps
     const parsed = matter(content);
+    // Read existing on-disk frontmatter once — used for created-timestamp
+    // preservation and for evidence-first classification (telemetry dedupe
+    // and legacy-flag preservation across edits).
+    const existingFrontmatter: Record<string, unknown> | null = existsSync(fullPath)
+      ? (matter(readFileSync(fullPath, "utf-8")).data as Record<string, unknown>)
+      : null;
+
     if (!parsed.data.created) {
-      // Check if page already exists — preserve original created time
-      if (existsSync(fullPath)) {
-        const existing = matter(readFileSync(fullPath, "utf-8"));
-        const ec = existing.data.created;
-        parsed.data.created = ec instanceof Date ? ec.toISOString() : (ec as string) ?? now;
-      } else {
-        parsed.data.created = now;
-      }
+      const ec = existingFrontmatter?.created;
+      parsed.data.created =
+        ec instanceof Date ? ec.toISOString() : (ec as string) ?? now;
     }
     parsed.data.updated = now;
 
@@ -1387,22 +1389,41 @@ _Chronological view of all knowledge in this wiki._
       // synthesis pages) count as legitimate synthesis.
       const synthesisFlag =
         parsed.data.synthesis === true || parsed.data.type === "synthesis";
-      const legacyUnsupported = parsed.data.legacyUnsupported === true;
-      // Only stamp `unsupported: true` on genuinely-new unsupported writes.
-      // Pages already migrated as legacy (legacyUnsupported: true) keep that
-      // marker without piling on a redundant new-write flag.
-      if (sourcesCount === 0 && !synthesisFlag && !legacyUnsupported) {
-        parsed.data.unsupported = true;
-        appendUnsupportedWriteEvent(this.config.workspace, {
-          page: pagePath,
-          timestamp: now,
-          agentHint: source,
-          hadSynthesisFlag: false,
-          rawSourcesCount: 0,
-        });
-      } else if (sourcesCount > 0 || synthesisFlag) {
-        // Page transitioned out of unsupported territory — clear the flag
-        // if a previous write stamped it.
+      // Look at both the on-disk frontmatter (most-recent saved state) and
+      // the submitted content — internal flags like `legacyUnsupported`
+      // typically come from on-disk state (preserved across edits), but
+      // migration injects them via the submitted content.
+      const existingHadUnsupported = existingFrontmatter?.unsupported === true;
+      const isLegacy =
+        parsed.data.legacyUnsupported === true ||
+        existingFrontmatter?.legacyUnsupported === true;
+
+      if (sourcesCount === 0 && !synthesisFlag) {
+        if (isLegacy) {
+          // Grandfathered page: preserve the legacy marker, never stamp
+          // `unsupported`, and stay silent on telemetry — the page is not a
+          // fresh unsupported assertion. Re-asserting the flag handles the
+          // case where the submitter dropped it from their content but
+          // it was set on disk.
+          parsed.data.legacyUnsupported = true;
+          if (parsed.data.unsupported === true) delete parsed.data.unsupported;
+        } else {
+          parsed.data.unsupported = true;
+          // Dedupe: only fire telemetry on the transition into unsupported,
+          // not on subsequent edits of an already-unsupported page. Phase 2b
+          // wants distinct assertions, not write counts.
+          if (!existingHadUnsupported) {
+            appendUnsupportedWriteEvent(this.config.workspace, {
+              page: pagePath,
+              timestamp: now,
+              agentHint: source,
+              hadSynthesisFlag: false,
+              rawSourcesCount: 0,
+            });
+          }
+        }
+      } else {
+        // Page is grounded or synthesis — clear any prior unsupported markers.
         if (parsed.data.unsupported === true) delete parsed.data.unsupported;
         if (parsed.data.legacyUnsupported === true) delete parsed.data.legacyUnsupported;
       }

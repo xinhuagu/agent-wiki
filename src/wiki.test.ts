@@ -960,6 +960,35 @@ This is a test.
       const idx = wiki.read("index.md");
       expect(idx?.frontmatter.unsupported).toBeUndefined();
     });
+
+    it("dedupes telemetry: re-editing an unsupported page does not fire a second event", async () => {
+      const wiki = freshWiki();
+      const { readWriteLog } = await import("./evidence-write-log.js");
+      wiki.write("notes.md", "---\ntitle: N\n---\nFirst draft.");
+      wiki.write("notes.md", "---\ntitle: N\n---\nSecond draft.");
+      wiki.write("notes.md", "---\ntitle: N\n---\nThird draft.");
+      const events = readWriteLog(wiki.config.workspace);
+      // Three writes, but only the first one is a transition into
+      // unsupported — telemetry should record exactly one event.
+      expect(events.filter((e) => e.page === "notes.md")).toHaveLength(1);
+    });
+
+    it("preserves legacyUnsupported flag across edits and stays silent on telemetry", async () => {
+      const wiki = freshWiki();
+      const { readWriteLog } = await import("./evidence-write-log.js");
+      // Migration tags an existing page as legacy.
+      wiki.write("opinion.md", "---\ntitle: O\nlegacyUnsupported: true\n---\nOld take.");
+      // User re-edits without including legacyUnsupported in their content —
+      // the on-disk flag must be preserved and `unsupported: true` must NOT
+      // be stamped (otherwise we lose the grandfather audit trail).
+      wiki.write("opinion.md", "---\ntitle: O\n---\nRevised take.");
+      const after = wiki.read("opinion.md");
+      expect(after?.frontmatter.legacyUnsupported).toBe(true);
+      expect(after?.frontmatter.unsupported).toBeUndefined();
+      // No telemetry should fire for legacy edits.
+      const events = readWriteLog(wiki.config.workspace);
+      expect(events.filter((e) => e.page === "opinion.md")).toHaveLength(0);
+    });
   });
 });
 

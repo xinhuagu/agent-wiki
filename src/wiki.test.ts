@@ -900,6 +900,111 @@ This is a test.
     const page = wiki.read("linker.md");
     expect(page!.links).toEqual(["concept-a", "concept-b"]);
   });
+
+  describe("evidence-first phase 2a — write classification", () => {
+    it("grounded: page with non-empty sources is left alone", () => {
+      const wiki = freshWiki();
+      wiki.write("g.md", "---\ntitle: G\nsources: [raw/x.md]\n---\nGrounded body.");
+      const page = wiki.read("g.md");
+      expect(page!.frontmatter.unsupported).toBeUndefined();
+      expect(page!.frontmatter.legacyUnsupported).toBeUndefined();
+    });
+
+    it("synthesis (flag): page with synthesis: true is left alone", () => {
+      const wiki = freshWiki();
+      wiki.write("s.md", "---\ntitle: S\nsynthesis: true\n---\nAggregated.");
+      const page = wiki.read("s.md");
+      expect(page!.frontmatter.unsupported).toBeUndefined();
+      expect(page!.frontmatter.synthesis).toBe(true);
+    });
+
+    it("synthesis (legacy type field): page with type: synthesis is left alone", () => {
+      const wiki = freshWiki();
+      wiki.write("legacy-synth.md", "---\ntitle: L\ntype: synthesis\n---\nAggregated.");
+      const page = wiki.read("legacy-synth.md");
+      expect(page!.frontmatter.unsupported).toBeUndefined();
+    });
+
+    it("unsupported: page with no sources and no synthesis flag is stamped", () => {
+      const wiki = freshWiki();
+      wiki.write("u.md", "---\ntitle: U\n---\nMy assertion.");
+      const page = wiki.read("u.md");
+      expect(page!.frontmatter.unsupported).toBe(true);
+    });
+
+    it("clears unsupported: true when a follow-up write adds sources", () => {
+      const wiki = freshWiki();
+      wiki.write("x.md", "---\ntitle: X\n---\nFirst write.");
+      const first = wiki.read("x.md");
+      expect(first!.frontmatter.unsupported).toBe(true);
+      wiki.write("x.md", "---\ntitle: X\nsources: [raw/p.md]\n---\nNow grounded.");
+      const second = wiki.read("x.md");
+      expect(second!.frontmatter.unsupported).toBeUndefined();
+    });
+
+    it("does not stamp unsupported on legacyUnsupported migrated pages", () => {
+      const wiki = freshWiki();
+      // Migration write — sets legacyUnsupported. The classifier must
+      // respect this and not pile on a separate `unsupported` flag.
+      wiki.write("legacy.md", "---\ntitle: L\nlegacyUnsupported: true\n---\nOld page.");
+      const page = wiki.read("legacy.md");
+      expect(page!.frontmatter.legacyUnsupported).toBe(true);
+      expect(page!.frontmatter.unsupported).toBeUndefined();
+    });
+
+    it("does not stamp unsupported on system pages (index/log/timeline)", () => {
+      const wiki = freshWiki();
+      // index.md is auto-generated but the classifier shouldn't stamp it
+      // anyway — it's synthesis by construction.
+      wiki.rebuildIndex();
+      const idx = wiki.read("index.md");
+      expect(idx?.frontmatter.unsupported).toBeUndefined();
+    });
+
+    it("dedupes telemetry: re-editing an unsupported page does not fire a second event", async () => {
+      const wiki = freshWiki();
+      const { readWriteLog } = await import("./evidence-write-log.js");
+      wiki.write("notes.md", "---\ntitle: N\n---\nFirst draft.");
+      wiki.write("notes.md", "---\ntitle: N\n---\nSecond draft.");
+      wiki.write("notes.md", "---\ntitle: N\n---\nThird draft.");
+      const events = readWriteLog(wiki.config.workspace);
+      // Three writes, but only the first one is a transition into
+      // unsupported — telemetry should record exactly one event.
+      expect(events.filter((e) => e.page === "notes.md")).toHaveLength(1);
+    });
+
+    it("recovers from a corrupted existing-page frontmatter (overwrites without crashing)", () => {
+      const wiki = freshWiki();
+      // Write garbage YAML to a page file directly. wiki.write must not
+      // crash when this overwrites — it should treat existing frontmatter
+      // as absent, write fresh content, and stamp classification normally.
+      const fullPath = join(wiki.config.wikiDir, "junk.md");
+      writeFileSync(fullPath, "---\nthis is :: not valid:\n  - yaml: [unbalanced\n---\nbody.");
+      expect(() =>
+        wiki.write("junk.md", "---\ntitle: Junk\n---\nClean body.")
+      ).not.toThrow();
+      const after = wiki.read("junk.md");
+      expect(after?.frontmatter.title).toBe("Junk");
+      expect(after?.frontmatter.unsupported).toBe(true);
+    });
+
+    it("preserves legacyUnsupported flag across edits and stays silent on telemetry", async () => {
+      const wiki = freshWiki();
+      const { readWriteLog } = await import("./evidence-write-log.js");
+      // Migration tags an existing page as legacy.
+      wiki.write("opinion.md", "---\ntitle: O\nlegacyUnsupported: true\n---\nOld take.");
+      // User re-edits without including legacyUnsupported in their content —
+      // the on-disk flag must be preserved and `unsupported: true` must NOT
+      // be stamped (otherwise we lose the grandfather audit trail).
+      wiki.write("opinion.md", "---\ntitle: O\n---\nRevised take.");
+      const after = wiki.read("opinion.md");
+      expect(after?.frontmatter.legacyUnsupported).toBe(true);
+      expect(after?.frontmatter.unsupported).toBeUndefined();
+      // No telemetry should fire for legacy edits.
+      const events = readWriteLog(wiki.config.workspace);
+      expect(events.filter((e) => e.page === "opinion.md")).toHaveLength(0);
+    });
+  });
 });
 
 describe("wiki.delete", () => {

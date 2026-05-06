@@ -771,7 +771,15 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
     lines.push("");
     lines.push(`Cross-program field flow at static \`CALL ... USING\` sites. Top-level entries link a caller's USING argument to the callee's matching LINKAGE record by position; child entries descend into matching group children. Confidence is \`deterministic\` when names align (after stripping a short prefix like \`WS-\`/\`LK-\`) and \`high\` when only structure aligns.`);
     lines.push("");
-    lines.push(`Coverage: ${callBound.summary.callSites} call site(s), ${callBound.entries.length} field pair(s).`);
+    // `callSites` only counts CALLs that resolved to a callee in the corpus
+    // and matched arity. Sites blocked at those gates appear in the Excluded
+    // subsection below — wording reflects this so a "0 call sites" display
+    // doesn't mislead when the source actually has CALLs that all failed.
+    const totalDiag = callBound.diagnostics.length;
+    const coverage = totalDiag > 0
+      ? `Coverage: ${callBound.summary.callSites} resolved call site(s), ${callBound.entries.length} field pair(s); ${totalDiag} excluded — see below.`
+      : `Coverage: ${callBound.summary.callSites} call site(s), ${callBound.entries.length} field pair(s).`;
+    lines.push(coverage);
     lines.push("");
     if (callBound.entries.length > 0) {
       const grouped = groupCallBoundByPair(callBound.entries);
@@ -810,7 +818,11 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
     lines.push("");
     lines.push(`Cross-program field flow inferred from shared DB2 tables. A pair appears when one program writes to a table (\`INSERT\` / \`UPDATE\` / \`DELETE\` / \`MERGE\`) and another reads from it (\`SELECT\` / \`FETCH\`). Host variables on each side are listed; mapping them to specific columns requires a SQL parser and is out of scope here.`);
     lines.push("");
-    lines.push(`Coverage: ${db2.summary.sharedTables} shared table(s), ${db2.entries.length} writer→reader pair(s).`);
+    const totalDb2Diag = db2.diagnostics.length;
+    const db2Coverage = totalDb2Diag > 0
+      ? `Coverage: ${db2.summary.sharedTables} shared table(s), ${db2.entries.length} writer→reader pair(s); ${totalDb2Diag} excluded — see below.`
+      : `Coverage: ${db2.summary.sharedTables} shared table(s), ${db2.entries.length} writer→reader pair(s).`;
+    lines.push(db2Coverage);
     lines.push("");
     if (db2.entries.length > 0) {
       lines.push("| Table | Writer | Writer Ops | Writer Host Vars | Reader | Reader Ops | Reader Host Vars |");

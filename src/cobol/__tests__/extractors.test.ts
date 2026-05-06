@@ -152,6 +152,44 @@ describe("COBOL extractors", () => {
       expect(model.calls[0].usingArgs).toEqual(["A", "B", "C"]);
     });
 
+    it("records targetKind=literal for CALL \"NAME\" and CALL 'NAME'", () => {
+      const src = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. LITERALCALL.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "DOUBLEQUOTED" USING WS-A.
+           CALL 'SINGLEQUOTED' USING WS-A.
+           STOP RUN.
+`;
+      const model = extractModel(parse(src, "LITERALCALL.cbl"));
+      expect(model.calls).toHaveLength(2);
+      expect(model.calls[0].target).toBe("DOUBLEQUOTED");
+      expect(model.calls[0].targetKind).toBe("literal");
+      expect(model.calls[1].target).toBe("SINGLEQUOTED");
+      expect(model.calls[1].targetKind).toBe("literal");
+    });
+
+    it("records targetKind=identifier for CALL <variable> (dynamic call)", () => {
+      const src = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. DYNAMIC.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PROG-NAME       PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL WS-PROG-NAME USING WS-A.
+           STOP RUN.
+`;
+      const model = extractModel(parse(src, "DYNAMIC.cbl"));
+      expect(model.calls).toHaveLength(1);
+      expect(model.calls[0].target).toBe("WS-PROG-NAME");
+      expect(model.calls[0].targetKind).toBe("identifier");
+    });
+
     it("stops at GIVING / RETURNING / END-CALL", () => {
       const src = `
        IDENTIFICATION DIVISION.

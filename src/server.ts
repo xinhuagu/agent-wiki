@@ -19,6 +19,7 @@ import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs
 import { buildSearchEnvelope, downgradeForReadPage } from "./evidence-search.js";
 import { rotateEventLog, summarizeLastWeek } from "./evidence-write-log.js";
 import { migrateExistingPagesForEvidence } from "./evidence-migration.js";
+import type { EvidenceEnvelope } from "./evidence.js";
 import { join, resolve, basename, extname } from "node:path";
 import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob, safePath } from "./wiki.js";
 import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
@@ -1111,6 +1112,42 @@ function buildFieldLineageResponse(
     inferredEntryMatches(entry, fieldName, qualifiedName, copybook)
   );
 
+  // Top-level envelope summarizes the strongest evidence in the response.
+  // Consumers (LLM agents, downstream tools) branch on `confidence` /
+  // `abstain` without inspecting per-entry tier detail.
+  const evidence: EvidenceEnvelope =
+    deterministic.length > 0
+      ? {
+          confidence: "strong",
+          basis: "deterministic",
+          abstain: false,
+          rationale: `${deterministic.length} deterministic match(es) via copybook lineage.`,
+          provenance: [],
+        }
+      : inferredHighConfidence.length > 0
+      ? {
+          confidence: "weak",
+          basis: "inferred",
+          abstain: false,
+          rationale: `${inferredHighConfidence.length} inferred high-confidence match(es); no deterministic matches.`,
+          provenance: [],
+        }
+      : inferredAmbiguous.length > 0
+      ? {
+          confidence: "absent",
+          basis: "inferred",
+          abstain: true,
+          rationale: `${inferredAmbiguous.length} ambiguous match(es) only; lineage cannot be determined with confidence.`,
+          provenance: [],
+        }
+      : {
+          confidence: "absent",
+          basis: "inferred",
+          abstain: true,
+          rationale: "No matches found for the requested field.",
+          provenance: [],
+        };
+
   return {
     query: {
       type: "field_lineage",
@@ -1124,6 +1161,7 @@ function buildFieldLineageResponse(
       inferredHighConfidenceMatches: inferredHighConfidence.length,
       inferredAmbiguousMatches: inferredAmbiguous.length,
     },
+    evidence,
     deterministic,
     inferredHighConfidence,
     inferredAmbiguous,
@@ -1326,6 +1364,37 @@ function buildImpactResponse(graph: KnowledgeGraph, sourceNode: GraphNode, maxDe
     Array.from(diagnosticNodeIds(diag)).some((id) => relevantNodeIds.has(id))
   );
 
+  // Envelope reflects the weakest link in the impact path: any unresolved
+  // node or any non-deterministic edge downgrades the whole response,
+  // because a consumer claiming "X impacts Y" is only as strong as the
+  // shakiest hop.
+  const evidence: EvidenceEnvelope =
+    impactedIds.size === 0
+      ? {
+          confidence: "absent",
+          basis: "deterministic",
+          abstain: true,
+          rationale: "No nodes impacted by the requested source.",
+          provenance: [],
+        }
+      : unresolvedNodes === 0 && lowerConfidencePaths === 0
+      ? {
+          confidence: "strong",
+          basis: "deterministic",
+          abstain: false,
+          rationale: `${impactedIds.size} node(s) reachable via fully deterministic edges.`,
+          provenance: [],
+        }
+      : {
+          confidence: "weak",
+          basis: "inferred",
+          abstain: false,
+          rationale:
+            `${impactedIds.size} node(s) reached, with ${unresolvedNodes} unresolved `
+            + `and ${lowerConfidencePaths} non-deterministic path(s).`,
+          provenance: [],
+        };
+
   return {
     query: {
       requested: sourceNode.id,
@@ -1346,6 +1415,7 @@ function buildImpactResponse(graph: KnowledgeGraph, sourceNode: GraphNode, maxDe
       lowerConfidencePaths,
       diagnostics: relevantDiagnostics.length,
     },
+    evidence,
     impactedByDepth,
     diagnostics: relevantDiagnostics,
   };
@@ -2244,7 +2314,28 @@ export async function handleTool(
       }
       const ast = plugin.parse(rawResult.content, filePath);
       const refs = plugin.traceVariable(ast, varName);
-      return JSON.stringify({ variable: varName, file: filePath, references: refs }, null, 2);
+      // Trace is intra-file structural lookup — strong when references found,
+      // absent + abstain when nothing matches the requested name.
+      const traceEnvelope: EvidenceEnvelope = refs.length > 0
+        ? {
+            confidence: "strong",
+            basis: "deterministic",
+            abstain: false,
+            rationale: `${refs.length} reference(s) to \`${varName}\` in ${filePath}.`,
+            provenance: [{ raw: filePath }],
+          }
+        : {
+            confidence: "absent",
+            basis: "deterministic",
+            abstain: true,
+            rationale: `No references to \`${varName}\` found in ${filePath}.`,
+            provenance: [{ raw: filePath }],
+          };
+      return JSON.stringify(
+        { variable: varName, file: filePath, evidence: traceEnvelope, references: refs },
+        null,
+        2,
+      );
     }
 
     case "code_impact": {

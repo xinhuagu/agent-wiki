@@ -10,8 +10,32 @@
 import type { CobolCodeModel } from "./extractors.js";
 import type { DataItemNode, SourceLocation } from "./types.js";
 import { resolveCanonicalId } from "./graph.js";
+import { cobolTierToEvidence } from "./evidence-mapping.js";
+import type { EvidenceEnvelope } from "../evidence.js";
 
 export type CallBoundConfidence = "deterministic" | "high";
+
+/**
+ * Reasons a CALL site or USING-arg pair was excluded from `entries`. Each
+ * silent skip in `buildCallBoundLineage` becomes one diagnostic so the user
+ * can audit why their lineage trace stops at a particular boundary, instead
+ * of guessing whether the data is missing or the analysis chose to drop it.
+ */
+export type CallBoundDiagnosticKind =
+  | "unresolved-callee"        // CALL "FOO" but FOO not in corpus
+  | "dynamic-call"             // CALL <identifier> (resolved at runtime)
+  | "arity-mismatch"           // arg count != callee linkage record count
+  | "shape-mismatch"           // caller/callee record shapes incompatible
+  | "caller-arg-not-top-level"; // USING arg name not a top-level data item
+
+export interface CallBoundDiagnostic {
+  kind: CallBoundDiagnosticKind;
+  callerProgramId: string;
+  /** Callee name as written at the call site (literal stripped of quotes, or identifier). */
+  target: string;
+  callSite: SourceLocation;
+  rationale: string;
+}
 
 export interface CallBoundFieldShape {
   fieldName: string;
@@ -42,7 +66,14 @@ export interface SerializedCallBoundLineageEntry {
   caller: CallBoundParticipant;
   callee: CallBoundParticipant;
   callSite: SourceLocation;
+  /** Domain-specific evidence detail (shape match, picture match, etc.). */
   evidence: CallBoundEvidence;
+  /**
+   * Language-agnostic envelope derived from `confidence` via
+   * `cobolTierToEvidence` — the consumer-facing summary that callers branch
+   * on without parsing domain detail.
+   */
+  envelope: EvidenceEnvelope;
   rationale: string;
 }
 
@@ -50,8 +81,11 @@ export interface CallBoundLineage {
   summary: {
     callSites: number;
     pairs: number;
+    /** Total skipped sites — sum of `diagnostics` length, broken down per kind. */
+    diagnosticsByKind: Record<CallBoundDiagnosticKind, number>;
   };
   entries: SerializedCallBoundLineageEntry[];
+  diagnostics: CallBoundDiagnostic[];
 }
 
 function isCopybook(filename: string): boolean {
@@ -147,12 +181,31 @@ function emitPair(
   callerSourceFile: string,
   calleeSourceFile: string,
   callSite: SourceLocation,
+  calleeName: string,
   entries: SerializedCallBoundLineageEntry[],
+  diagnostics: CallBoundDiagnostic[],
 ): void {
   const callerShape = shapeOf(callerItem, callerQualified);
   const calleeShape = shapeOf(calleeItem, calleeQualified);
   const evidence = compareShape(callerShape, calleeShape);
-  if (!evidence) return;
+  if (!evidence) {
+    // Only surface shape-mismatch at top level — descending into children of
+    // an already-emitted group, then mismatching, is a routine outcome of the
+    // structural match and would flood the diagnostic list with noise.
+    if (isTopLevel) {
+      diagnostics.push({
+        kind: "shape-mismatch",
+        callerProgramId,
+        target: calleeName,
+        callSite,
+        rationale:
+          `Position ${position}: caller \`${callerQualified}\` and callee `
+          + `\`${calleeQualified}\` have incompatible shapes `
+          + `(group/scalar mix or differing PICTURE).`,
+      });
+    }
+    return;
+  }
 
   const confidence: CallBoundConfidence =
     isTopLevel || evidence.nameSuffixMatch ? "deterministic" : "high";
@@ -172,6 +225,7 @@ function emitPair(
     },
     callSite,
     evidence,
+    envelope: buildEnvelope(confidence, callerSourceFile, calleeSourceFile, callSite.line),
     rationale: buildRationale(evidence, position, isTopLevel),
   });
 
@@ -192,10 +246,34 @@ function emitPair(
         callerSourceFile,
         calleeSourceFile,
         callSite,
+        calleeName,
         entries,
+        diagnostics,
       );
     }
   }
+}
+
+function buildEnvelope(
+  confidence: CallBoundConfidence,
+  callerSourceFile: string,
+  calleeSourceFile: string,
+  line: number,
+): EvidenceEnvelope {
+  const tier = cobolTierToEvidence(confidence);
+  return {
+    confidence: tier.confidence,
+    basis: tier.basis,
+    abstain: tier.confidence === "absent",
+    rationale:
+      confidence === "deterministic"
+        ? "Top-level CALL USING boundary or matching name suffix."
+        : "Structural match across CALL USING boundary; names differ.",
+    provenance: [
+      { raw: callerSourceFile, line },
+      { raw: calleeSourceFile },
+    ],
+  };
 }
 
 export function buildCallBoundLineage(models: CobolCodeModel[]): CallBoundLineage | null {
@@ -208,23 +286,63 @@ export function buildCallBoundLineage(models: CobolCodeModel[]): CallBoundLineag
   }
 
   const entries: SerializedCallBoundLineageEntry[] = [];
+  const diagnostics: CallBoundDiagnostic[] = [];
   let callSites = 0;
 
   for (const caller of programs) {
+    const callerProgramId = `program:${resolveCanonicalId(caller)}`;
     for (const call of caller.calls) {
+      // CALL with no USING args has no field lineage to extract — not a
+      // diagnostic, just an empty trace.
       if (call.usingArgs.length === 0) continue;
+
       const callee = byProgramId.get(call.target.toUpperCase());
-      if (!callee) continue;
-      if (callee.linkageItems.length !== call.usingArgs.length) continue;
+      if (!callee) {
+        diagnostics.push({
+          kind: call.targetKind === "identifier" ? "dynamic-call" : "unresolved-callee",
+          callerProgramId,
+          target: call.target,
+          callSite: call.loc,
+          rationale:
+            call.targetKind === "identifier"
+              ? `CALL via identifier \`${call.target}\` is resolved at runtime; static lineage cannot determine the callee.`
+              : `CALL "${call.target}" has no matching program in the corpus.`,
+        });
+        continue;
+      }
+
+      if (callee.linkageItems.length !== call.usingArgs.length) {
+        diagnostics.push({
+          kind: "arity-mismatch",
+          callerProgramId,
+          target: call.target,
+          callSite: call.loc,
+          rationale:
+            `CALL passes ${call.usingArgs.length} arg(s) but callee `
+            + `\`${call.target}\` declares ${callee.linkageItems.length} `
+            + `LINKAGE record(s).`,
+        });
+        continue;
+      }
 
       callSites++;
-      const callerProgramId = `program:${resolveCanonicalId(caller)}`;
       const calleeProgramId = `program:${resolveCanonicalId(callee)}`;
 
       for (let i = 0; i < call.usingArgs.length; i++) {
         const callerArgName = call.usingArgs[i]!;
         const callerItem = findTopLevelDataItem(caller.dataItems, callerArgName);
-        if (!callerItem) continue;
+        if (!callerItem) {
+          diagnostics.push({
+            kind: "caller-arg-not-top-level",
+            callerProgramId,
+            target: call.target,
+            callSite: call.loc,
+            rationale:
+              `Position ${i}: USING arg \`${callerArgName}\` is not a top-level `
+              + `data item in caller \`${resolveCanonicalId(caller)}\`.`,
+          });
+          continue;
+        }
         const calleeRecord = callee.linkageItems[i]!;
 
         emitPair(
@@ -239,13 +357,15 @@ export function buildCallBoundLineage(models: CobolCodeModel[]): CallBoundLineag
           caller.sourceFile,
           callee.sourceFile,
           call.loc,
+          call.target,
           entries,
+          diagnostics,
         );
       }
     }
   }
 
-  if (entries.length === 0) return null;
+  if (entries.length === 0 && diagnostics.length === 0) return null;
 
   entries.sort((a, b) =>
     a.caller.programId.localeCompare(b.caller.programId)
@@ -254,11 +374,22 @@ export function buildCallBoundLineage(models: CobolCodeModel[]): CallBoundLineag
     || a.caller.qualifiedName.localeCompare(b.caller.qualifiedName)
   );
 
+  const diagnosticsByKind: Record<CallBoundDiagnosticKind, number> = {
+    "unresolved-callee": 0,
+    "dynamic-call": 0,
+    "arity-mismatch": 0,
+    "shape-mismatch": 0,
+    "caller-arg-not-top-level": 0,
+  };
+  for (const d of diagnostics) diagnosticsByKind[d.kind]++;
+
   return {
     summary: {
       callSites,
       pairs: entries.length,
+      diagnosticsByKind,
     },
     entries,
+    diagnostics,
   };
 }

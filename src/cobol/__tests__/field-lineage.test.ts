@@ -344,6 +344,80 @@ describe("COBOL field lineage", () => {
     expect(page.content).toContain("review below");
   });
 
+  it("renders the Excluded-by-diagnostic section only when diagnostics are present", () => {
+    // Two-program corpus where the only CALL site has a shape-mismatch:
+    // the entry list is empty, but a diagnostic should surface in the page.
+    const callerSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-FLD             PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "CALLEE" USING WS-FLD.
+           STOP RUN.
+`;
+    const calleeSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-FLD             PIC 9(8).
+       PROCEDURE DIVISION USING LK-FLD.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+    const callLineage = buildCallBoundLineage([
+      model(callerSrc, "CALLER.cbl"),
+      model(calleeSrc, "CALLEE.cbl"),
+    ]);
+    const lineage = attachCallBoundLineage(null, callLineage);
+    expect(lineage).not.toBeNull();
+    const page = generateFieldLineagePage(lineage!);
+    expect(page.content).toContain("## Call Boundary Field Lineage");
+    expect(page.content).toContain("### Excluded by diagnostic");
+    expect(page.content).toContain("shape-mismatch");
+  });
+
+  it("omits the Excluded section when there are no diagnostics", () => {
+    // Same shape on both sides — the call resolves cleanly and no diagnostic fires.
+    const callerSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-FLD             PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "CALLEE" USING WS-FLD.
+           STOP RUN.
+`;
+    const calleeSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-FLD             PIC X(10).
+       PROCEDURE DIVISION USING LK-FLD.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+    const callLineage = buildCallBoundLineage([
+      model(callerSrc, "CALLER.cbl"),
+      model(calleeSrc, "CALLEE.cbl"),
+    ]);
+    const lineage = attachCallBoundLineage(null, callLineage);
+    expect(lineage).not.toBeNull();
+    const page = generateFieldLineagePage(lineage!);
+    expect(page.content).toContain("## Call Boundary Field Lineage");
+    expect(page.content).not.toContain("### Excluded by diagnostic");
+  });
+
   it("generates a lineage wiki summary page", () => {
     const lineage = buildFieldLineage([
       model(sharedCopybook, "CUSTOMER-REC.cpy"),

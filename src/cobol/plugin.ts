@@ -95,6 +95,13 @@ export function migrateLoadedModel(raw: unknown): CobolCodeModel {
     if (!Array.isArray((call as { usingArgs?: unknown }).usingArgs)) {
       (call as { usingArgs: string[] }).usingArgs = [];
     }
+    // targetKind added in evidence-first phase 3 to distinguish unresolved
+    // literal CALLs from dynamic identifier CALLs in lineage diagnostics.
+    // Old artifacts default to "literal" — the more common pattern, and a
+    // safe over-attribution that won't surface false dynamic-call entries.
+    if (!(call as { targetKind?: unknown }).targetKind) {
+      (call as { targetKind: "literal" | "identifier" }).targetKind = "literal";
+    }
   }
   return m as CobolCodeModel;
 }

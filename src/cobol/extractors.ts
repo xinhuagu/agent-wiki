@@ -25,7 +25,20 @@ export interface CobolCodeModel {
   divisions: { name: string; loc: SourceLocation }[];
   sections: { name: string; division: string; loc: SourceLocation }[];
   paragraphs: { name: string; section: string; loc: SourceLocation }[];
-  calls: { target: string; fromParagraph: string; usingArgs: string[]; loc: SourceLocation }[];
+  calls: {
+    target: string;
+    /**
+     * `literal` — CALL "FOO" / 'FOO' (compile-time program name).
+     * `identifier` — CALL FOO (variable resolved at runtime; "dynamic call").
+     * Lineage analysis treats the two differently: an unresolved literal means
+     * the program isn't in the corpus; an unresolved identifier means we
+     * can't determine the callee statically.
+     */
+    targetKind: "literal" | "identifier";
+    fromParagraph: string;
+    usingArgs: string[];
+    loc: SourceLocation;
+  }[];
   performs: { target: string; fromParagraph: string; thru?: string; loc: SourceLocation }[];
   copies: { copybook: string; replacing?: string[]; loc: SourceLocation }[];
   dataItems: DataItemNode[];
@@ -305,11 +318,13 @@ function extractStatementRelations(
   const verb = stmt.verb;
 
   if (verb === "CALL") {
-    // CALL "PROGRAM" or CALL identifier
+    // CALL "PROGRAM" (literal) or CALL identifier (dynamic).
     const target = stmt.operands[0];
     if (target) {
+      const isLiteral = /^['"]/.test(target);
       model.calls.push({
         target: target.replace(/['"]/g, ""),
+        targetKind: isLiteral ? "literal" : "identifier",
         fromParagraph: paragraph,
         usingArgs: extractUsingArgs(stmt.rawText),
         loc: stmt.loc,

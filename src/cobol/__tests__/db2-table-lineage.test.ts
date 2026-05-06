@@ -111,7 +111,7 @@ describe("buildDb2TableLineage", () => {
     expect(readerIds).toEqual(["program:READERA", "program:READERB"]);
   });
 
-  it("returns null when a table is only written and never read in the corpus", () => {
+  it("emits writer-only / reader-only diagnostics when a table flows only one way", () => {
     const writer = programWith("WRITER", [[
       "EXEC SQL INSERT INTO ORPHAN (NAME)",
       "  VALUES (:WS-NAME) END-EXEC",
@@ -126,11 +126,19 @@ describe("buildDb2TableLineage", () => {
       model(other, "OTHER.cbl"),
     ]);
 
-    // ORPHAN has no reader; SOMETHING-ELSE has no writer; no entries.
-    expect(lineage).toBeNull();
+    // ORPHAN has no reader; SOMETHING-ELSE has no writer; no entries but
+    // both are surfaced as diagnostics.
+    expect(lineage).not.toBeNull();
+    expect(lineage!.entries).toHaveLength(0);
+    const byKind = lineage!.diagnostics.reduce<Record<string, string[]>>((acc, d) => {
+      (acc[d.kind] ??= []).push(d.table ?? "");
+      return acc;
+    }, {});
+    expect(byKind["writer-only"]).toEqual(["ORPHAN"]);
+    expect(byKind["reader-only"]).toEqual(["SOMETHING-ELSE"]);
   });
 
-  it("excludes non-classifiable operations like DECLARE / OPEN / CLOSE", () => {
+  it("emits non-classifiable-op diagnostic for DECLARE / OPEN / CLOSE", () => {
     const declarer = programWith("DECLARER", [[
       "EXEC SQL DECLARE C-CUR CURSOR FOR",
       "  SELECT ID FROM CUSTOMERS END-EXEC",
@@ -145,12 +153,16 @@ describe("buildDb2TableLineage", () => {
       model(reader, "READER.cbl"),
     ]);
 
-    // DECLARE is not classified as a write; CUSTOMERS has no writer in scope.
-    // READER alone reads, so no lineage emitted.
-    expect(lineage).toBeNull();
+    // DECLARE is not in WRITE_OPS or READ_OPS; surfaces as non-classifiable-op.
+    // READER alone reads CUSTOMERS, so it surfaces as reader-only.
+    expect(lineage).not.toBeNull();
+    expect(lineage!.entries).toHaveLength(0);
+    const declareDiag = lineage!.diagnostics.find((d) => d.kind === "non-classifiable-op");
+    expect(declareDiag?.operation).toBe("DECLARE");
+    expect(lineage!.diagnostics.some((d) => d.kind === "reader-only" && d.table === "CUSTOMERS")).toBe(true);
   });
 
-  it("excludes self-loops where the same program writes and reads the same table", () => {
+  it("emits self-loop diagnostic when one program writes and reads the same table", () => {
     const both = programWith("BOTH", [
       ["EXEC SQL INSERT INTO LOG (MSG)", "  VALUES (:WS-NAME) END-EXEC"],
       ["EXEC SQL SELECT MSG INTO :WS-NAME", "  FROM LOG END-EXEC"],
@@ -166,8 +178,12 @@ describe("buildDb2TableLineage", () => {
     ]);
 
     // BOTH is the only program touching LOG, and it both writes and reads —
-    // self-loop excluded; no cross-program lineage on LOG.
-    expect(lineage).toBeNull();
+    // self-loop diagnostic emitted; no entry on LOG.
+    expect(lineage).not.toBeNull();
+    expect(lineage!.entries).toHaveLength(0);
+    const selfLoop = lineage!.diagnostics.find((d) => d.kind === "self-loop");
+    expect(selfLoop?.table).toBe("LOG");
+    expect(selfLoop?.programId).toBe("program:BOTH");
   });
 
   it("aggregates multiple write ops on the same table from the same program", () => {
@@ -193,6 +209,30 @@ describe("buildDb2TableLineage", () => {
     expect(entry.writer.operations).toEqual(["INSERT", "UPDATE"]);
     expect(entry.evidence.writerOps).toEqual(["INSERT", "UPDATE"]);
     expect(entry.rationale).toContain("INSERT,UPDATE");
+  });
+
+  it("attaches an EvidenceEnvelope (strong/deterministic) to each entry", () => {
+    const writer = programWith("WRITER", [[
+      "EXEC SQL INSERT INTO SHARED (X)",
+      "  VALUES (:WS-X) END-EXEC",
+    ]]);
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-X",
+      "  FROM SHARED END-EXEC",
+    ]]);
+    const lineage = buildDb2TableLineage([
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+    expect(lineage).not.toBeNull();
+    const entry = lineage!.entries[0]!;
+    expect(entry.envelope.confidence).toBe("strong");
+    expect(entry.envelope.basis).toBe("deterministic");
+    expect(entry.envelope.abstain).toBe(false);
+    expect(entry.envelope.provenance).toEqual([
+      { raw: "WRITER.cbl" },
+      { raw: "READER.cbl" },
+    ]);
   });
 
   it("returns null when fewer than two parsed programs are provided", () => {

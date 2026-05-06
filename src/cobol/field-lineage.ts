@@ -766,63 +766,128 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
     lines.push("");
   }
 
-  if (callBound && callBound.entries.length > 0) {
+  if (callBound && (callBound.entries.length > 0 || callBound.diagnostics.length > 0)) {
     lines.push("## Call Boundary Field Lineage");
     lines.push("");
     lines.push(`Cross-program field flow at static \`CALL ... USING\` sites. Top-level entries link a caller's USING argument to the callee's matching LINKAGE record by position; child entries descend into matching group children. Confidence is \`deterministic\` when names align (after stripping a short prefix like \`WS-\`/\`LK-\`) and \`high\` when only structure aligns.`);
     lines.push("");
     lines.push(`Coverage: ${callBound.summary.callSites} call site(s), ${callBound.entries.length} field pair(s).`);
     lines.push("");
-    const grouped = groupCallBoundByPair(callBound.entries);
-    for (const group of grouped) {
-      const detCount = group.entries.filter((e) => e.confidence === "deterministic").length;
-      const highCount = group.entries.filter((e) => e.confidence === "high").length;
-      lines.push(`### ${displayLabel(group.callerProgramId)} → ${displayLabel(group.calleeProgramId)}`);
-      lines.push("");
-      const summary = highCount > 0
-        ? `${group.entries.length} pair(s): ${detCount} deterministic, ${highCount} high-confidence (name divergence — review below).`
-        : `${group.entries.length} pair(s), all deterministic.`;
-      lines.push(`*${summary}*`);
-      lines.push("");
-      lines.push("| Pos | Caller | Callee | Confidence | Evidence |");
-      lines.push("|-----|--------|--------|------------|----------|");
-      for (const entry of group.entries) {
-        const evidence = [
-          entry.evidence.shapeMatch,
-          entry.evidence.nameSuffixMatch ? "name-aligned" : null,
-          entry.evidence.levelMatch ? "same-level" : null,
-        ].filter((value): value is string => Boolean(value)).join(", ");
-        lines.push(
-          `| ${entry.position} | ${entry.caller.qualifiedName} | ${entry.callee.qualifiedName} | ${entry.confidence} | ${evidence} |`
-        );
+    if (callBound.entries.length > 0) {
+      const grouped = groupCallBoundByPair(callBound.entries);
+      for (const group of grouped) {
+        const detCount = group.entries.filter((e) => e.confidence === "deterministic").length;
+        const highCount = group.entries.filter((e) => e.confidence === "high").length;
+        lines.push(`### ${displayLabel(group.callerProgramId)} → ${displayLabel(group.calleeProgramId)}`);
+        lines.push("");
+        const summary = highCount > 0
+          ? `${group.entries.length} pair(s): ${detCount} deterministic, ${highCount} high-confidence (name divergence — review below).`
+          : `${group.entries.length} pair(s), all deterministic.`;
+        lines.push(`*${summary}*`);
+        lines.push("");
+        lines.push("| Pos | Caller | Callee | Confidence | Evidence |");
+        lines.push("|-----|--------|--------|------------|----------|");
+        for (const entry of group.entries) {
+          const evidence = [
+            entry.evidence.shapeMatch,
+            entry.evidence.nameSuffixMatch ? "name-aligned" : null,
+            entry.evidence.levelMatch ? "same-level" : null,
+          ].filter((value): value is string => Boolean(value)).join(", ");
+          lines.push(
+            `| ${entry.position} | ${entry.caller.qualifiedName} | ${entry.callee.qualifiedName} | ${entry.confidence} | ${evidence} |`
+          );
+        }
+        lines.push("");
       }
-      lines.push("");
+    }
+    if (callBound.diagnostics.length > 0) {
+      renderCallBoundExclusions(lines, callBound.diagnostics);
     }
   }
 
-  if (db2 && db2.entries.length > 0) {
+  if (db2 && (db2.entries.length > 0 || db2.diagnostics.length > 0)) {
     lines.push("## DB2 Table Lineage");
     lines.push("");
     lines.push(`Cross-program field flow inferred from shared DB2 tables. A pair appears when one program writes to a table (\`INSERT\` / \`UPDATE\` / \`DELETE\` / \`MERGE\`) and another reads from it (\`SELECT\` / \`FETCH\`). Host variables on each side are listed; mapping them to specific columns requires a SQL parser and is out of scope here.`);
     lines.push("");
     lines.push(`Coverage: ${db2.summary.sharedTables} shared table(s), ${db2.entries.length} writer→reader pair(s).`);
     lines.push("");
-    lines.push("| Table | Writer | Writer Ops | Writer Host Vars | Reader | Reader Ops | Reader Host Vars |");
-    lines.push("|-------|--------|------------|------------------|--------|------------|------------------|");
-    for (const entry of db2.entries) {
-      const writerVars = entry.writer.hostVars.length > 0 ? entry.writer.hostVars.join(", ") : "—";
-      const readerVars = entry.reader.hostVars.length > 0 ? entry.reader.hostVars.join(", ") : "—";
-      lines.push(
-        `| ${entry.table} | ${displayLabel(entry.writer.programId)} | ${entry.writer.operations.join(", ")} | ${writerVars} | ${displayLabel(entry.reader.programId)} | ${entry.reader.operations.join(", ")} | ${readerVars} |`
-      );
+    if (db2.entries.length > 0) {
+      lines.push("| Table | Writer | Writer Ops | Writer Host Vars | Reader | Reader Ops | Reader Host Vars |");
+      lines.push("|-------|--------|------------|------------------|--------|------------|------------------|");
+      for (const entry of db2.entries) {
+        const writerVars = entry.writer.hostVars.length > 0 ? entry.writer.hostVars.join(", ") : "—";
+        const readerVars = entry.reader.hostVars.length > 0 ? entry.reader.hostVars.join(", ") : "—";
+        lines.push(
+          `| ${entry.table} | ${displayLabel(entry.writer.programId)} | ${entry.writer.operations.join(", ")} | ${writerVars} | ${displayLabel(entry.reader.programId)} | ${entry.reader.operations.join(", ")} | ${readerVars} |`
+        );
+      }
+      lines.push("");
     }
-    lines.push("");
+    if (db2.diagnostics.length > 0) {
+      renderDb2Exclusions(lines, db2.diagnostics);
+    }
   }
 
   return {
     path: "cobol/field-lineage.md",
     content: lines.join("\n"),
   };
+}
+
+/**
+ * Render an "Excluded by diagnostic" subsection under a lineage family.
+ * Counts per kind plus one sample so the user can see what's being skipped
+ * without scrolling through hundreds of identical entries.
+ */
+function renderCallBoundExclusions(
+  lines: string[],
+  diagnostics: NonNullable<CallBoundLineage["diagnostics"]>,
+): void {
+  const byKind = new Map<string, { count: number; sample: typeof diagnostics[number] }>();
+  for (const d of diagnostics) {
+    const existing = byKind.get(d.kind);
+    if (!existing) byKind.set(d.kind, { count: 1, sample: d });
+    else existing.count++;
+  }
+  lines.push("### Excluded by diagnostic");
+  lines.push("");
+  lines.push(`${diagnostics.length} call site(s) or arg pair(s) excluded from the table above. Sample row per kind:`);
+  lines.push("");
+  lines.push("| Kind | Count | Sample |");
+  lines.push("|------|-------|--------|");
+  for (const [kind, { count, sample }] of byKind) {
+    const sampleText = `\`${sample.target}\` in ${displayLabel(sample.callerProgramId)} (line ${sample.callSite.line})`;
+    lines.push(`| ${kind} | ${count} | ${sampleText} |`);
+  }
+  lines.push("");
+}
+
+function renderDb2Exclusions(
+  lines: string[],
+  diagnostics: NonNullable<Db2Lineage["diagnostics"]>,
+): void {
+  const byKind = new Map<string, { count: number; sample: typeof diagnostics[number] }>();
+  for (const d of diagnostics) {
+    const existing = byKind.get(d.kind);
+    if (!existing) byKind.set(d.kind, { count: 1, sample: d });
+    else existing.count++;
+  }
+  lines.push("### Excluded by diagnostic");
+  lines.push("");
+  lines.push(`${diagnostics.length} reference(s) or table(s) excluded from the table above. Sample row per kind:`);
+  lines.push("");
+  lines.push("| Kind | Count | Sample |");
+  lines.push("|------|-------|--------|");
+  for (const [kind, { count, sample }] of byKind) {
+    const parts: string[] = [];
+    if (sample.programId) parts.push(displayLabel(sample.programId));
+    if (sample.table) parts.push(`table \`${sample.table}\``);
+    if (sample.operation) parts.push(`op \`${sample.operation}\``);
+    const sampleText = parts.length > 0 ? parts.join(", ") : "—";
+    lines.push(`| ${kind} | ${count} | ${sampleText} |`);
+  }
+  lines.push("");
 }
 
 interface CallBoundGroup {

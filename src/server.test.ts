@@ -2703,6 +2703,44 @@ Content for backward compatibility test.`);
     expect(parsed.variable).toBe("WS-X");
   });
 
+  it("code_trace_variable response carries an evidence envelope (phase 3)", async () => {
+    const wiki = freshWiki();
+    const cobol = `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. TRACEENV.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-Y PIC 9(4) VALUE 0.
+       PROCEDURE DIVISION.
+           MOVE 7 TO WS-Y.
+           STOP RUN.`;
+    wiki.rawAdd("TRACEENV.cbl", { content: cobol });
+    await handleTool(wiki, "code_parse", { path: "TRACEENV.cbl" });
+
+    // References found → strong/deterministic envelope.
+    const found = JSON.parse(
+      (await handleTool(wiki, "code_trace_variable", {
+        path: "TRACEENV.cbl",
+        variable: "WS-Y",
+      })) as string,
+    );
+    expect(found.evidence).toBeDefined();
+    expect(found.evidence.confidence).toBe("strong");
+    expect(found.evidence.basis).toBe("deterministic");
+    expect(found.evidence.abstain).toBe(false);
+    expect(found.evidence.provenance).toEqual([{ raw: "TRACEENV.cbl" }]);
+
+    // No references → absent + abstain.
+    const missing = JSON.parse(
+      (await handleTool(wiki, "code_trace_variable", {
+        path: "TRACEENV.cbl",
+        variable: "WS-NOT-THERE",
+      })) as string,
+    );
+    expect(missing.evidence.confidence).toBe("absent");
+    expect(missing.evidence.abstain).toBe(true);
+    expect(missing.references).toEqual([]);
+  });
+
   it("code_impact still throws when no compiled graph exists", async () => {
     const wiki = freshWiki();
     await expect(

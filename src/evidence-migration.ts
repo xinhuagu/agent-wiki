@@ -18,16 +18,16 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import matter from "gray-matter";
 import type { Wiki } from "./wiki.js";
 import { evidenceDir, migrationMarkerPath } from "./evidence-write-log.js";
 
 export interface MigrationResult {
   alreadyMigrated: boolean;
   totalPages: number;
-  syntheses: number;          // pages marked synthesis: true (rule 2)
-  grounded: number;           // pages with non-empty sources (rule 3, no change)
-  legacy: number;             // pages marked legacyUnsupported: true (rule 4)
+  syntheses: number;            // pages marked synthesis: true (rule 2)
+  grounded: number;             // pages with non-empty sources (rule 3, no change)
+  legacy: number;               // pages marked legacyUnsupported: true (rule 4)
   preExistingSynthesis: number; // pages with type: synthesis (rule 1, no change)
 }
 
@@ -83,13 +83,10 @@ export function migrateExistingPagesForEvidence(
 
     // Rule 2: compiler-generated artifact under wiki/<plugin-id>/...
     const isPluginArtifact = pluginPathPrefixes.some((prefix) => pagePath.startsWith(prefix));
-    if (isPluginArtifact && fm.synthesis !== true) {
-      writeWithFrontmatterPatch(wiki, pagePath, page.content, fm, { synthesis: true });
-      result.syntheses++;
-      continue;
-    }
     if (isPluginArtifact) {
-      // Already had synthesis: true — count under syntheses but no change needed.
+      if (fm.synthesis !== true) {
+        writeWithFrontmatterPatch(wiki, pagePath, page.content, fm, { synthesis: true });
+      }
       result.syntheses++;
       continue;
     }
@@ -100,8 +97,12 @@ export function migrateExistingPagesForEvidence(
       continue;
     }
 
-    // Rule 4: legacy unsupported — pre-existing page without sources/synthesis.
-    writeWithFrontmatterPatch(wiki, pagePath, page.content, fm, { legacyUnsupported: true });
+    // Rule 4: legacy unsupported. Also clear any prior `unsupported: true`
+    // from a fresh phase-2a write so the flags don't pile up.
+    writeWithFrontmatterPatch(wiki, pagePath, page.content, fm, {
+      legacyUnsupported: true,
+      unsupported: undefined,
+    });
     result.legacy++;
   }
 
@@ -130,48 +131,17 @@ function writeWithFrontmatterPatch(
   existingFrontmatter: Record<string, unknown>,
   patch: Record<string, unknown>,
 ): void {
-  // Reconstruct the page with the patched frontmatter and route through
-  // wiki.write() so the search index, title cache, and log all stay
-  // in sync. wiki.write()'s phase-2a classifier respects the new
-  // markers (synthesis / legacyUnsupported), so it won't re-stamp the
-  // page as "unsupported" on top of the migration patch.
-  const merged = { ...existingFrontmatter, ...patch };
-  const fmYaml = stringifyFrontmatter(merged);
-  wiki.write(pagePath, `---\n${fmYaml}---\n${body}`);
-}
-
-function stringifyFrontmatter(data: Record<string, unknown>): string {
-  // gray-matter's stringify is asymmetric with parse; build the YAML
-  // ourselves so the migration write produces deterministic output.
-  // Keep this minimal — only the fields we know we touch — and let
-  // wiki.write() pass it through gray-matter for the final form.
-  const lines: string[] = [];
-  for (const [k, v] of Object.entries(data)) {
-    if (v === undefined) continue;
-    lines.push(formatYamlPair(k, v));
+  // Apply patch — keys with `undefined` are removed; everything else overrides.
+  const merged: Record<string, unknown> = { ...existingFrontmatter };
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined) delete merged[k];
+    else merged[k] = v;
   }
-  return lines.join("\n") + "\n";
-}
-
-function formatYamlPair(key: string, value: unknown): string {
-  if (value === null) return `${key}: null`;
-  if (typeof value === "boolean" || typeof value === "number") return `${key}: ${value}`;
-  if (typeof value === "string") {
-    // Quote if string contains characters that would break YAML parsing.
-    if (/[:#&*!|>'"%@`]|^\s|\s$|^[\d-]/.test(value)) {
-      return `${key}: ${JSON.stringify(value)}`;
-    }
-    return `${key}: ${value}`;
-  }
-  if (Array.isArray(value)) {
-    if (value.length === 0) return `${key}: []`;
-    const items = value
-      .map((v) =>
-        typeof v === "string" && !/[:#&*!|>'"%@`]/.test(v) ? v : JSON.stringify(v)
-      )
-      .join(", ");
-    return `${key}: [${items}]`;
-  }
-  // Fallback to JSON for objects.
-  return `${key}: ${JSON.stringify(value)}`;
+  // Use gray-matter's stringify so YAML escaping matches the rest of the
+  // wiki write path. Route through wiki.write() so search-index / title-cache
+  // updates fire; pass `silent: true` so a multi-hundred-page migration
+  // doesn't spam log.md with one entry per page (the rebuild's summary
+  // line covers the migration in aggregate).
+  const newContent = matter.stringify(body, merged);
+  wiki.write(pagePath, newContent, undefined, { silent: true });
 }

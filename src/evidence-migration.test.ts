@@ -46,16 +46,15 @@ describe("migrateExistingPagesForEvidence", () => {
 
   it("rule 4: pre-existing user pages without sources/synthesis get legacyUnsupported", () => {
     wiki.write("opinion.md", "---\ntitle: Opinion\n---\nMy take.");
-    // wiki.write itself stamps `unsupported: true` because it's a fresh write
-    // with no sources/synthesis. Migration sees that page and tags it
-    // legacy too — both flags coexist on the migrated page since the
-    // initial write already happened (this is the synthetic test setup).
-    // In practice, a real legacy page predates phase 2a and won't have
-    // `unsupported: true`; migration would just add `legacyUnsupported`.
+    // wiki.write stamps `unsupported: true` on the synthetic setup write.
+    // Migration must clear that and replace with `legacyUnsupported: true`
+    // so the two flags don't coexist (they have overlapping semantics —
+    // legacy is the grandfathered subset of unsupported).
     const result = migrateExistingPagesForEvidence(wiki, []);
     expect(result.legacy).toBe(1);
     const after = wiki.read("opinion.md");
     expect(after?.frontmatter.legacyUnsupported).toBe(true);
+    expect(after?.frontmatter.unsupported).toBeUndefined();
   });
 
   it("is idempotent: second run reports alreadyMigrated and changes nothing", () => {

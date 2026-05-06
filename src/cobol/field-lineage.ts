@@ -847,6 +847,25 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
   };
 }
 
+// Fixed kind order for the rendered diagnostic table — orders rows by
+// severity / "earliness in pipeline" so the user reads roughly upstream-to-
+// downstream. Pinned here so the wiki page is byte-stable across rebuilds
+// regardless of which diagnostic fired first in the parsed corpus.
+const CALL_BOUND_KIND_ORDER = [
+  "unresolved-callee",
+  "dynamic-call",
+  "arity-mismatch",
+  "shape-mismatch",
+  "caller-arg-not-top-level",
+] as const;
+
+const DB2_KIND_ORDER = [
+  "non-classifiable-op",
+  "writer-only",
+  "reader-only",
+  "self-loop",
+] as const;
+
 /**
  * Render an "Excluded by diagnostic" subsection under a lineage family.
  * Counts per kind plus one sample so the user can see what's being skipped
@@ -868,7 +887,10 @@ function renderCallBoundExclusions(
   lines.push("");
   lines.push("| Kind | Count | Sample |");
   lines.push("|------|-------|--------|");
-  for (const [kind, { count, sample }] of byKind) {
+  for (const kind of CALL_BOUND_KIND_ORDER) {
+    const bucket = byKind.get(kind);
+    if (!bucket) continue;
+    const { count, sample } = bucket;
     const sampleText = `\`${sample.target}\` in ${displayLabel(sample.callerProgramId)} (line ${sample.callSite.line})`;
     lines.push(`| ${kind} | ${count} | ${sampleText} |`);
   }
@@ -891,7 +913,10 @@ function renderDb2Exclusions(
   lines.push("");
   lines.push("| Kind | Count | Sample |");
   lines.push("|------|-------|--------|");
-  for (const [kind, { count, sample }] of byKind) {
+  for (const kind of DB2_KIND_ORDER) {
+    const bucket = byKind.get(kind);
+    if (!bucket) continue;
+    const { count, sample } = bucket;
     const parts: string[] = [];
     if (sample.programId) parts.push(displayLabel(sample.programId));
     if (sample.table) parts.push(`table \`${sample.table}\``);

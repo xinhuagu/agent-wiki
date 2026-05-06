@@ -276,6 +276,47 @@ describe("buildCallBoundLineage", () => {
     expect(lineage!.diagnostics[0]!.target).toBe("WS-PROG-NAME");
   });
 
+  it("attaches a weak/inferred envelope to high-confidence entries (name divergence)", () => {
+    // Top-level group pair matches deterministically; descended children
+    // have divergent names → child entries are confidence: "high" → envelope
+    // should be weak/inferred.
+    const callerSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-REC.
+           05  WS-FOO         PIC X(5).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "CALLEE" USING WS-REC.
+           STOP RUN.
+`;
+    const calleeSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-REC.
+           05  LK-COMPLETELY-OTHER-NAME PIC X(5).
+       PROCEDURE DIVISION USING LK-REC.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+    const lineage = buildCallBoundLineage([
+      model(callerSrc, "CALLER.cbl"),
+      model(calleeSrc, "CALLEE.cbl"),
+    ]);
+    expect(lineage).not.toBeNull();
+    const child = lineage!.entries.find((e) => e.confidence === "high");
+    expect(child).toBeDefined();
+    expect(child!.envelope.confidence).toBe("weak");
+    expect(child!.envelope.basis).toBe("inferred");
+    expect(child!.envelope.abstain).toBe(false);
+  });
+
   it("attaches an EvidenceEnvelope to each entry derived from confidence tier", () => {
     const callerSrc = `
        IDENTIFICATION DIVISION.

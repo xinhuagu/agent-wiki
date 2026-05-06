@@ -30,6 +30,7 @@ import yaml from "js-yaml";
 import { VERSION } from "./version.js";
 import { SearchEngine, type SearchResult, type SearchConfig, DEFAULT_SEARCH_CONFIG } from "./search.js";
 import { extractText, extractDocument, guessMime } from "./extraction.js";
+import { appendUnsupportedWriteEvent } from "./evidence-write-log.js";
 import type { AtlassianConfig, ConfluenceImportResult, JiraImportResult } from "./atlassian.js";
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -1370,6 +1371,38 @@ _Chronological view of all knowledge in this wiki._
     }
     parsed.data.updated = now;
 
+    // Evidence-first phase 2a: classify by sources / synthesis. System pages
+    // (auto-generated index.md / log.md / timeline.md) are excluded — they're
+    // synthesis by construction, not user/agent assertions.
+    if (!isSystemPage(pagePath)) {
+      const sourcesField = parsed.data.sources;
+      const sourcesCount = Array.isArray(sourcesField) ? sourcesField.length : 0;
+      // Both `synthesis: true` (new flag) and `type: synthesis` (pre-existing
+      // convention used by compiler-generated pages and user-authored
+      // synthesis pages) count as legitimate synthesis.
+      const synthesisFlag =
+        parsed.data.synthesis === true || parsed.data.type === "synthesis";
+      const legacyUnsupported = parsed.data.legacyUnsupported === true;
+      // Only stamp `unsupported: true` on genuinely-new unsupported writes.
+      // Pages already migrated as legacy (legacyUnsupported: true) keep that
+      // marker without piling on a redundant new-write flag.
+      if (sourcesCount === 0 && !synthesisFlag && !legacyUnsupported) {
+        parsed.data.unsupported = true;
+        appendUnsupportedWriteEvent(this.config.workspace, {
+          page: pagePath,
+          timestamp: now,
+          agentHint: source,
+          hadSynthesisFlag: false,
+          rawSourcesCount: 0,
+        });
+      } else if (sourcesCount > 0 || synthesisFlag) {
+        // Page transitioned out of unsupported territory — clear the flag
+        // if a previous write stamped it.
+        if (parsed.data.unsupported === true) delete parsed.data.unsupported;
+        if (parsed.data.legacyUnsupported === true) delete parsed.data.legacyUnsupported;
+      }
+    }
+
     // Reconstruct content with updated frontmatter
     const finalContent = matter.stringify(parsed.content, parsed.data);
     writeFileSync(fullPath, finalContent.trimEnd() + "\n");
@@ -2653,7 +2686,7 @@ _Chronological view of all knowledge in this wiki._
 
   // ── Internal helpers ──────────────────────────────────────────
 
-  private listAllPages(): string[] {
+  listAllPages(): string[] {
     const dir = this.config.wikiDir;
     if (!existsSync(dir)) return [];
     return listMdFiles(dir, dir);
@@ -2683,7 +2716,7 @@ _Chronological view of all knowledge in this wiki._
     };
   }
 
-  private log(operation: string, page: string, summary: string): void {
+  log(operation: string, page: string, summary: string): void {
     const logPath = join(this.config.wikiDir, "log.md");
     const now = new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC";
     const entry = `| ${now} | ${operation} | ${page} | ${summary} |\n`;

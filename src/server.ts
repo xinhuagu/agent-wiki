@@ -17,6 +17,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { buildSearchEnvelope, downgradeForReadPage } from "./evidence-search.js";
+import { rotateEventLog, summarizeLastWeek } from "./evidence-write-log.js";
+import { migrateExistingPagesForEvidence } from "./evidence-migration.js";
 import { join, resolve, basename, extname } from "node:path";
 import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob, safePath } from "./wiki.js";
 import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
@@ -1952,6 +1954,11 @@ export async function handleTool(
     case "wiki_lint": {
       const applyFixes = (args.apply_fixes as boolean) ?? false;
       const report = wiki.lint(applyFixes);
+      // Roll evidence-write-log to its rotation policy (10 MB / 30 days).
+      // Best-effort — never fails the lint call.
+      try {
+        rotateEventLog(wiki.config.workspace);
+      } catch { /* ignore */ }
       return JSON.stringify(report, null, 2);
     }
 
@@ -2049,6 +2056,18 @@ export async function handleTool(
         vectorStats = await wiki.rebuildVectorIndex().catch(() => undefined);
       }
 
+      // Evidence-first phase 2a: one-shot migration of pre-existing pages
+      // (gated by marker file under .agent-wiki/) so existing compiler
+      // artifacts and user pages don't all flag as "unsupported" the day
+      // phase 2a ships. Also emit a one-line weekly count of unsupported
+      // writes into wiki/log.md so the maintainer has a running signal
+      // ahead of the phase 4 dashboard.
+      let migration: ReturnType<typeof migrateExistingPagesForEvidence> | null = null;
+      try {
+        const pluginIds = listPlugins().map((p) => p.id);
+        migration = migrateExistingPagesForEvidence(wiki, pluginIds);
+      } catch { /* ignore — evidence bookkeeping never fails a rebuild */ }
+
       const parts: string[] = ["Index and timeline rebuilt"];
       if (graphStats) {
         parts.push(`Knowledge graph: ${graphStats.nodes} nodes, ${graphStats.edges} edges`);
@@ -2056,6 +2075,26 @@ export async function handleTool(
       if (vectorStats) {
         parts.push(`Vector index: ${vectorStats.pagesProcessed} pages embedded${vectorStats.errors > 0 ? `, ${vectorStats.errors} errors` : ""}`);
       }
+      if (migration && !migration.alreadyMigrated && migration.totalPages > 0) {
+        parts.push(
+          `Evidence migration: ${migration.totalPages} pages — ` +
+          `${migration.grounded} grounded, ` +
+          `${migration.syntheses + migration.preExistingSynthesis} synthesis, ` +
+          `${migration.legacy} legacy-unsupported`
+        );
+      }
+
+      try {
+        const week = summarizeLastWeek(wiki.config.workspace);
+        if (week.unsupportedCount > 0) {
+          wiki.log(
+            "evidence",
+            "log.md",
+            `Last 7 days: ${week.unsupportedCount} unsupported wiki_write(s) (no sources, no synthesis flag).`,
+          );
+        }
+      } catch { /* ignore */ }
+
       return JSON.stringify({ ok: true, message: parts.join(". ") + "." });
     }
 

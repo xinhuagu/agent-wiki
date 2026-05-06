@@ -4,9 +4,9 @@
  * CLI entry point for agent-wiki.
  *
  * Usage:
- *   npx @agent-wiki/mcp-server                  # start MCP server (stdio)
- *   npx @agent-wiki/mcp-server --wiki-path /kb  # custom wiki root
- *   npx @agent-wiki/mcp-server init ./my-kb     # initialize a new knowledge base
+ *   npx @agent-wiki/mcp                  # start MCP server (stdio)
+ *   npx @agent-wiki/mcp --wiki-path /kb  # custom wiki root
+ *   npx @agent-wiki/mcp init ./my-kb     # initialize a new knowledge base
  */
 
 import { Command } from "commander";
@@ -335,7 +335,7 @@ program
         const wikiPath = resolve(opts.wikiPath ?? ".");
         servers["agent-wiki"] = {
           command: "npx",
-          args: ["-y", "@agent-wiki/mcp-server", "serve", "--wiki-path", wikiPath],
+          args: ["-y", "@agent-wiki/mcp", "serve", "--wiki-path", wikiPath],
         };
         // Write back — use mcpServers key if it was already used, else top-level
         const output = mcpConfig.mcpServers ? mcpConfig : { mcpServers: servers };

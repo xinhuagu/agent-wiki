@@ -26,7 +26,7 @@ schemas/→ Entity templates (person, concept, event, artifact, ...)
 
 ## How to Call Tools
 
-Every tool is invoked via the CLI `call` command. The binary is `agent-wiki` (or `npx @agent-wiki/mcp-server` if not globally installed).
+Every tool is invoked via the CLI `call` command. The binary is `agent-wiki` (or `npx @agent-wiki/mcp` if not globally installed).
 
 ```bash
 agent-wiki call <tool_name> '<json_args>'

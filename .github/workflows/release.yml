@@ -59,15 +59,19 @@ jobs:
           tag_name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
 
-      # Publish to npm (npmjs.org) via Trusted Publishing.
-      # No NPM_TOKEN required — the workflow exchanges its short-lived
-      # GitHub Actions OIDC token (id-token: write permission) for an
-      # npm authentication via the Trusted Publisher configured on the
-      # @agent-wiki/mcp package settings (Add Trusted Publisher: this
-      # repo, this workflow file). `--provenance` is what triggers the
-      # OIDC handshake; it also ships build attestation to Sigstore.
+      # Publish to npm (npmjs.org).
+      #
+      # We tried Trusted Publishing (OIDC) earlier; provenance signing
+      # via OIDC works (Sigstore transparency entry is created), but
+      # the actual publish kept returning 404 even with the trusted
+      # publisher configured to match the workflow filename / repo.
+      # Falling back to the classic NPM_TOKEN path until that's
+      # diagnosed. `--provenance` is kept on either path so users still
+      # get the Sigstore attestation.
       - name: Publish to npm
         run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # Publish a mirror copy to GitHub Packages under @xinhuagu/agent-wiki.
       # GitHub Packages requires the npm scope to match the GitHub user/org;

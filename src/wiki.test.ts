@@ -973,6 +973,21 @@ This is a test.
       expect(events.filter((e) => e.page === "notes.md")).toHaveLength(1);
     });
 
+    it("recovers from a corrupted existing-page frontmatter (overwrites without crashing)", () => {
+      const wiki = freshWiki();
+      // Write garbage YAML to a page file directly. wiki.write must not
+      // crash when this overwrites — it should treat existing frontmatter
+      // as absent, write fresh content, and stamp classification normally.
+      const fullPath = join(wiki.config.wikiDir, "junk.md");
+      writeFileSync(fullPath, "---\nthis is :: not valid:\n  - yaml: [unbalanced\n---\nbody.");
+      expect(() =>
+        wiki.write("junk.md", "---\ntitle: Junk\n---\nClean body.")
+      ).not.toThrow();
+      const after = wiki.read("junk.md");
+      expect(after?.frontmatter.title).toBe("Junk");
+      expect(after?.frontmatter.unsupported).toBe(true);
+    });
+
     it("preserves legacyUnsupported flag across edits and stays silent on telemetry", async () => {
       const wiki = freshWiki();
       const { readWriteLog } = await import("./evidence-write-log.js");

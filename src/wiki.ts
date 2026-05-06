@@ -1366,10 +1366,17 @@ _Chronological view of all knowledge in this wiki._
     const parsed = matter(content);
     // Read existing on-disk frontmatter once — used for created-timestamp
     // preservation and for evidence-first classification (telemetry dedupe
-    // and legacy-flag preservation across edits).
-    const existingFrontmatter: Record<string, unknown> | null = existsSync(fullPath)
-      ? (matter(readFileSync(fullPath, "utf-8")).data as Record<string, unknown>)
-      : null;
+    // and legacy-flag preservation across edits). Resilient to a corrupted
+    // existing file: treat as if there's no prior frontmatter; the write
+    // proceeds and overwrites the corruption rather than crashing.
+    let existingFrontmatter: Record<string, unknown> | null = null;
+    if (existsSync(fullPath)) {
+      try {
+        existingFrontmatter = matter(readFileSync(fullPath, "utf-8")).data as Record<string, unknown>;
+      } catch {
+        existingFrontmatter = null;
+      }
+    }
 
     if (!parsed.data.created) {
       const ec = existingFrontmatter?.created;

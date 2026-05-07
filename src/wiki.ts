@@ -1437,19 +1437,13 @@ _Chronological view of all knowledge in this wiki._
         existingFrontmatter?.legacyUnsupported === true;
 
       if (sourcesCount === 0 && !synthesisFlag) {
-        if (isLegacy) {
-          // Grandfathered page: preserve the legacy marker, never stamp
-          // `unsupported`, and stay silent on telemetry — the page is not a
-          // fresh unsupported assertion. Re-asserting the flag handles the
-          // case where the submitter dropped it from their content but
-          // it was set on disk. Reject mode (Phase 2b) does NOT block
-          // legacy edits — only fresh unsupported writes.
-          parsed.data.legacyUnsupported = true;
-          if (parsed.data.unsupported === true) delete parsed.data.unsupported;
-        } else if (this.config.evidence.rejectUnsupportedWrites) {
-          // Phase 2b hard rejection: log telemetry first (so blocked
-          // attempts still appear in the dashboard with `rejected: true`),
-          // then throw a clear error explaining the two paths forward.
+        if (this.config.evidence.rejectUnsupportedWrites) {
+          // Phase 2b hard rejection. Legacy pages are NOT a free pass —
+          // the spec treats `legacyUnsupported` as a deferral (the page
+          // remains readable, but updating it requires committing to
+          // grounded or synthesis). The error message differs so the
+          // user knows whether they're hitting the rail on a fresh page
+          // or an already-tagged legacy one.
           appendUnsupportedWriteEvent(this.config.workspace, {
             page: pagePath,
             timestamp: now,
@@ -1458,12 +1452,28 @@ _Chronological view of all knowledge in this wiki._
             rawSourcesCount: 0,
             rejected: true,
           });
+          if (isLegacy) {
+            throw new Error(
+              `wiki_write rejected: \`${pagePath}\` is tagged \`legacyUnsupported\` `
+              + `and updating it requires resolving its evidence status. `
+              + `Either add \`sources: [raw/...]\` to ground the page, or set \`synthesis: true\` `
+              + `if it genuinely synthesizes already-grounded sources. `
+              + `Reading the page is unaffected.`
+            );
+          }
           throw new Error(
             `wiki_write rejected: \`${pagePath}\` has no \`sources\` and no \`synthesis: true\`. `
             + `Either add \`sources: [raw/...]\` to ground the page in indexed material, `
             + `or set \`synthesis: true\` if this page genuinely synthesizes already-grounded sources. `
             + `(Evidence-first phase 2b is enabled — see docs/evidence-envelope.md.)`
           );
+        } else if (isLegacy) {
+          // Phase 2a warn mode: preserve the legacy marker, never stamp
+          // `unsupported`, stay silent on telemetry. Re-asserting the flag
+          // handles the case where the submitter dropped it from their
+          // content but it was set on disk.
+          parsed.data.legacyUnsupported = true;
+          if (parsed.data.unsupported === true) delete parsed.data.unsupported;
         } else {
           parsed.data.unsupported = true;
           // Dedupe: only fire telemetry on the transition into unsupported,

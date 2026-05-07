@@ -1061,22 +1061,31 @@ This is a test.
       expect(blocked?.rejected).toBe(true);
     });
 
-    it("allows re-edits of legacyUnsupported pages without sources or synthesis", () => {
+    it("rejects re-edits of legacyUnsupported pages that don't resolve the legacy status", () => {
       const wiki = rejectWiki();
-      // Seed a legacy page (typically migration would add this flag).
+      // Seed a legacy page in warn mode (so the seed itself isn't rejected),
+      // then flip to reject mode to exercise the legacy-update path.
+      wiki.config.evidence.rejectUnsupportedWrites = false;
       wiki.write("legacy.md", "---\ntitle: L\nlegacyUnsupported: true\n---\nOld.");
-      // Re-edit without re-supplying the flag — should NOT reject; legacy
-      // marker preserved on disk takes priority over rejection.
+      wiki.config.evidence.rejectUnsupportedWrites = true;
+      // Re-edit without sources or synthesis — must reject. The legacy
+      // flag is a deferral, not a permanent grant: editing forces a choice.
       expect(() =>
         wiki.write("legacy.md", "---\ntitle: L\n---\nRevised legacy text."),
-      ).not.toThrow();
+      ).toThrow(/legacyUnsupported/);
+      // The on-disk page is unchanged (writeFileSync is reached only after
+      // the throw site, so the legacy flag is still there for next time).
       const after = wiki.read("legacy.md");
       expect(after?.frontmatter.legacyUnsupported).toBe(true);
     });
 
     it("clears legacyUnsupported when adding sources transitions a legacy page to grounded", () => {
       const wiki = rejectWiki();
+      // Seed legacy in warn mode (reject mode would block the seed write
+      // itself since it's an unsupported submission with legacy flag).
+      wiki.config.evidence.rejectUnsupportedWrites = false;
       wiki.write("legacy.md", "---\ntitle: L\nlegacyUnsupported: true\n---\nOld.");
+      wiki.config.evidence.rejectUnsupportedWrites = true;
       wiki.write("legacy.md", "---\ntitle: L\nsources: [raw/x.md]\n---\nNow grounded.");
       const after = wiki.read("legacy.md");
       expect(after?.frontmatter.legacyUnsupported).toBeUndefined();
@@ -1085,7 +1094,9 @@ This is a test.
 
     it("clears legacyUnsupported when adding synthesis: true transitions a legacy page", () => {
       const wiki = rejectWiki();
+      wiki.config.evidence.rejectUnsupportedWrites = false;
       wiki.write("legacy.md", "---\ntitle: L\nlegacyUnsupported: true\n---\nOld.");
+      wiki.config.evidence.rejectUnsupportedWrites = true;
       wiki.write("legacy.md", "---\ntitle: L\nsynthesis: true\n---\nNow synthesis.");
       const after = wiki.read("legacy.md");
       expect(after?.frontmatter.legacyUnsupported).toBeUndefined();

@@ -510,7 +510,12 @@ describe("buildDb2TableLineage", () => {
     // Three-tier precedence (WS → LINKAGE → copybook) must keep WS first.
     // If a program declares WS-NAME inline AND copies a copybook that also
     // has WS-NAME, the inline declaration wins — and originCopybook is
-    // absent because the resolver never reached the copybook tier.
+    // absent because the resolver never reached the copybook tier. The
+    // `originCopybook === undefined` assertion is what genuinely verifies
+    // precedence: parser doesn't expand COPY inline, so `program.dataItems`
+    // only contains the inline declaration; the copybook fields live in
+    // the separate parsed copybook model. The resolver hitting WS first
+    // is what we're locking.
     const copybook = `
        01  COPYBOOK-WS-NAME       PIC X(99).
        01  WS-NAME                PIC X(99).
@@ -563,8 +568,8 @@ describe("buildDb2TableLineage", () => {
        PROCEDURE DIVISION.
        A000-MAIN SECTION.
        A100-START.
-           EXEC SQL INSERT INTO T (RAW, TAG)
-             VALUES (:RAW-BUF, :PARSED-TAG) END-EXEC.
+           EXEC SQL INSERT INTO T (RAW, ALIAS, TAG)
+             VALUES (:RAW-BUF, :PARSED-BUF, :PARSED-TAG) END-EXEC.
            STOP RUN.
 `;
     const reader = programWith("READER", [[
@@ -584,16 +589,58 @@ describe("buildDb2TableLineage", () => {
     expect(parsedTag?.dataItem?.picture).toBe("X(4)");
     expect(rawBuf?.dataItem?.originCopybook).toBe("REDEF");
     expect(parsedTag?.dataItem?.originCopybook).toBe("REDEF");
+    // The redefining group itself (PARSED-BUF) is also resolvable as an
+    // alias for the original storage. As a group record it has no PIC
+    // (children carry the PICs).
+    const parsedBuf = writerEntry?.writer.hostVars.find((hv) => hv.name === "PARSED-BUF");
+    expect(parsedBuf?.dataItem).toBeDefined();
+    expect(parsedBuf?.dataItem?.picture).toBeUndefined();
+    expect(parsedBuf?.dataItem?.originCopybook).toBe("REDEF");
   });
 
-  it("unresolved-host-var rationale lists REPLACING as a possible cause", () => {
-    // The rationale is static (not conditional on detecting REPLACING) —
-    // the parser doesn't currently populate `copy.replacing` reliably
-    // (REPLACING/BY are typed tokens excluded from `stmt.operands`), so
-    // we can't detect actual REPLACING usage per-program. The text
-    // unconditionally lists REPLACING as a candidate cause so the user
-    // gets the breadcrumb regardless. When the parser is fixed, the
-    // rationale can become conditional.
+  it("rationale lists REPLACING as a possible cause when the program uses COPY", () => {
+    // The parser can't yet surface REPLACING per-copy (REPLACING/BY are
+    // typed tokens excluded from `stmt.operands` — see follow-up issue),
+    // so the resolver gates the REPLACING breadcrumb on the cheaper
+    // signal: does the program use COPY at all? If yes, the note appears
+    // alongside the typo / missing-copybook causes. If no, omitting it
+    // avoids misleading users on pure-inline-WS programs.
+    const copybook = `
+       01  CUSTOMER-RECORD.
+           05  CUST-ID         PIC 9(8).
+`;
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY CUSTID.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO T (X) VALUES (:WS-MISSING) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(copybook, "CUSTID.cpy"),
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    const unresolved = lineage!.diagnostics.find(
+      (d) => d.kind === "host-var-unresolved" && d.hostVar === "WS-MISSING",
+    );
+    expect(unresolved?.rationale).toContain("REPLACING");
+  });
+
+  it("rationale OMITS REPLACING note for pure-inline-WS programs (no COPY)", () => {
+    // Program has no COPY directives — the REPLACING note would be
+    // misleading noise. Locks the gate so future refactors don't drop
+    // the conditional and re-introduce the always-on text.
     const writer = programWith("WRITER", [[
       "EXEC SQL INSERT INTO T (X) VALUES (:WS-MISSING) END-EXEC",
     ]]);
@@ -609,6 +656,54 @@ describe("buildDb2TableLineage", () => {
     const unresolved = lineage!.diagnostics.find(
       (d) => d.kind === "host-var-unresolved" && d.hostVar === "WS-MISSING",
     );
-    expect(unresolved?.rationale).toContain("REPLACING");
+    expect(unresolved?.rationale).not.toContain("REPLACING");
+    // … but the typo and missing-copybook breadcrumbs should still be there.
+    expect(unresolved?.rationale).toContain("typos");
+  });
+
+  it("originCopybook is deterministic across input orders when copybooks share a logical name", () => {
+    // Two .cpy files share the basename "SHARED.cpy" but live at
+    // different paths. The map sort by sourceFile makes the resolver's
+    // "first match" stable regardless of which CobolCodeModel order
+    // the caller passed. Without the sort, originCopybook would flip
+    // depending on filesystem listing.
+    const cpyA = `
+       01  SHARED-FIELD       PIC X(8).
+`;
+    const cpyB = `
+       01  SHARED-FIELD       PIC X(99).
+`;
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY SHARED.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO T (X) VALUES (:SHARED-FIELD) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    // Two copybook files at different paths but same canonical name.
+    const a = model(cpyA, "dir-a/SHARED.cpy");
+    const b = model(cpyB, "dir-b/SHARED.cpy");
+    const w = model(writer, "WRITER.cbl");
+    const r = model(reader, "READER.cbl");
+
+    const lineage1 = buildDb2TableLineage([a, b, w, r])!;
+    const lineage2 = buildDb2TableLineage([b, a, w, r])!;
+    const find = (l: typeof lineage1): string | undefined => l.entries
+      .find((e) => e.writer.programId === "program:WRITER")
+      ?.writer.hostVars.find((hv) => hv.name === "SHARED-FIELD")
+      ?.dataItem?.picture;
+    // Same input set → same resolution regardless of array order. The
+    // sort by sourceFile makes "dir-a/SHARED.cpy" win deterministically.
+    expect(find(lineage1)).toBe("X(8)");
+    expect(find(lineage2)).toBe("X(8)");
   });
 });

@@ -364,6 +364,15 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
           const dedupeKey = `${programId}|${name}`;
           if (!seenUnresolved.has(dedupeKey)) {
             seenUnresolved.add(dedupeKey);
+            // Only mention REPLACING when the program actually uses COPY at
+            // all — otherwise the note is misleading noise on programs that
+            // typo'd a pure-inline-WS field. We can't yet detect REPLACING
+            // specifically (parser doesn't surface it through `c.replacing`,
+            // see follow-up issue), so this is a conservative best-effort.
+            const replacingClause = program.copies.length > 0
+              ? ` \`COPY ... REPLACING\` renames are not yet applied during `
+                + `resolution and may also surface here.`
+              : "";
             diagnostics.push({
               kind: "host-var-unresolved",
               programId,
@@ -375,8 +384,7 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
                 + `nor in any copybook the program COPYs. The lineage table will `
                 + `show the name with a \`(?)\` flag; check for typos or for a `
                 + `copybook that's referenced via COPY but not present in the `
-                + `parsed corpus. \`COPY ... REPLACING\` renames are not yet `
-                + `applied during resolution and may also surface here.`,
+                + `parsed corpus.${replacingClause}`,
             });
           }
         }

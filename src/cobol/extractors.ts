@@ -371,21 +371,21 @@ function extractStatementRelations(
       // REPLACING — silently disabling the field-lineage exact-program
       // filter, the graph reason marker, and plugin metadata.
       //
-      // Best-effort tokenization: take everything after REPLACING in
-      // rawText and split on whitespace. Single-token form
-      // (`REPLACING X BY Y`) tokenizes cleanly; pseudo-text form
-      // (`REPLACING ==X== BY ==Y==`) shatters because `=` lexes as a
-      // single-char operator, but the resulting array is non-empty so
-      // consumers checking `length > 0` get the correct boolean signal.
-      // Fully structured pseudo-text parsing is out of scope.
+      // Tokenize rawText on whitespace and match REPLACING as an exact
+      // array element rather than a substring. This avoids false
+      // positives when a copybook name happens to contain "REPLACING"
+      // (e.g., `COPY REPLACING-UTIL` lexes as one IDENTIFIER because
+      // hyphens are word chars). Single-token form `REPLACING X BY Y`
+      // tokenizes cleanly; pseudo-text form `REPLACING ==X== BY ==Y==`
+      // shatters because `=` lexes as a single-char operator, but the
+      // post-REPLACING slice is still non-empty so consumers checking
+      // `length > 0` get the correct boolean signal. Fully structured
+      // pseudo-text parsing is out of scope.
       const replacing: string[] = [];
-      const raw = stmt.rawText.toUpperCase();
-      const replIdx = raw.indexOf("REPLACING");
+      const rawTokens = stmt.rawText.toUpperCase().split(/\s+/);
+      const replIdx = rawTokens.indexOf("REPLACING");
       if (replIdx >= 0) {
-        const after = raw.substring(replIdx + "REPLACING".length).trim();
-        if (after) {
-          replacing.push(...after.split(/\s+/));
-        }
+        replacing.push(...rawTokens.slice(replIdx + 1).filter((t) => t.length > 0));
       }
       model.copies.push({
         copybook: copybook.replace(/['"]/g, ""),

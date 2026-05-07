@@ -180,6 +180,31 @@ describe("COBOL extractors", () => {
       expect(model.copies[0].replacing).toContain("B");
       expect(model.copies[0].replacing).toContain("Y");
     });
+
+    it("copybook names containing 'REPLACING' do not false-positive (#25 review fix)", () => {
+      // The lexer types `REPLACING-UTIL` as a single IDENTIFIER (hyphens
+      // are word chars), so a substring `indexOf("REPLACING")` would
+      // find the embedded match and falsely flag the COPY as using
+      // REPLACING. The split-on-whitespace + exact-element match avoids
+      // this — REPLACING-UTIL is one token, doesn't equal "REPLACING".
+      const model = copyModel("           COPY REPLACING-UTIL.");
+      expect(model.copies).toHaveLength(1);
+      expect(model.copies[0].copybook).toBe("REPLACING-UTIL");
+      expect(model.copies[0].replacing).toBeUndefined();
+    });
+
+    it("copybook name containing 'REPLACING' AND an actual REPLACING clause both work", () => {
+      // Belt-and-suspenders: the embedded REPLACING in the copybook
+      // name should be ignored; the actual REPLACING keyword should be
+      // detected. Asserts the split-based match locates the real
+      // keyword, not the embedded substring.
+      const model = copyModel(
+        "           COPY REPLACING-UTIL REPLACING X BY Y."
+      );
+      expect(model.copies[0].copybook).toBe("REPLACING-UTIL");
+      expect(model.copies[0].replacing).toContain("X");
+      expect(model.copies[0].replacing).toContain("Y");
+    });
   });
 
   describe("CALL USING arg extraction", () => {

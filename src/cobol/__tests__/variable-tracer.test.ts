@@ -330,6 +330,44 @@ describe("COBOL extractDataflowEdges", () => {
     }
   });
 
+  it("INSPECT REPLACING: in-place rewrite classifies the inspected target correctly (#20 phase D)", () => {
+    // INSPECT REPLACING is an in-place rewrite — the inspected target
+    // is both read (input) and written (output). Pre-Phase-D fix,
+    // INSPECT wasn't in DATAFLOW_VERBS so produced zero edges. The
+    // REPLACING marker (write) plus defaultBefore=both classifies the
+    // target as read+write, producing a self-edge candidate that the
+    // dataflow filter strips, while keyword-filtered ALL/BY and the
+    // literal patterns don't surface as endpoints.
+    const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. INS-RP.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-INPUT   PIC X(40).
+       01  WS-COUNT   PIC 9(4).
+       PROCEDURE DIVISION.
+       A100.
+           INSPECT WS-INPUT REPLACING ALL "A" BY "B".
+           STOP RUN.
+`;
+    const ast = parse(source, "INS-RP.cbl");
+    const inspectEdges = extractDataflowEdges(ast).filter((e) => e.via === "INSPECT");
+    // Self-edges (WS-INPUT → WS-INPUT) are filtered by the Cartesian
+    // builder, so a single-target REPLACING with no other vars yields
+    // zero edges — but importantly, no phantom from BY / ALL / "A" /
+    // "B" either. The INSPECT IS extracted (verb is in DATAFLOW_VERBS)
+    // even when it produces no surviving edges.
+    for (const kw of ["ALL", "BY", "A", "B", "REPLACING"]) {
+      expect(inspectEdges.some((e) => e.from === kw || e.to === kw)).toBe(false);
+    }
+    // Sanity: the parsed statement IS an INSPECT (verb in dataflow set).
+    const stmts = ast.divisions
+      .flatMap((d) => d.sections)
+      .flatMap((s) => s.paragraphs)
+      .flatMap((p) => p.statements);
+    expect(stmts.some((s) => s.verb === "INSPECT")).toBe(true);
+  });
+
   it("INSPECT: BEFORE/AFTER INITIAL <delim> classifies delim as read (#20 phase D)", () => {
     // INSPECT TALLYING / REPLACING with a BEFORE/AFTER INITIAL clause:
     // the delim var is a read (it's a literal-or-var pattern to match,

@@ -1074,7 +1074,11 @@ This is a test.
         // expected
       }
       const events = readWriteLog(wiki.config.workspace);
-      const legacy = events.findLast((e) => e.page === "legacy-tel.md");
+      // .filter(...).at(-1) instead of .findLast() — the latter requires
+      // lib: ES2023, but the project pins ES2022. Preserves "last matching
+      // event" semantics so the test still works if a future change starts
+      // emitting telemetry for legacy seed writes.
+      const legacy = events.filter((e) => e.page === "legacy-tel.md").at(-1);
       expect(legacy?.rejected).toBe(true);
       expect(legacy?.rejectReason).toBe("legacy");
     });

@@ -1048,7 +1048,7 @@ This is a test.
       expect(wiki.read("blocked.md")).toBeNull();
     });
 
-    it("logs rejected attempts to telemetry with rejected: true", async () => {
+    it("logs rejected attempts to telemetry with rejected: true and rejectReason: 'fresh'", async () => {
       const wiki = rejectWiki();
       const { readWriteLog } = await import("./evidence-write-log.js");
       try {
@@ -1059,6 +1059,24 @@ This is a test.
       const events = readWriteLog(wiki.config.workspace);
       const blocked = events.find((e) => e.page === "blocked.md");
       expect(blocked?.rejected).toBe(true);
+      expect(blocked?.rejectReason).toBe("fresh");
+    });
+
+    it("logs rejectReason: 'legacy' on blocked re-edits of legacyUnsupported pages", async () => {
+      const wiki = rejectWiki();
+      const { readWriteLog } = await import("./evidence-write-log.js");
+      wiki.config.evidence.rejectUnsupportedWrites = false;
+      wiki.write("legacy-tel.md", "---\ntitle: L\nlegacyUnsupported: true\n---\nOld.");
+      wiki.config.evidence.rejectUnsupportedWrites = true;
+      try {
+        wiki.write("legacy-tel.md", "---\ntitle: L\n---\nStill no sources.");
+      } catch {
+        // expected
+      }
+      const events = readWriteLog(wiki.config.workspace);
+      const legacy = events.findLast((e) => e.page === "legacy-tel.md");
+      expect(legacy?.rejected).toBe(true);
+      expect(legacy?.rejectReason).toBe("legacy");
     });
 
     it("rejects re-edits of legacyUnsupported pages that don't resolve the legacy status", () => {
@@ -1075,8 +1093,12 @@ This is a test.
       ).toThrow(/legacyUnsupported/);
       // The on-disk page is unchanged (writeFileSync is reached only after
       // the throw site, so the legacy flag is still there for next time).
+      // Asserting on the body too — not just the flag — guards against
+      // someone moving the throw below the write in the future.
       const after = wiki.read("legacy.md");
       expect(after?.frontmatter.legacyUnsupported).toBe(true);
+      expect(after?.content).toContain("Old.");
+      expect(after?.content).not.toContain("Revised legacy text.");
     });
 
     it("clears legacyUnsupported when adding sources transitions a legacy page to grounded", () => {
@@ -1111,7 +1133,7 @@ This is a test.
       expect(wiki.read("warned.md")?.frontmatter.unsupported).toBe(true);
     });
 
-    it("migration completes under reject mode (bypassEvidenceClassification)", async () => {
+    it("migration completes under reject mode (_bypassEvidenceClassification)", async () => {
       // Realistic edge case: a workspace where reject mode was flipped on
       // before first migration ran. Migration tags pre-existing user pages
       // with `legacyUnsupported: true` — without the bypass opt the
@@ -1149,6 +1171,68 @@ This is a test.
       } finally {
         if (orig === undefined) delete process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
         else process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED = orig;
+      }
+    });
+
+    it("env var is case-insensitive — 'TRUE' enables reject mode", () => {
+      const orig = process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+      try {
+        process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED = "TRUE";
+        const wiki = freshWiki();
+        expect(wiki.config.evidence.rejectUnsupportedWrites).toBe(true);
+      } finally {
+        if (orig === undefined) delete process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+        else process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED = orig;
+      }
+    });
+
+    it("env var is case-insensitive — 'False' force-disables reject mode", () => {
+      const orig = process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+      try {
+        process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED = "False";
+        const wiki = freshWiki();
+        expect(wiki.config.evidence.rejectUnsupportedWrites).toBe(false);
+      } finally {
+        if (orig === undefined) delete process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+        else process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED = orig;
+      }
+    });
+
+    it("loads rejectUnsupportedWrites from .agent-wiki.yaml when env var is unset", () => {
+      const orig = process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+      delete process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+      try {
+        // Init creates the default config; overwrite with one that has
+        // reject mode enabled, then construct a fresh Wiki to re-parse.
+        Wiki.init(TEST_ROOT);
+        writeFileSync(
+          join(TEST_ROOT, ".agent-wiki.yaml"),
+          "version: '2'\n"
+            + "wiki:\n  path: wiki/\n  raw_path: raw/\n  schemas_path: schemas/\n"
+            + "evidence:\n  reject_unsupported_writes: true\n",
+        );
+        const wiki = new Wiki(TEST_ROOT);
+        expect(wiki.config.evidence.rejectUnsupportedWrites).toBe(true);
+      } finally {
+        if (orig !== undefined) process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED = orig;
+      }
+    });
+
+    it("YAML non-boolean values (e.g. 'yes', 1) do NOT enable reject mode", () => {
+      const orig = process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+      delete process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+      try {
+        Wiki.init(TEST_ROOT);
+        writeFileSync(
+          join(TEST_ROOT, ".agent-wiki.yaml"),
+          "version: '2'\n"
+            + "wiki:\n  path: wiki/\n  raw_path: raw/\n  schemas_path: schemas/\n"
+            + "evidence:\n  reject_unsupported_writes: 'yes'\n",
+        );
+        const wiki = new Wiki(TEST_ROOT);
+        expect(wiki.config.evidence.rejectUnsupportedWrites).toBe(false);
+      } finally {
+        if (orig !== undefined) process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED = orig;
       }
     });
   });

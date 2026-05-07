@@ -183,6 +183,21 @@ export interface WikiConfig {
 // System pages that lint should treat specially
 const SYSTEM_PAGES = new Set(["index.md", "log.md", "timeline.md"]);
 
+/**
+ * Resolve a boolean config flag from (env var, YAML value), with the env var
+ * taking precedence. Env var is case-insensitive ("True"/"TRUE" both match);
+ * other strings ("1", "yes") intentionally fall through. YAML side requires
+ * literal `true` — non-boolean YAML values do NOT enable the flag.
+ */
+function resolveBooleanFlag(envValue: string | undefined, yamlValue: unknown, defaultValue: boolean): boolean {
+  const env = envValue?.toLowerCase();
+  if (env === "true") return true;
+  if (env === "false") return false;
+  if (yamlValue === true) return true;
+  if (yamlValue === false) return false;
+  return defaultValue;
+}
+
 /** Check if a page path is a system page.
  *  Root-level: index.md, log.md, timeline.md.
  *  Nested: any * /index.md — reserved for auto-generated directory indexes. */
@@ -518,12 +533,11 @@ _Chronological view of all knowledge in this wiki._
         // posture; flip this only after the maintainer reviews telemetry
         // (see `docs/evidence-envelope.md`). Env var override available
         // for emergency rollback or A/B without editing the config file.
-        rejectUnsupportedWrites:
-          process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED === "true"
-            ? true
-            : process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED === "false"
-              ? false
-              : (evidenceData.reject_unsupported_writes as boolean) ?? false,
+        rejectUnsupportedWrites: resolveBooleanFlag(
+          process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED,
+          evidenceData.reject_unsupported_writes,
+          false,
+        ),
       },
     };
   }
@@ -1383,15 +1397,17 @@ _Chronological view of all knowledge in this wiki._
     opts?: {
       silent?: boolean;
       /**
-       * Skip the evidence-first classifier (telemetry stamp, legacy flag
-       * preservation, Phase 2b reject path). Reserved for internal
-       * compiler operations like the one-shot migration that tags
-       * pre-existing pages as `legacyUnsupported: true` — those writes
-       * are state restoration, not user/agent assertions, and the
-       * classifier would either re-fire telemetry or (in reject mode)
-       * block migration entirely.
+       * @internal Skip the evidence-first classifier (telemetry stamp,
+       * legacy flag preservation, Phase 2b reject path). The leading
+       * underscore signals this is NOT part of the public surface —
+       * external plugins or callers must not pass it. Reserved for
+       * internal compiler operations like the one-shot migration that
+       * tags pre-existing pages as `legacyUnsupported: true` — those
+       * writes are state restoration, not user/agent assertions, and
+       * the classifier would either re-fire telemetry or (in reject
+       * mode) block migration entirely.
        */
-      bypassEvidenceClassification?: boolean;
+      _bypassEvidenceClassification?: boolean;
     },
   ): string {
     // Guard: nested */index.md paths are reserved for auto-generated directory indexes
@@ -1431,7 +1447,7 @@ _Chronological view of all knowledge in this wiki._
     // Evidence-first phase 2a: classify by sources / synthesis. System pages
     // (auto-generated index.md / log.md / timeline.md) are excluded — they're
     // synthesis by construction, not user/agent assertions.
-    if (!isSystemPage(pagePath) && !opts?.bypassEvidenceClassification) {
+    if (!isSystemPage(pagePath) && !opts?._bypassEvidenceClassification) {
       const sourcesField = parsed.data.sources;
       const sourcesCount = Array.isArray(sourcesField) ? sourcesField.length : 0;
       // Both `synthesis: true` (new flag) and `type: synthesis` (pre-existing
@@ -1455,7 +1471,9 @@ _Chronological view of all knowledge in this wiki._
           // remains readable, but updating it requires committing to
           // grounded or synthesis). The error message differs so the
           // user knows whether they're hitting the rail on a fresh page
-          // or an already-tagged legacy one.
+          // or an already-tagged legacy one. `rejectReason` lets the
+          // dashboard split blocked-rate by class without parsing
+          // error strings.
           appendUnsupportedWriteEvent(this.config.workspace, {
             page: pagePath,
             timestamp: now,
@@ -1463,6 +1481,7 @@ _Chronological view of all knowledge in this wiki._
             hadSynthesisFlag: false,
             rawSourcesCount: 0,
             rejected: true,
+            rejectReason: isLegacy ? "legacy" : "fresh",
           });
           if (isLegacy) {
             throw new Error(

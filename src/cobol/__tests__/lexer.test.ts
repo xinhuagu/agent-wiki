@@ -119,4 +119,48 @@ describe("COBOL lexer", () => {
     expect(values).toContain("SELECT");
     expect(values).toContain("CUSTOMERS");
   });
+
+  it("strips col-7 `*` comments even when the file is otherwise free-format (mixed-mode corpora — #20 phase A)", () => {
+    // The real-world failure mode this fix targets: a file the heuristic
+    // classifies as free-format (because most lines start at col 1) but
+    // that still has legacy fixed-format comment lines (`*` at col 7).
+    // Pre-fix, those tokenized as code and produced phantom dataflow edges.
+    // Six leading-spaces puts the `*` at index 6 (col 7); the rest of the
+    // file is free-format COBOL starting at col 1.
+    const source = [
+      "      * THIS IS A LEGACY COMMENT LINE",
+      "      * MOVE GHOST-FIELD TO PHANTOM-VAR",
+      "IDENTIFICATION DIVISION.",
+      "PROGRAM-ID. MIXED.",
+      "PROCEDURE DIVISION.",
+      "    MOVE A TO B.",
+    ].join("\n");
+    const tokens = tokenize(source);
+    const values = tokens.map((t) => t.value);
+    // Comment-line tokens must be filtered.
+    expect(values).not.toContain("GHOST-FIELD");
+    expect(values).not.toContain("PHANTOM-VAR");
+    expect(values).not.toContain("LEGACY");
+    // Free-format code below stays intact.
+    expect(values).toContain("IDENTIFICATION");
+    expect(values).toContain("MOVE");
+    expect(values).toContain("A");
+    expect(values).toContain("B");
+  });
+
+  it("does NOT misfire on free-format code where col 7 happens to be alphanumeric", () => {
+    // Defensive: the col-7 `*` filter only fires on `*`. Other characters
+    // at index 6 (letters, digits, hyphens) must NOT be treated as comment
+    // indicators in free-format mode.
+    const source = [
+      "PROGRAM-ID. SAMPLE.",  // index 6 = 'M' (PROGRA[M])
+      "PROCEDURE DIVISION.",  // index 6 = 'U' (PROCED[U])
+      "MOVE-IT SECTION.",     // index 6 = 'T' (MOVE-I[T])
+    ].join("\n");
+    const tokens = tokenize(source);
+    const values = tokens.map((t) => t.value);
+    expect(values).toContain("PROGRAM-ID");
+    expect(values).toContain("PROCEDURE");
+    expect(values).toContain("MOVE-IT");
+  });
 });

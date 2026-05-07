@@ -1380,7 +1380,19 @@ _Chronological view of all knowledge in this wiki._
     pagePath: string,
     content: string,
     source?: string,
-    opts?: { silent?: boolean },
+    opts?: {
+      silent?: boolean;
+      /**
+       * Skip the evidence-first classifier (telemetry stamp, legacy flag
+       * preservation, Phase 2b reject path). Reserved for internal
+       * compiler operations like the one-shot migration that tags
+       * pre-existing pages as `legacyUnsupported: true` — those writes
+       * are state restoration, not user/agent assertions, and the
+       * classifier would either re-fire telemetry or (in reject mode)
+       * block migration entirely.
+       */
+      bypassEvidenceClassification?: boolean;
+    },
   ): string {
     // Guard: nested */index.md paths are reserved for auto-generated directory indexes
     if (isSystemPage(pagePath) && !SYSTEM_PAGES.has(pagePath)) {
@@ -1419,7 +1431,7 @@ _Chronological view of all knowledge in this wiki._
     // Evidence-first phase 2a: classify by sources / synthesis. System pages
     // (auto-generated index.md / log.md / timeline.md) are excluded — they're
     // synthesis by construction, not user/agent assertions.
-    if (!isSystemPage(pagePath)) {
+    if (!isSystemPage(pagePath) && !opts?.bypassEvidenceClassification) {
       const sourcesField = parsed.data.sources;
       const sourcesCount = Array.isArray(sourcesField) ? sourcesField.length : 0;
       // Both `synthesis: true` (new flag) and `type: synthesis` (pre-existing

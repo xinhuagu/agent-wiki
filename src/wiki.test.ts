@@ -1110,6 +1110,47 @@ This is a test.
       wiki.write("warned.md", "---\ntitle: W\n---\nUnsupported.");
       expect(wiki.read("warned.md")?.frontmatter.unsupported).toBe(true);
     });
+
+    it("migration completes under reject mode (bypassEvidenceClassification)", async () => {
+      // Realistic edge case: a workspace where reject mode was flipped on
+      // before first migration ran. Migration tags pre-existing user pages
+      // with `legacyUnsupported: true` — without the bypass opt the
+      // classifier would throw on those internal writes and migration
+      // would never complete.
+      const { migrateExistingPagesForEvidence } = await import("./evidence-migration.js");
+      const wiki = freshWiki();
+      // Seed pre-existing page in warn mode (typical pre-Phase-2b state).
+      wiki.write("legacy-page.md", "---\ntitle: P\n---\nNo sources.");
+      // Flip to reject mode and run migration — must complete without throw.
+      wiki.config.evidence.rejectUnsupportedWrites = true;
+      expect(() => migrateExistingPagesForEvidence(wiki, [])).not.toThrow();
+      const after = wiki.read("legacy-page.md");
+      expect(after?.frontmatter.legacyUnsupported).toBe(true);
+    });
+
+    it("loads rejectUnsupportedWrites from env var when set", () => {
+      const orig = process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+      try {
+        process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED = "true";
+        const wiki = freshWiki();
+        expect(wiki.config.evidence.rejectUnsupportedWrites).toBe(true);
+      } finally {
+        if (orig === undefined) delete process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+        else process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED = orig;
+      }
+    });
+
+    it("env var = 'false' overrides any YAML / default and forces warn mode", () => {
+      const orig = process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+      try {
+        process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED = "false";
+        const wiki = freshWiki();
+        expect(wiki.config.evidence.rejectUnsupportedWrites).toBe(false);
+      } finally {
+        if (orig === undefined) delete process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+        else process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED = orig;
+      }
+    });
   });
 });
 

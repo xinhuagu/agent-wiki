@@ -141,7 +141,13 @@ function writeWithFrontmatterPatch(
   // wiki write path. Route through wiki.write() so search-index / title-cache
   // updates fire; pass `silent: true` so a multi-hundred-page migration
   // doesn't spam log.md with one entry per page (the rebuild's summary
-  // line covers the migration in aggregate).
+  // line covers the migration in aggregate). `bypassEvidenceClassification`
+  // is required so the classifier doesn't (a) double-fire telemetry on
+  // restoration of legacy state or (b) reject the write under Phase 2b
+  // reject mode — migration is internal state tagging, not assertion.
   const newContent = matter.stringify(body, merged);
-  wiki.write(pagePath, newContent, undefined, { silent: true });
+  wiki.write(pagePath, newContent, undefined, {
+    silent: true,
+    bypassEvidenceClassification: true,
+  });
 }

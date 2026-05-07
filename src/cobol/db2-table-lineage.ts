@@ -60,13 +60,16 @@ export interface HostVarDataItemRef {
   picture?: string;
   usage?: string;
   /**
-   * Canonical (uppercased) name of the copybook the field came from, as
-   * recorded by the parser from the program's `COPY <name>` directive.
-   * The lexer canonicalizes all identifiers to upper case at tokenize
-   * time, so this string is always the upper form regardless of the
-   * source's case convention. Absent when the field was declared inline
-   * in WORKING-STORAGE or LINKAGE — i.e., absence ≠ unresolved, absence
-   * = "this field doesn't trace back to a copybook".
+   * Name of the copybook the field came from, as recorded by the parser
+   * from the program's `COPY <name>` directive. Unquoted forms (`COPY
+   * CUSTID`) are uppercased by the lexer at tokenize time and arrive
+   * canonical; quoted forms (`COPY 'custid'`) preserve source case
+   * because LITERAL tokens aren't canonicalized. The map lookup is
+   * case-insensitive either way (via `normalizeCopybookName`), so
+   * resolution works correctly — but the rendered string in the wiki
+   * follows whatever the source recorded. Absent when the field was
+   * declared inline in WORKING-STORAGE or LINKAGE — i.e., absence ≠
+   * unresolved, absence = "this field doesn't trace back to a copybook".
    */
   originCopybook?: string;
 }

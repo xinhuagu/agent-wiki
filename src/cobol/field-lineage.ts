@@ -2,7 +2,7 @@ import type { CobolCodeModel } from "./extractors.js";
 import type { DataItemNode, SourceLocation } from "./types.js";
 import { resolveCanonicalId, displayLabel } from "./graph.js";
 import type { CallBoundLineage, SerializedCallBoundLineageEntry } from "./call-boundary-lineage.js";
-import type { Db2Lineage } from "./db2-table-lineage.js";
+import type { Db2Lineage, HostVarRef } from "./db2-table-lineage.js";
 
 export type LineageLinkage = "deterministic";
 export type InferredLineageConfidence = "high" | "ambiguous";
@@ -360,6 +360,25 @@ function formatInferredStructure(
   return participant.parentQualifiedName
     ? `${participant.parentQualifiedName}.${participant.qualifiedName.split(".").pop()}`
     : participant.qualifiedName;
+}
+
+/**
+ * Render a host-var list cell for the DB2 lineage table. Resolved vars
+ * carry their PIC (or `group` if a record-level item) so the reader can
+ * eyeball type alignment with the SQL column. Unresolved vars are
+ * tagged with `(?)` — a paired `host-var-unresolved` diagnostic in the
+ * exclusions table tells the user why. `<br>` separates entries so a
+ * many-host-var cell stays readable in the markdown table.
+ */
+function formatHostVars(hostVars: HostVarRef[]): string {
+  if (hostVars.length === 0) return "—";
+  return hostVars.map((hv) => {
+    if (!hv.dataItem) return `\`${hv.name}\` (?)`;
+    const shape = hv.dataItem.picture
+      ? hv.dataItem.picture
+      : "group";
+    return `\`${hv.name}\` (${shape})`;
+  }).join("<br>");
 }
 
 export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLineage | null {
@@ -828,8 +847,8 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
       lines.push("| Table | Writer | Writer Ops | Writer Host Vars | Reader | Reader Ops | Reader Host Vars |");
       lines.push("|-------|--------|------------|------------------|--------|------------|------------------|");
       for (const entry of db2.entries) {
-        const writerVars = entry.writer.hostVars.length > 0 ? entry.writer.hostVars.join(", ") : "—";
-        const readerVars = entry.reader.hostVars.length > 0 ? entry.reader.hostVars.join(", ") : "—";
+        const writerVars = formatHostVars(entry.writer.hostVars);
+        const readerVars = formatHostVars(entry.reader.hostVars);
         lines.push(
           `| ${entry.table} | ${displayLabel(entry.writer.programId)} | ${entry.writer.operations.join(", ")} | ${writerVars} | ${displayLabel(entry.reader.programId)} | ${entry.reader.operations.join(", ")} | ${readerVars} |`
         );
@@ -870,6 +889,7 @@ const DB2_KIND_ORDER: readonly Db2Lineage["diagnostics"][number]["kind"][] = [
   "writer-only",
   "reader-only",
   "self-loop",
+  "host-var-unresolved",
 ];
 
 /**
@@ -931,12 +951,13 @@ function renderDb2Exclusions(
   const renderRow = (
     kind: string,
     count: number,
-    sample: { programId?: string; table?: string; operation?: string },
+    sample: { programId?: string; table?: string; operation?: string; hostVar?: string },
   ): void => {
     const parts: string[] = [];
     if (sample.programId) parts.push(displayLabel(sample.programId));
     if (sample.table) parts.push(`table \`${sample.table}\``);
     if (sample.operation) parts.push(`op \`${sample.operation}\``);
+    if (sample.hostVar) parts.push(`host var \`:${sample.hostVar}\``);
     const sampleText = parts.length > 0 ? parts.join(", ") : "—";
     lines.push(`| ${kind} | ${count} | ${sampleText} |`);
   };

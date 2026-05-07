@@ -13,8 +13,8 @@
  */
 
 import type { CobolCodeModel } from "./extractors.js";
-import type { SourceLocation } from "./types.js";
-import { resolveCanonicalId } from "./graph.js";
+import type { DataItemNode, SourceLocation } from "./types.js";
+import { resolveCanonicalId, displayLabel } from "./graph.js";
 import { cobolTierToEvidence } from "./evidence-mapping.js";
 import type { EvidenceEnvelope } from "../evidence.js";
 
@@ -25,21 +25,55 @@ export type Db2LineageConfidence = "deterministic";
  * `buildDb2TableLineage` for where each kind is emitted.
  */
 export type Db2LineageDiagnosticKind =
-  | "self-loop"           // same program is both writer and reader of the table
-  | "non-classifiable-op" // operation not in WRITE_OPS or READ_OPS (DECLARE/OPEN/CLOSE/WITH)
-  | "writer-only"         // table has writers but no readers in the corpus
-  | "reader-only";        // table has readers but no writers in the corpus
+  | "self-loop"             // same program is both writer and reader of the table
+  | "non-classifiable-op"   // operation not in WRITE_OPS or READ_OPS (DECLARE/OPEN/CLOSE/WITH)
+  | "writer-only"           // table has writers but no readers in the corpus
+  | "reader-only"           // table has readers but no writers in the corpus
+  | "host-var-unresolved";  // SQL :HOSTVAR not declared in WORKING-STORAGE / LINKAGE
 
 export interface Db2LineageDiagnostic {
   kind: Db2LineageDiagnosticKind;
-  /** Program that owns the reference (set for non-classifiable-op and self-loop). */
+  /** Program that owns the reference (set for non-classifiable-op, self-loop, host-var-unresolved). */
   programId?: string;
   /** Table involved (set for self-loop, writer-only, reader-only). */
   table?: string;
   /** SQL operation verb (set for non-classifiable-op). */
   operation?: string;
+  /** Host variable name without the leading colon (set for host-var-unresolved). */
+  hostVar?: string;
   callSite?: SourceLocation;
   rationale: string;
+}
+
+/**
+ * Resolved in-program definition of a SQL host variable. Phase A: just the
+ * shape needed to render the host var with its PIC inline, so a wiki
+ * reader can eyeball type alignment with the SQL column. Phase B will add
+ * `originCopybook?` so the wiki can also link to the copybook this field
+ * came from. Source `loc` is intentionally NOT included here — there's no
+ * consumer for it yet (the field-lineage page doesn't link to per-line
+ * anchors), and shipping unused data through JSON invites drift.
+ */
+export interface HostVarDataItemRef {
+  /** Field name as declared (uppercased to match COBOL). */
+  name: string;
+  /** Level number (01, 05, ...). */
+  level: number;
+  picture?: string;
+  usage?: string;
+}
+
+/**
+ * A SQL host variable reference, possibly resolved to its in-program
+ * data item declaration. `dataItem` is undefined when the name in the
+ * SQL block doesn't match any item in the program's data tree — those
+ * cases also surface as `host-var-unresolved` diagnostics.
+ */
+export interface HostVarRef {
+  /** Name as it appeared in the SQL block (without the leading `:`). */
+  name: string;
+  /** In-program declaration; undefined if lookup failed. */
+  dataItem?: HostVarDataItemRef;
 }
 
 const DB2_WRITE_OPS = new Set(["INSERT", "UPDATE", "DELETE", "MERGE"]);
@@ -51,7 +85,14 @@ export interface Db2LineageParticipant {
   programId: string;
   sourceFile: string;
   operations: string[];
-  hostVars: string[];
+  /**
+   * SQL host variables referenced on this side of the join, deduped by
+   * name and sorted alphabetically. Each entry carries an optional
+   * `dataItem` resolved against the program's data tree — present when
+   * the name matches a declaration, absent (with a paired
+   * `host-var-unresolved` diagnostic) when the lookup fails.
+   */
+  hostVars: HostVarRef[];
   callSites: SourceLocation[];
 }
 
@@ -90,6 +131,56 @@ function extractHostVars(rawText: string): string[] {
   return [...new Set([...upper.matchAll(HOST_VAR_RE)].map((m) => m[1]))];
 }
 
+/**
+ * Recursive name lookup over a list of data item subtrees. SQL host vars
+ * can be any data item — top-level (`01 WS-NAME`) or nested (`05 CUST-ID`
+ * inside `01 CUSTOMER-RECORD`) — so a flat top-level scan would miss the
+ * common case (the field is in a copybook-defined record). Returns the
+ * first depth-first match; duplicate names across REDEFINES are rare in
+ * host-var usage and not worth disambiguation cost here.
+ *
+ * `item.name.toUpperCase()` is defensive — the parser already canonicalizes
+ * to uppercase, but hand-constructed test fixtures sometimes don't, and
+ * the cost is negligible.
+ */
+function findDataItemByName(items: DataItemNode[], name: string): DataItemNode | undefined {
+  const upper = name.toUpperCase();
+  for (const item of items) {
+    if (item.name.toUpperCase() === upper) return item;
+    if (item.children.length > 0) {
+      const inner = findDataItemByName(item.children, name);
+      if (inner) return inner;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Resolve a SQL host var name against a program's full data surface —
+ * WORKING-STORAGE first, then LINKAGE. The LINKAGE side matters for
+ * callee programs that receive their host vars via CALL USING (e.g.,
+ * a subprogram that reads :CUSTOMER-ID where CUSTOMER-ID is declared
+ * in LINKAGE, not WS). Searching only `dataItems` would emit a false
+ * `host-var-unresolved` diagnostic for that pattern.
+ */
+function resolveHostVar(program: CobolCodeModel, name: string): DataItemNode | undefined {
+  return findDataItemByName(program.dataItems, name)
+    ?? findDataItemByName(program.linkageItems, name);
+}
+
+function toHostVarRef(name: string, dataItem: DataItemNode | undefined): HostVarRef {
+  if (!dataItem) return { name };
+  return {
+    name,
+    dataItem: {
+      name: dataItem.name,
+      level: dataItem.level,
+      picture: dataItem.picture,
+      usage: dataItem.usage,
+    },
+  };
+}
+
 function classifyOp(op: string | undefined): AccessKind | null {
   if (!op) return null;
   const upper = op.toUpperCase();
@@ -106,7 +197,15 @@ interface ProgramTableUsage {
   programId: string;
   sourceFile: string;
   operations: Set<string>;
-  hostVars: Set<string>;
+  /**
+   * Map keyed by host-var name so the same name across multiple SQL
+   * statements collapses to one entry. The first resolved ref wins (a
+   * later unresolved lookup of the same name does not overwrite a
+   * previously-resolved entry — this can happen if one SQL block
+   * references the field by a misspelled qualifier and another by its
+   * real name).
+   */
+  hostVars: Map<string, HostVarRef>;
   callSites: SourceLocation[];
 }
 
@@ -122,7 +221,7 @@ function bump(
   programId: string,
   sourceFile: string,
   op: string,
-  hostVars: string[],
+  hostVars: HostVarRef[],
   loc: SourceLocation,
 ): void {
   let sides = state.get(table);
@@ -137,13 +236,21 @@ function bump(
       programId,
       sourceFile,
       operations: new Set(),
-      hostVars: new Set(),
+      hostVars: new Map(),
       callSites: [],
     };
     sideMap.set(programId, usage);
   }
   usage.operations.add(op);
-  for (const hv of hostVars) usage.hostVars.add(hv);
+  for (const hv of hostVars) {
+    const existing = usage.hostVars.get(hv.name);
+    // Keep the first resolved entry — don't let a later unresolved hit
+    // (e.g., from a different SQL block in the same program) clobber
+    // useful structural info we already collected.
+    if (!existing || (!existing.dataItem && hv.dataItem)) {
+      usage.hostVars.set(hv.name, hv);
+    }
+  }
   usage.callSites.push(loc);
 }
 
@@ -152,7 +259,7 @@ function toParticipant(usage: ProgramTableUsage): Db2LineageParticipant {
     programId: usage.programId,
     sourceFile: usage.sourceFile,
     operations: [...usage.operations].sort(),
-    hostVars: [...usage.hostVars].sort(),
+    hostVars: [...usage.hostVars.values()].sort((a, b) => a.name.localeCompare(b.name)),
     callSites: usage.callSites,
   };
 }
@@ -163,6 +270,11 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
 
   const tableState = new Map<string, TableSides>();
   const diagnostics: Db2LineageDiagnostic[] = [];
+
+  // Track unresolved-host-var diagnostics per (programId, hostVar) so a
+  // typo'd field referenced across many SQL blocks doesn't blow up the
+  // diagnostic list — the user only needs to be told once per program.
+  const seenUnresolved = new Set<string>();
 
   for (const program of programs) {
     const programId = `program:${resolveCanonicalId(program)}`;
@@ -188,7 +300,29 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
         });
         continue;
       }
-      const hostVars = extractHostVars(ref.rawText);
+      const hostVarNames = extractHostVars(ref.rawText);
+      const hostVars: HostVarRef[] = hostVarNames.map((name) => {
+        const dataItem = resolveHostVar(program, name);
+        if (!dataItem) {
+          const dedupeKey = `${programId}|${name}`;
+          if (!seenUnresolved.has(dedupeKey)) {
+            seenUnresolved.add(dedupeKey);
+            diagnostics.push({
+              kind: "host-var-unresolved",
+              programId,
+              hostVar: name,
+              callSite: ref.loc,
+              rationale:
+                `Host variable \`:${name}\` referenced in SQL is not declared `
+                + `in WORKING-STORAGE / LINKAGE of \`${displayLabel(programId)}\`. `
+                + `The lineage table will show the name without a definition link; `
+                + `check for typos or for declarations behind dynamically-loaded `
+                + `copybooks the parser doesn't see.`,
+            });
+          }
+        }
+        return toHostVarRef(name, dataItem);
+      });
       for (const table of ref.tables) {
         bump(tableState, table, kind, programId, sourceFile, op, hostVars, ref.loc);
       }
@@ -281,6 +415,7 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
     "non-classifiable-op": 0,
     "writer-only": 0,
     "reader-only": 0,
+    "host-var-unresolved": 0,
   };
   for (const d of diagnostics) diagnosticsByKind[d.kind]++;
 

@@ -61,9 +61,53 @@ const VERB_RULES: Record<string, VerbRule> = {
   "COMPUTE": { defaultBefore: "write", markers: { "=": "read" }, fallback: "read" },
   "SET": { defaultBefore: "write", markers: { "TO": "read", "UP": "read", "DOWN": "read" }, fallback: "read" },
   "INITIALIZE": { defaultBefore: "write", markers: {}, fallback: "write" },
-  "STRING": { defaultBefore: "read", markers: { "INTO": "write" }, fallback: "read" },
-  "UNSTRING": { defaultBefore: "read", markers: { "INTO": "write", "TALLYING": "write" }, fallback: "read" },
-  "INSPECT": { defaultBefore: "both", markers: { "TALLYING": "write", "REPLACING": "write" }, fallback: "read" },
+  // #20 phase D — STRING/UNSTRING/INSPECT clause-boundary markers.
+  // Pre-fix, only INTO / TALLYING / REPLACING were recognised, so vars
+  // in DELIMITED / WITH POINTER / ON OVERFLOW clauses got swept into the
+  // surrounding mode (typically read), creating ~17.5× edge inflation.
+  // The full grammar wants a per-clause state machine; this is a
+  // pragmatic approximation: each clause keyword resets the access mode
+  // so its argument is classified correctly, not as part of the
+  // surrounding source/target list. Clause keywords themselves are
+  // filtered by NON_VARIABLE_KEYWORDS (phase C); these markers steer
+  // mode for the var that immediately follows.
+  "STRING": {
+    defaultBefore: "read",
+    markers: {
+      "INTO": "write",
+      "DELIMITED": "read",   // delimiter values are reads, not sources
+      "POINTER": "both",     // WITH POINTER ptr — pointer var is r/w
+      "OVERFLOW": "read",    // ON OVERFLOW imp-stmt — vars after are unrelated
+    },
+    fallback: "read",
+  },
+  "UNSTRING": {
+    defaultBefore: "read",
+    markers: {
+      "INTO": "write",
+      "TALLYING": "write",
+      "DELIMITED": "read",
+      "DELIMITER": "write",  // DELIMITER IN <var> captures matched delim
+      "COUNT": "write",      // COUNT IN <var> captures matched length
+      "POINTER": "both",
+      "OVERFLOW": "read",
+    },
+    fallback: "read",
+  },
+  "INSPECT": {
+    defaultBefore: "both",
+    markers: {
+      "TALLYING": "write",
+      "REPLACING": "write",
+      "BEFORE": "read",      // BEFORE/AFTER INITIAL <delim> — delim is read
+      "AFTER": "read",
+      // INITIAL is intentionally NOT a marker: it's a no-op keyword
+      // between BEFORE/AFTER and the delim. The BEFORE/AFTER marker has
+      // already set mode=read; INITIAL is keyword-filtered (Phase C),
+      // and the delim that follows is classified read (correct).
+    },
+    fallback: "read",
+  },
   "ACCEPT": { defaultBefore: "write", markers: {}, fallback: "write" },
   "DISPLAY": { defaultBefore: "read", markers: {}, fallback: "read" },
   "READ": { defaultBefore: "read", markers: { "INTO": "write" }, fallback: "read" },
@@ -101,6 +145,14 @@ const NON_VARIABLE_KEYWORDS = new Set([
   "BEFORE", "WITH", "UPON", "ADVANCING", "AT", "INVALID",
   "CORRESPONDING", "CORR", "ROUNDED",
   "INPUT", "OUTPUT", "I-O", "EXTEND",
+  // #20 phase C — qualifier and clause keywords that previously surfaced
+  // as phantom variables in STRING/UNSTRING/INSPECT clause arguments and
+  // OF/IN qualified-reference chains.
+  "OF", "IN",                                  // qualifier keywords
+  "POINTER", "OVERFLOW",                       // STRING/UNSTRING WITH POINTER, ON OVERFLOW
+  "COUNT", "CHARACTER", "CHARACTERS",          // UNSTRING COUNT IN, INSPECT CHARACTERS
+  "LEADING", "TRAILING", "FIRST", "INITIAL",   // INSPECT REPLACING / INITIALIZE
+  "FOR",                                       // INSPECT TALLYING <var> FOR ALL/LEADING/CHARACTERS
   "=", "(", ")", "<", ">", "+", "-", "*", "/",
 ]);
 
@@ -202,7 +254,13 @@ function classifyStatement(
 
 const DATAFLOW_VERBS = new Set([
   "MOVE", "COMPUTE", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE",
-  "SET", "STRING", "UNSTRING", "READ", "WRITE", "REWRITE",
+  "SET", "STRING", "UNSTRING",
+  // #20 phase D: INSPECT extracts real dataflow (TALLYING writes a count
+  // var from reading the inspected target; REPLACING is in-place r/w).
+  // Was previously excluded — adding it now that the markers in
+  // VERB_RULES correctly classify the clause arguments.
+  "INSPECT",
+  "READ", "WRITE", "REWRITE",
   "SORT", "MERGE", "RELEASE", "RETURN",
 ]);
 
@@ -242,11 +300,19 @@ function edgesFromStatement(
   // into rawText with spaces, which dataflow then re-split into
   // ["DAS", "IST", "EIN", "TEST"], creating phantom pseudo-variables.
   // Numeric tokens are also dropped — they're never dataflow variables.
+  //
+  // Phase C: index-based loop so we can peek 2 ahead to detect qualified
+  // references (`NAME OF PARENT` / `NAME IN PARENT`) and emit one node
+  // `"NAME OF PARENT"` instead of independent `NAME` and `PARENT` reads.
+  // Without this, `MOVE A OF GROUP-1 TO B OF GROUP-2` produced a 2×2
+  // Cartesian (4 edges) instead of the correct single edge between the
+  // qualified names.
   let currentAccess: AccessMode = rule.defaultBefore;
   const reads: string[] = [];
   const writes: string[] = [];
 
-  for (const t of stmt.tokens) {
+  for (let i = 0; i < stmt.tokens.length; i++) {
+    const t = stmt.tokens[i];
     if (t.type === "LITERAL" || t.type === "NUMERIC") continue;
     const tok = t.value.toUpperCase();
     if (rule.markers[tok] !== undefined) {
@@ -254,13 +320,33 @@ function edgesFromStatement(
       continue;
     }
     if (!isDataflowVariable(tok)) continue;
+
+    // Qualified-name collapse: NAME [OF/IN PARENT]+ → emit a single
+    // chained qualified node ("A OF B OF C") matching the existing
+    // `traceVariable` shape. The while loop handles multi-level
+    // qualification (COBOL allows arbitrary depth) so e.g.
+    // `MOVE A OF B OF C TO D` produces ONE source node `"A OF B OF C"`,
+    // not `"A OF B"` + a phantom outermost-qualifier `C`.
+    let name = tok;
+    let j = i + 1;
+    while (
+      j + 1 < stmt.tokens.length
+      && (stmt.tokens[j].type === "OF" || stmt.tokens[j].type === "IN")
+      && stmt.tokens[j + 1].type === "IDENTIFIER"
+      && isDataflowVariable(stmt.tokens[j + 1].value.toUpperCase())
+    ) {
+      name = `${name} ${stmt.tokens[j].value.toUpperCase()} ${stmt.tokens[j + 1].value.toUpperCase()}`;
+      j += 2;
+    }
+    i = j - 1;  // -1 because the for-loop's i++ will advance to j next
+
     if (currentAccess === "read") {
-      reads.push(tok);
+      reads.push(name);
     } else if (currentAccess === "write") {
-      writes.push(tok);
+      writes.push(name);
     } else {
-      reads.push(tok);
-      writes.push(tok);
+      reads.push(name);
+      writes.push(name);
     }
   }
 

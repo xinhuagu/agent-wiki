@@ -160,6 +160,24 @@ export interface WikiConfig {
     /** When false, wiki_write skips auto-link injection. Default: true. */
     enabled: boolean;
   };
+  /**
+   * Evidence-first program controls. Phase 2a (warn + stamp) is always on.
+   * Phase 2b adds a hard-reject mode opt-in via `rejectUnsupportedWrites`.
+   */
+  evidence: {
+    /**
+     * Phase 2b. When true, `wiki_write` rejects pages that have no
+     * `sources: [...]` and no `synthesis: true` (with one exception:
+     * pages already carrying `legacyUnsupported: true` from migration —
+     * those can still be updated, but only a transition into grounded
+     * or synthesis clears the legacy marker).
+     *
+     * Default: false. Flip to true once Phase 2a telemetry shows the
+     * unsupported-write rate is low enough to harden — see the
+     * decision-on-flip checklist in docs/evidence-envelope.md.
+     */
+    rejectUnsupportedWrites: boolean;
+  };
 }
 
 // System pages that lint should treat specially
@@ -442,6 +460,7 @@ _Chronological view of all knowledge in this wiki._
     const atlassianData = (raw.atlassian ?? {}) as Record<string, unknown>;
     const searchData = (raw.search ?? {}) as Record<string, unknown>;
     const autoLinkData = (raw.auto_link ?? {}) as Record<string, unknown>;
+    const evidenceData = (raw.evidence ?? {}) as Record<string, unknown>;
 
     // Resolve workspace directory (priority: override > env > config > root)
     let workspace: string;
@@ -493,6 +512,18 @@ _Chronological view of all knowledge in this wiki._
       },
       autoLink: {
         enabled: (autoLinkData.enabled as boolean) ?? true,
+      },
+      evidence: {
+        // Default: false. Phase 2a (warn + stamp) is the safe shipping
+        // posture; flip this only after the maintainer reviews telemetry
+        // (see `docs/evidence-envelope.md`). Env var override available
+        // for emergency rollback or A/B without editing the config file.
+        rejectUnsupportedWrites:
+          process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED === "true"
+            ? true
+            : process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED === "false"
+              ? false
+              : (evidenceData.reject_unsupported_writes as boolean) ?? false,
       },
     };
   }
@@ -1411,9 +1442,28 @@ _Chronological view of all knowledge in this wiki._
           // `unsupported`, and stay silent on telemetry — the page is not a
           // fresh unsupported assertion. Re-asserting the flag handles the
           // case where the submitter dropped it from their content but
-          // it was set on disk.
+          // it was set on disk. Reject mode (Phase 2b) does NOT block
+          // legacy edits — only fresh unsupported writes.
           parsed.data.legacyUnsupported = true;
           if (parsed.data.unsupported === true) delete parsed.data.unsupported;
+        } else if (this.config.evidence.rejectUnsupportedWrites) {
+          // Phase 2b hard rejection: log telemetry first (so blocked
+          // attempts still appear in the dashboard with `rejected: true`),
+          // then throw a clear error explaining the two paths forward.
+          appendUnsupportedWriteEvent(this.config.workspace, {
+            page: pagePath,
+            timestamp: now,
+            agentHint: source,
+            hadSynthesisFlag: false,
+            rawSourcesCount: 0,
+            rejected: true,
+          });
+          throw new Error(
+            `wiki_write rejected: \`${pagePath}\` has no \`sources\` and no \`synthesis: true\`. `
+            + `Either add \`sources: [raw/...]\` to ground the page in indexed material, `
+            + `or set \`synthesis: true\` if this page genuinely synthesizes already-grounded sources. `
+            + `(Evidence-first phase 2b is enabled — see docs/evidence-envelope.md.)`
+          );
         } else {
           parsed.data.unsupported = true;
           // Dedupe: only fire telemetry on the transition into unsupported,

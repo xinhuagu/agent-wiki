@@ -1005,6 +1005,101 @@ This is a test.
       expect(events.filter((e) => e.page === "opinion.md")).toHaveLength(0);
     });
   });
+
+  describe("evidence-first phase 2b — hard rejection of unsupported writes", () => {
+    // The reject mode is opt-in via `evidence.rejectUnsupportedWrites`. The
+    // setupRejectMode helper mutates the config in-place after init —
+    // simpler than threading a config option through Wiki.init for these
+    // tests since the production toggle is the same surface (env var or
+    // .agent-wiki.yaml are read at config-load time).
+    function rejectWiki(): Wiki {
+      const wiki = freshWiki();
+      wiki.config.evidence.rejectUnsupportedWrites = true;
+      return wiki;
+    }
+
+    it("passes through grounded writes (sources non-empty)", () => {
+      const wiki = rejectWiki();
+      expect(() =>
+        wiki.write("ok.md", "---\ntitle: G\nsources: [raw/x.md]\n---\nGrounded."),
+      ).not.toThrow();
+      expect(wiki.read("ok.md")?.frontmatter.unsupported).toBeUndefined();
+    });
+
+    it("passes through synthesis writes (synthesis: true)", () => {
+      const wiki = rejectWiki();
+      expect(() =>
+        wiki.write("syn.md", "---\ntitle: S\nsynthesis: true\n---\nAggregated."),
+      ).not.toThrow();
+    });
+
+    it("passes through synthesis writes (type: synthesis)", () => {
+      const wiki = rejectWiki();
+      expect(() =>
+        wiki.write("legacy-syn.md", "---\ntitle: S\ntype: synthesis\n---\nAggregated."),
+      ).not.toThrow();
+    });
+
+    it("rejects fresh unsupported writes with a clear error", () => {
+      const wiki = rejectWiki();
+      expect(() =>
+        wiki.write("blocked.md", "---\ntitle: B\n---\nNo sources."),
+      ).toThrow(/wiki_write rejected/);
+      expect(wiki.read("blocked.md")).toBeNull();
+    });
+
+    it("logs rejected attempts to telemetry with rejected: true", async () => {
+      const wiki = rejectWiki();
+      const { readWriteLog } = await import("./evidence-write-log.js");
+      try {
+        wiki.write("blocked.md", "---\ntitle: B\n---\nNothing.");
+      } catch {
+        // expected
+      }
+      const events = readWriteLog(wiki.config.workspace);
+      const blocked = events.find((e) => e.page === "blocked.md");
+      expect(blocked?.rejected).toBe(true);
+    });
+
+    it("allows re-edits of legacyUnsupported pages without sources or synthesis", () => {
+      const wiki = rejectWiki();
+      // Seed a legacy page (typically migration would add this flag).
+      wiki.write("legacy.md", "---\ntitle: L\nlegacyUnsupported: true\n---\nOld.");
+      // Re-edit without re-supplying the flag — should NOT reject; legacy
+      // marker preserved on disk takes priority over rejection.
+      expect(() =>
+        wiki.write("legacy.md", "---\ntitle: L\n---\nRevised legacy text."),
+      ).not.toThrow();
+      const after = wiki.read("legacy.md");
+      expect(after?.frontmatter.legacyUnsupported).toBe(true);
+    });
+
+    it("clears legacyUnsupported when adding sources transitions a legacy page to grounded", () => {
+      const wiki = rejectWiki();
+      wiki.write("legacy.md", "---\ntitle: L\nlegacyUnsupported: true\n---\nOld.");
+      wiki.write("legacy.md", "---\ntitle: L\nsources: [raw/x.md]\n---\nNow grounded.");
+      const after = wiki.read("legacy.md");
+      expect(after?.frontmatter.legacyUnsupported).toBeUndefined();
+      expect(after?.frontmatter.unsupported).toBeUndefined();
+    });
+
+    it("clears legacyUnsupported when adding synthesis: true transitions a legacy page", () => {
+      const wiki = rejectWiki();
+      wiki.write("legacy.md", "---\ntitle: L\nlegacyUnsupported: true\n---\nOld.");
+      wiki.write("legacy.md", "---\ntitle: L\nsynthesis: true\n---\nNow synthesis.");
+      const after = wiki.read("legacy.md");
+      expect(after?.frontmatter.legacyUnsupported).toBeUndefined();
+      expect(after?.frontmatter.synthesis).toBe(true);
+    });
+
+    it("default mode (warn) is unchanged — fresh unsupported writes still pass with `unsupported: true`", () => {
+      // Sanity: rejectUnsupportedWrites defaults to false. Phase 2a behavior intact.
+      const wiki = freshWiki();
+      expect(wiki.config.evidence.rejectUnsupportedWrites).toBe(false);
+      wiki.write("warned.md", "---\ntitle: W\n---\nUnsupported.");
+      expect(wiki.read("warned.md")?.frontmatter.unsupported).toBe(true);
+    });
+  });
 });
 
 describe("wiki.delete", () => {

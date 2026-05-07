@@ -41,6 +41,12 @@ export interface UnsupportedWriteEvent {
   hadSynthesisFlag: boolean;
   /** Length of `sources: [...]` at write time. Always 0 for unsupported. */
   rawSourcesCount: number;
+  /**
+   * Phase 2b: `true` when the write was blocked by hard-reject mode.
+   * Absent on Phase 2a soft-warn writes. Lets the dashboard distinguish
+   * "stamped" from "blocked" and shows how often agents hit the rail.
+   */
+  rejected?: boolean;
 }
 
 const ROTATION_MAX_BYTES = 10 * 1024 * 1024; // 10 MB

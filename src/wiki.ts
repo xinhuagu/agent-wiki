@@ -160,10 +160,43 @@ export interface WikiConfig {
     /** When false, wiki_write skips auto-link injection. Default: true. */
     enabled: boolean;
   };
+  /**
+   * Evidence-first program controls. Phase 2a (warn + stamp) is always on.
+   * Phase 2b adds a hard-reject mode opt-in via `rejectUnsupportedWrites`.
+   */
+  evidence: {
+    /**
+     * Phase 2b. When true, `wiki_write` rejects pages that have no
+     * `sources: [...]` and no `synthesis: true` (with one exception:
+     * pages already carrying `legacyUnsupported: true` from migration —
+     * those can still be updated, but only a transition into grounded
+     * or synthesis clears the legacy marker).
+     *
+     * Default: false. Flip to true once Phase 2a telemetry shows the
+     * unsupported-write rate is low enough to harden — see the
+     * decision-on-flip checklist in docs/evidence-envelope.md.
+     */
+    rejectUnsupportedWrites: boolean;
+  };
 }
 
 // System pages that lint should treat specially
 const SYSTEM_PAGES = new Set(["index.md", "log.md", "timeline.md"]);
+
+/**
+ * Resolve a boolean config flag from (env var, YAML value), with the env var
+ * taking precedence. Env var is case-insensitive ("True"/"TRUE" both match);
+ * other strings ("1", "yes") intentionally fall through. YAML side requires
+ * literal `true` — non-boolean YAML values do NOT enable the flag.
+ */
+function resolveBooleanFlag(envValue: string | undefined, yamlValue: unknown, defaultValue: boolean): boolean {
+  const env = envValue?.toLowerCase();
+  if (env === "true") return true;
+  if (env === "false") return false;
+  if (yamlValue === true) return true;
+  if (yamlValue === false) return false;
+  return defaultValue;
+}
 
 /** Check if a page path is a system page.
  *  Root-level: index.md, log.md, timeline.md.
@@ -442,6 +475,7 @@ _Chronological view of all knowledge in this wiki._
     const atlassianData = (raw.atlassian ?? {}) as Record<string, unknown>;
     const searchData = (raw.search ?? {}) as Record<string, unknown>;
     const autoLinkData = (raw.auto_link ?? {}) as Record<string, unknown>;
+    const evidenceData = (raw.evidence ?? {}) as Record<string, unknown>;
 
     // Resolve workspace directory (priority: override > env > config > root)
     let workspace: string;
@@ -493,6 +527,17 @@ _Chronological view of all knowledge in this wiki._
       },
       autoLink: {
         enabled: (autoLinkData.enabled as boolean) ?? true,
+      },
+      evidence: {
+        // Default: false. Phase 2a (warn + stamp) is the safe shipping
+        // posture; flip this only after the maintainer reviews telemetry
+        // (see `docs/evidence-envelope.md`). Env var override available
+        // for emergency rollback or A/B without editing the config file.
+        rejectUnsupportedWrites: resolveBooleanFlag(
+          process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED,
+          evidenceData.reject_unsupported_writes,
+          false,
+        ),
       },
     };
   }
@@ -1349,7 +1394,21 @@ _Chronological view of all knowledge in this wiki._
     pagePath: string,
     content: string,
     source?: string,
-    opts?: { silent?: boolean },
+    opts?: {
+      silent?: boolean;
+      /**
+       * @internal Skip the evidence-first classifier (telemetry stamp,
+       * legacy flag preservation, Phase 2b reject path). The leading
+       * underscore signals this is NOT part of the public surface —
+       * external plugins or callers must not pass it. Reserved for
+       * internal compiler operations like the one-shot migration that
+       * tags pre-existing pages as `legacyUnsupported: true` — those
+       * writes are state restoration, not user/agent assertions, and
+       * the classifier would either re-fire telemetry or (in reject
+       * mode) block migration entirely.
+       */
+      _bypassEvidenceClassification?: boolean;
+    },
   ): string {
     // Guard: nested */index.md paths are reserved for auto-generated directory indexes
     if (isSystemPage(pagePath) && !SYSTEM_PAGES.has(pagePath)) {
@@ -1388,7 +1447,7 @@ _Chronological view of all knowledge in this wiki._
     // Evidence-first phase 2a: classify by sources / synthesis. System pages
     // (auto-generated index.md / log.md / timeline.md) are excluded — they're
     // synthesis by construction, not user/agent assertions.
-    if (!isSystemPage(pagePath)) {
+    if (!isSystemPage(pagePath) && !opts?._bypassEvidenceClassification) {
       const sourcesField = parsed.data.sources;
       const sourcesCount = Array.isArray(sourcesField) ? sourcesField.length : 0;
       // Both `synthesis: true` (new flag) and `type: synthesis` (pre-existing
@@ -1406,12 +1465,44 @@ _Chronological view of all knowledge in this wiki._
         existingFrontmatter?.legacyUnsupported === true;
 
       if (sourcesCount === 0 && !synthesisFlag) {
-        if (isLegacy) {
-          // Grandfathered page: preserve the legacy marker, never stamp
-          // `unsupported`, and stay silent on telemetry — the page is not a
-          // fresh unsupported assertion. Re-asserting the flag handles the
-          // case where the submitter dropped it from their content but
-          // it was set on disk.
+        if (this.config.evidence.rejectUnsupportedWrites) {
+          // Phase 2b hard rejection. Legacy pages are NOT a free pass —
+          // the spec treats `legacyUnsupported` as a deferral (the page
+          // remains readable, but updating it requires committing to
+          // grounded or synthesis). The error message differs so the
+          // user knows whether they're hitting the rail on a fresh page
+          // or an already-tagged legacy one. `rejectReason` lets the
+          // dashboard split blocked-rate by class without parsing
+          // error strings.
+          appendUnsupportedWriteEvent(this.config.workspace, {
+            page: pagePath,
+            timestamp: now,
+            agentHint: source,
+            hadSynthesisFlag: false,
+            rawSourcesCount: 0,
+            rejected: true,
+            rejectReason: isLegacy ? "legacy" : "fresh",
+          });
+          if (isLegacy) {
+            throw new Error(
+              `wiki_write rejected: \`${pagePath}\` is tagged \`legacyUnsupported\` `
+              + `and updating it requires resolving its evidence status. `
+              + `Either add \`sources: [raw/...]\` to ground the page, or set \`synthesis: true\` `
+              + `if it genuinely synthesizes already-grounded sources. `
+              + `Reading the page is unaffected.`
+            );
+          }
+          throw new Error(
+            `wiki_write rejected: \`${pagePath}\` has no \`sources\` and no \`synthesis: true\`. `
+            + `Either add \`sources: [raw/...]\` to ground the page in indexed material, `
+            + `or set \`synthesis: true\` if this page genuinely synthesizes already-grounded sources. `
+            + `(Evidence-first phase 2b is enabled — see docs/evidence-envelope.md.)`
+          );
+        } else if (isLegacy) {
+          // Phase 2a warn mode: preserve the legacy marker, never stamp
+          // `unsupported`, stay silent on telemetry. Re-asserting the flag
+          // handles the case where the submitter dropped it from their
+          // content but it was set on disk.
           parsed.data.legacyUnsupported = true;
           if (parsed.data.unsupported === true) delete parsed.data.unsupported;
         } else {

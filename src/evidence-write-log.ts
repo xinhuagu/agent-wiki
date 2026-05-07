@@ -41,6 +41,27 @@ export interface UnsupportedWriteEvent {
   hadSynthesisFlag: boolean;
   /** Length of `sources: [...]` at write time. Always 0 for unsupported. */
   rawSourcesCount: number;
+  /**
+   * Phase 2b: `true` when the write was blocked by hard-reject mode.
+   * Absent on Phase 2a soft-warn writes. Lets the dashboard distinguish
+   * "stamped" from "blocked" and shows how often agents hit the rail.
+   *
+   * Note: unlike Phase 2a stamped events (which dedupe via the on-disk
+   * `unsupported: true` flag — the page transitions in once and stays),
+   * reject events fire on EVERY blocked attempt. A retry loop will
+   * generate one event per attempt. Dashboards should count distinct
+   * (page, day) pairs rather than raw event counts when comparing
+   * blocked-rate against stamped-rate.
+   */
+  rejected?: boolean;
+  /**
+   * Phase 2b: classifies why the reject path fired. `"fresh"` = page had
+   * neither sources nor synthesis on a first-time submission; `"legacy"`
+   * = page was already tagged `legacyUnsupported` and the new write
+   * didn't transition into grounded or synthesis. Absent on non-rejected
+   * (Phase 2a stamped) events.
+   */
+  rejectReason?: "fresh" | "legacy";
 }
 
 const ROTATION_MAX_BYTES = 10 * 1024 * 1024; // 10 MB

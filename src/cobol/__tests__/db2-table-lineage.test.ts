@@ -408,4 +408,302 @@ describe("buildDb2TableLineage", () => {
     const unresolved = lineage!.diagnostics.filter((d) => d.kind === "host-var-unresolved");
     expect(unresolved).toHaveLength(0);
   });
+
+  it("resolves host vars defined in a COPY'd copybook and tags originCopybook", () => {
+    // Phase B: parser does NOT inline-expand COPY, so copybook fields
+    // aren't in program.dataItems. Without copybook fallback, every
+    // SQL host var sourced from a copybook would emit a spurious
+    // host-var-unresolved.
+    const copybook = `
+       01  CUSTOMER-RECORD.
+           05  CUST-ID         PIC 9(8).
+           05  CUST-NAME       PIC X(30).
+`;
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY CUSTID.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (ID, NAME)
+             VALUES (:CUST-ID, :CUST-NAME) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT ID INTO :WS-ID FROM CUSTOMERS END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(copybook, "CUSTID.cpy"),
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const writerEntry = lineage!.entries.find((e) => e.writer.programId === "program:WRITER");
+    const custId = writerEntry?.writer.hostVars.find((hv) => hv.name === "CUST-ID");
+    expect(custId?.dataItem?.picture).toBe("9(8)");
+    expect(custId?.dataItem?.originCopybook).toBe("CUSTID");
+    const custName = writerEntry?.writer.hostVars.find((hv) => hv.name === "CUST-NAME");
+    expect(custName?.dataItem?.originCopybook).toBe("CUSTID");
+    // No unresolved diagnostic — copybook search picked them up.
+    const unresolved = lineage!.diagnostics.filter((d) => d.kind === "host-var-unresolved");
+    expect(unresolved).toHaveLength(0);
+  });
+
+  it("inline WS fields don't carry originCopybook — absence ≠ unresolved", () => {
+    const writer = programWith("WRITER", [[
+      "EXEC SQL INSERT INTO T (X) VALUES (:WS-NAME) END-EXEC",
+    ]]);
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    const wsName = lineage!.entries[0].writer.hostVars.find((hv) => hv.name === "WS-NAME");
+    expect(wsName?.dataItem).toBeDefined();        // resolved …
+    expect(wsName?.dataItem?.originCopybook).toBeUndefined();  // … but inline, not from a copybook
+  });
+
+  it("emits host-var-unresolved when COPY references a copybook NOT in the parsed corpus", () => {
+    // Program copies CUSTID but no CUSTID.cpy is passed — the resolver
+    // can't follow the breadcrumb. Should still emit the diagnostic, with
+    // the rationale pointing at the missing-copybook case.
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY CUSTID.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO T (X) VALUES (:CUST-ID) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      // CUSTID.cpy intentionally NOT included
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const unresolved = lineage!.diagnostics.filter(
+      (d) => d.kind === "host-var-unresolved" && d.hostVar === "CUST-ID",
+    );
+    expect(unresolved).toHaveLength(1);
+    expect(unresolved[0].rationale).toContain("copybook");
+  });
+
+  it("inline WS field shadows a copybook field of the same name", () => {
+    // Three-tier precedence (WS → LINKAGE → copybook) must keep WS first.
+    // If a program declares WS-NAME inline AND copies a copybook that also
+    // has WS-NAME, the inline declaration wins — and originCopybook is
+    // absent because the resolver never reached the copybook tier. The
+    // `originCopybook === undefined` assertion is what genuinely verifies
+    // precedence: parser doesn't expand COPY inline, so `program.dataItems`
+    // only contains the inline declaration; the copybook fields live in
+    // the separate parsed copybook model. The resolver hitting WS first
+    // is what we're locking.
+    const copybook = `
+       01  COPYBOOK-WS-NAME       PIC X(99).
+       01  WS-NAME                PIC X(99).
+`;
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-NAME            PIC X(30).
+           COPY OVERLAP.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO T (X) VALUES (:WS-NAME) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-ID FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(copybook, "OVERLAP.cpy"),
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    const wsName = lineage!.entries[0].writer.hostVars.find((hv) => hv.name === "WS-NAME");
+    // Inline X(30) wins over copybook's X(99) — and origin is absent.
+    expect(wsName?.dataItem?.picture).toBe("X(30)");
+    expect(wsName?.dataItem?.originCopybook).toBeUndefined();
+  });
+
+  it("resolves REDEFINES siblings inside a copybook", () => {
+    // REDEFINES in a copybook — both the original and the redefining alias
+    // must resolve as distinct items via depth-first walk through children.
+    const copybook = `
+       01  RECORD-AREA.
+           05  RAW-BUF         PIC X(8).
+           05  PARSED-BUF REDEFINES RAW-BUF.
+               10  PARSED-PART PIC X(4).
+               10  PARSED-TAG  PIC X(4).
+`;
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY REDEF.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO T (RAW, ALIAS, TAG)
+             VALUES (:RAW-BUF, :PARSED-BUF, :PARSED-TAG) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT RAW INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(copybook, "REDEF.cpy"),
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    const writerEntry = lineage!.entries.find((e) => e.writer.programId === "program:WRITER");
+    const rawBuf = writerEntry?.writer.hostVars.find((hv) => hv.name === "RAW-BUF");
+    const parsedTag = writerEntry?.writer.hostVars.find((hv) => hv.name === "PARSED-TAG");
+    expect(rawBuf?.dataItem?.picture).toBe("X(8)");
+    expect(parsedTag?.dataItem?.picture).toBe("X(4)");
+    expect(rawBuf?.dataItem?.originCopybook).toBe("REDEF");
+    expect(parsedTag?.dataItem?.originCopybook).toBe("REDEF");
+    // The redefining group itself (PARSED-BUF) is also resolvable as an
+    // alias for the original storage. As a group record it has no PIC
+    // (children carry the PICs).
+    const parsedBuf = writerEntry?.writer.hostVars.find((hv) => hv.name === "PARSED-BUF");
+    expect(parsedBuf?.dataItem).toBeDefined();
+    expect(parsedBuf?.dataItem?.picture).toBeUndefined();
+    expect(parsedBuf?.dataItem?.originCopybook).toBe("REDEF");
+  });
+
+  it("rationale lists REPLACING as a possible cause when the program uses COPY", () => {
+    // The parser can't yet surface REPLACING per-copy (REPLACING/BY are
+    // typed tokens excluded from `stmt.operands` — see follow-up issue),
+    // so the resolver gates the REPLACING breadcrumb on the cheaper
+    // signal: does the program use COPY at all? If yes, the note appears
+    // alongside the typo / missing-copybook causes. If no, omitting it
+    // avoids misleading users on pure-inline-WS programs.
+    const copybook = `
+       01  CUSTOMER-RECORD.
+           05  CUST-ID         PIC 9(8).
+`;
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY CUSTID.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO T (X) VALUES (:WS-MISSING) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(copybook, "CUSTID.cpy"),
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    const unresolved = lineage!.diagnostics.find(
+      (d) => d.kind === "host-var-unresolved" && d.hostVar === "WS-MISSING",
+    );
+    expect(unresolved?.rationale).toContain("REPLACING");
+  });
+
+  it("rationale OMITS REPLACING note for pure-inline-WS programs (no COPY)", () => {
+    // Program has no COPY directives — the REPLACING note would be
+    // misleading noise. Locks the gate so future refactors don't drop
+    // the conditional and re-introduce the always-on text.
+    const writer = programWith("WRITER", [[
+      "EXEC SQL INSERT INTO T (X) VALUES (:WS-MISSING) END-EXEC",
+    ]]);
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    const unresolved = lineage!.diagnostics.find(
+      (d) => d.kind === "host-var-unresolved" && d.hostVar === "WS-MISSING",
+    );
+    expect(unresolved?.rationale).not.toContain("REPLACING");
+    // … but the typo and missing-copybook breadcrumbs should still be there.
+    expect(unresolved?.rationale).toContain("typos");
+  });
+
+  it("originCopybook is deterministic across input orders when copybooks share a logical name", () => {
+    // Two .cpy files share the basename "SHARED.cpy" but live at
+    // different paths. The map sort by sourceFile makes the resolver's
+    // "first match" stable regardless of which CobolCodeModel order
+    // the caller passed. Without the sort, originCopybook would flip
+    // depending on filesystem listing.
+    const cpyA = `
+       01  SHARED-FIELD       PIC X(8).
+`;
+    const cpyB = `
+       01  SHARED-FIELD       PIC X(99).
+`;
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY SHARED.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO T (X) VALUES (:SHARED-FIELD) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    // Two copybook files at different paths but same canonical name.
+    const a = model(cpyA, "dir-a/SHARED.cpy");
+    const b = model(cpyB, "dir-b/SHARED.cpy");
+    const w = model(writer, "WRITER.cbl");
+    const r = model(reader, "READER.cbl");
+
+    const lineage1 = buildDb2TableLineage([a, b, w, r])!;
+    const lineage2 = buildDb2TableLineage([b, a, w, r])!;
+    const find = (l: typeof lineage1): string | undefined => l.entries
+      .find((e) => e.writer.programId === "program:WRITER")
+      ?.writer.hostVars.find((hv) => hv.name === "SHARED-FIELD")
+      ?.dataItem?.picture;
+    // Same input set → same resolution regardless of array order. The
+    // sort by sourceFile makes "dir-a/SHARED.cpy" win deterministically.
+    expect(find(lineage1)).toBe("X(8)");
+    expect(find(lineage2)).toBe("X(8)");
+  });
 });

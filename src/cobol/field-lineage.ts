@@ -1,6 +1,6 @@
 import type { CobolCodeModel } from "./extractors.js";
 import type { DataItemNode, SourceLocation } from "./types.js";
-import { resolveCanonicalId, displayLabel } from "./graph.js";
+import { resolveCanonicalId, displayLabel, normalizeCopybookName } from "./graph.js";
 import type { CallBoundLineage, SerializedCallBoundLineageEntry } from "./call-boundary-lineage.js";
 import type { Db2Lineage, HostVarRef } from "./db2-table-lineage.js";
 
@@ -147,10 +147,6 @@ interface InferredCandidate {
 
 function isCopybook(filename: string): boolean {
   return filename.toLowerCase().endsWith(".cpy");
-}
-
-function normalizeCopybookName(name: string): string {
-  return resolveCanonicalId({ programId: "", sourceFile: name }).toUpperCase();
 }
 
 function flattenDataItems(
@@ -365,19 +361,22 @@ function formatInferredStructure(
 /**
  * Render a host-var list cell for the DB2 lineage table. Resolved vars
  * carry their PIC (or `group` if a record-level item) so the reader can
- * eyeball type alignment with the SQL column. Unresolved vars are
- * tagged with `(?)` — a paired `host-var-unresolved` diagnostic in the
- * exclusions table tells the user why. `<br>` separates entries so a
- * many-host-var cell stays readable in the markdown table.
+ * eyeball type alignment with the SQL column; when the field came from a
+ * copybook, the origin is appended as `from CUSTID` so the user can trace
+ * it without grepping. Unresolved vars are tagged with `(?)` — a paired
+ * `host-var-unresolved` diagnostic in the exclusions table tells the
+ * user why. `<br>` separates entries so a many-host-var cell stays
+ * readable in the markdown table.
  */
 function formatHostVars(hostVars: HostVarRef[]): string {
   if (hostVars.length === 0) return "—";
   return hostVars.map((hv) => {
     if (!hv.dataItem) return `\`${hv.name}\` (?)`;
-    const shape = hv.dataItem.picture
-      ? hv.dataItem.picture
-      : "group";
-    return `\`${hv.name}\` (${shape})`;
+    const shape = hv.dataItem.picture ?? "group";
+    const origin = hv.dataItem.originCopybook
+      ? ` from \`${hv.dataItem.originCopybook}\``
+      : "";
+    return `\`${hv.name}\` (${shape}${origin})`;
   }).join("<br>");
 }
 

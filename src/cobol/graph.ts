@@ -361,6 +361,17 @@ export function resolveCanonicalId(model: { programId: string; sourceFile: strin
 }
 
 /**
+ * Canonicalize a copybook name for cross-reference lookup. Accepts either a
+ * filename (`CUSTID.cpy`) or a logical name (`CUSTID`, the form used in
+ * `COPY <name>` directives) and returns the uppercased basename without
+ * extension. Lets us match `COPY CUSTID` from a program to the parsed
+ * copybook model whose `sourceFile` is `CUSTID.cpy`.
+ */
+export function normalizeCopybookName(name: string): string {
+  return resolveCanonicalId({ programId: "", sourceFile: name }).toUpperCase();
+}
+
+/**
  * Build a namespaced canonical node ID.
  *
  * Format: `kind:LOGICAL-NAME` (lowercase kind prefix).

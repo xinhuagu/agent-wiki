@@ -14,7 +14,7 @@
 
 import type { CobolCodeModel } from "./extractors.js";
 import type { DataItemNode, SourceLocation } from "./types.js";
-import { resolveCanonicalId, displayLabel } from "./graph.js";
+import { resolveCanonicalId, displayLabel, normalizeCopybookName } from "./graph.js";
 import { cobolTierToEvidence } from "./evidence-mapping.js";
 import type { EvidenceEnvelope } from "../evidence.js";
 
@@ -46,13 +46,11 @@ export interface Db2LineageDiagnostic {
 }
 
 /**
- * Resolved in-program definition of a SQL host variable. Phase A: just the
- * shape needed to render the host var with its PIC inline, so a wiki
- * reader can eyeball type alignment with the SQL column. Phase B will add
- * `originCopybook?` so the wiki can also link to the copybook this field
- * came from. Source `loc` is intentionally NOT included here — there's no
- * consumer for it yet (the field-lineage page doesn't link to per-line
- * anchors), and shipping unused data through JSON invites drift.
+ * Resolved in-program definition of a SQL host variable. Carries enough
+ * shape to render the host var with its PIC inline so a wiki reader can
+ * eyeball type alignment with the SQL column, plus `originCopybook` (when
+ * the field was found via a `COPY <book>` rather than declared inline)
+ * so the wiki can attribute the field to its source copybook.
  */
 export interface HostVarDataItemRef {
   /** Field name as declared (uppercased to match COBOL). */
@@ -61,6 +59,16 @@ export interface HostVarDataItemRef {
   level: number;
   picture?: string;
   usage?: string;
+  /**
+   * Canonical (uppercased) name of the copybook the field came from, as
+   * recorded by the parser from the program's `COPY <name>` directive.
+   * The lexer canonicalizes all identifiers to upper case at tokenize
+   * time, so this string is always the upper form regardless of the
+   * source's case convention. Absent when the field was declared inline
+   * in WORKING-STORAGE or LINKAGE — i.e., absence ≠ unresolved, absence
+   * = "this field doesn't trace back to a copybook".
+   */
+  originCopybook?: string;
 }
 
 /**
@@ -155,21 +163,50 @@ function findDataItemByName(items: DataItemNode[], name: string): DataItemNode |
   return undefined;
 }
 
-/**
- * Resolve a SQL host var name against a program's full data surface —
- * WORKING-STORAGE first, then LINKAGE. The LINKAGE side matters for
- * callee programs that receive their host vars via CALL USING (e.g.,
- * a subprogram that reads :CUSTOMER-ID where CUSTOMER-ID is declared
- * in LINKAGE, not WS). Searching only `dataItems` would emit a false
- * `host-var-unresolved` diagnostic for that pattern.
- */
-function resolveHostVar(program: CobolCodeModel, name: string): DataItemNode | undefined {
-  return findDataItemByName(program.dataItems, name)
-    ?? findDataItemByName(program.linkageItems, name);
+interface ResolvedHostVar {
+  dataItem: DataItemNode;
+  /** Set when the field was found in a copybook the program COPYs. */
+  originCopybook?: string;
 }
 
-function toHostVarRef(name: string, dataItem: DataItemNode | undefined): HostVarRef {
-  if (!dataItem) return { name };
+/**
+ * Resolve a SQL host var name against a program's full data surface, in
+ * precedence order:
+ *   1. WORKING-STORAGE inline declarations
+ *   2. LINKAGE SECTION (callee subprograms receive host vars via CALL USING)
+ *   3. Any copybook the program COPYs (the parser does NOT inline-expand
+ *      COPY, so copybook fields aren't in `program.dataItems` even though
+ *      they're visible to SQL)
+ *
+ * Inline (#1) takes precedence over a copybook field of the same name —
+ * the program's own declaration shadows what's COPY'd in. Returns the
+ * matching data item plus, when found via #3, the canonical (uppercased)
+ * copybook name as the lexer captured it. COPY REPLACING-aware lookup is
+ * not yet implemented: a renamed field still surfaces as unresolved.
+ */
+function resolveHostVar(
+  program: CobolCodeModel,
+  name: string,
+  copybooksByLogicalName: Map<string, CobolCodeModel[]>,
+): ResolvedHostVar | undefined {
+  const ws = findDataItemByName(program.dataItems, name);
+  if (ws) return { dataItem: ws };
+  const lk = findDataItemByName(program.linkageItems, name);
+  if (lk) return { dataItem: lk };
+  for (const copy of program.copies) {
+    const copybooks = copybooksByLogicalName.get(normalizeCopybookName(copy.copybook));
+    if (!copybooks) continue;
+    for (const cpy of copybooks) {
+      const item = findDataItemByName(cpy.dataItems, name);
+      if (item) return { dataItem: item, originCopybook: copy.copybook };
+    }
+  }
+  return undefined;
+}
+
+function toHostVarRef(name: string, resolved: ResolvedHostVar | undefined): HostVarRef {
+  if (!resolved) return { name };
+  const { dataItem, originCopybook } = resolved;
   return {
     name,
     dataItem: {
@@ -177,6 +214,7 @@ function toHostVarRef(name: string, dataItem: DataItemNode | undefined): HostVar
       level: dataItem.level,
       picture: dataItem.picture,
       usage: dataItem.usage,
+      originCopybook,
     },
   };
 }
@@ -268,6 +306,25 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
   const programs = models.filter((m) => !isCopybook(m.sourceFile));
   if (programs.length < 2) return null;
 
+  // Index parsed copybooks by their canonical name so host-var resolution
+  // can fall back from the program's own data tree to the copybooks it
+  // includes via COPY. One canonical name can map to multiple parsed
+  // copybook files (same logical name from two directories) — keep all,
+  // sorted by sourceFile so the resolver's "first match wins" picks the
+  // same one regardless of input order. Without sorting, `originCopybook`
+  // would flip across machines depending on filesystem listing order.
+  const copybooksByLogicalName = new Map<string, CobolCodeModel[]>();
+  for (const model of models) {
+    if (!isCopybook(model.sourceFile)) continue;
+    const key = normalizeCopybookName(model.sourceFile);
+    const list = copybooksByLogicalName.get(key) ?? [];
+    list.push(model);
+    copybooksByLogicalName.set(key, list);
+  }
+  for (const list of copybooksByLogicalName.values()) {
+    list.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));
+  }
+
   const tableState = new Map<string, TableSides>();
   const diagnostics: Db2LineageDiagnostic[] = [];
 
@@ -302,11 +359,20 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
       }
       const hostVarNames = extractHostVars(ref.rawText);
       const hostVars: HostVarRef[] = hostVarNames.map((name) => {
-        const dataItem = resolveHostVar(program, name);
-        if (!dataItem) {
+        const resolved = resolveHostVar(program, name, copybooksByLogicalName);
+        if (!resolved) {
           const dedupeKey = `${programId}|${name}`;
           if (!seenUnresolved.has(dedupeKey)) {
             seenUnresolved.add(dedupeKey);
+            // Only mention REPLACING when the program actually uses COPY at
+            // all — otherwise the note is misleading noise on programs that
+            // typo'd a pure-inline-WS field. We can't yet detect REPLACING
+            // specifically (parser doesn't surface it through `c.replacing`,
+            // see follow-up issue), so this is a conservative best-effort.
+            const replacingClause = program.copies.length > 0
+              ? ` \`COPY ... REPLACING\` renames are not yet applied during `
+                + `resolution and may also surface here.`
+              : "";
             diagnostics.push({
               kind: "host-var-unresolved",
               programId,
@@ -314,14 +380,15 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
               callSite: ref.loc,
               rationale:
                 `Host variable \`:${name}\` referenced in SQL is not declared `
-                + `in WORKING-STORAGE / LINKAGE of \`${displayLabel(programId)}\`. `
-                + `The lineage table will show the name without a definition link; `
-                + `check for typos or for declarations behind dynamically-loaded `
-                + `copybooks the parser doesn't see.`,
+                + `in WORKING-STORAGE / LINKAGE of \`${displayLabel(programId)}\`, `
+                + `nor in any copybook the program COPYs. The lineage table will `
+                + `show the name with a \`(?)\` flag; check for typos or for a `
+                + `copybook that's referenced via COPY but not present in the `
+                + `parsed corpus.${replacingClause}`,
             });
           }
         }
-        return toHostVarRef(name, dataItem);
+        return toHostVarRef(name, resolved);
       });
       for (const table of ref.tables) {
         bump(tableState, table, kind, programId, sourceFile, op, hostVars, ref.loc);

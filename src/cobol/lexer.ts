@@ -107,6 +107,18 @@ function preprocessLines(source: string): SourceLine[] {
     const raw = rawLines[i];
     const lineNum = i + 1;
 
+    // Real-world COBOL is often mixed-mode: a file the heuristic classifies
+    // as free-format (because most lines start at col 1) can still contain
+    // legacy fixed-format comment lines with `*` in column 7. Without this
+    // filter those lines tokenize as code and produce phantom dataflow
+    // edges (~19.9% of audit-corpus noise per #20). False positives in
+    // genuinely free-format code require a 6-char prefix ending in `*`,
+    // which is rare in practice. The fixed branch below still has its own
+    // `*`/`/` indicator handling — this is a pre-filter, not a replacement.
+    if (raw.length >= 7 && raw[6] === "*") {
+      continue;
+    }
+
     if (fixed) {
       if (raw.length < 7) {
         // Too short — skip

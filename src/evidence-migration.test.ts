@@ -33,6 +33,10 @@ describe("migrateExistingPagesForEvidence", () => {
     expect(result.syntheses).toBe(1);
     const after = wiki.read("cobol/system-map.md");
     expect(after?.frontmatter.synthesis).toBe(true);
+    // Synthesis transition must clear any prior `unsupported: true` —
+    // bypass mode skips the classifier's auto-clear, so the migration
+    // patch has to do it explicitly.
+    expect(after?.frontmatter.unsupported).toBeUndefined();
   });
 
   it("rule 3: pages with non-empty sources are left alone", () => {

@@ -85,7 +85,13 @@ export function migrateExistingPagesForEvidence(
     const isPluginArtifact = pluginPathPrefixes.some((prefix) => pagePath.startsWith(prefix));
     if (isPluginArtifact) {
       if (fm.synthesis !== true) {
-        writeWithFrontmatterPatch(wiki, pagePath, page.content, fm, { synthesis: true });
+        // Clear `unsupported: true` if it lingered from a prior phase-2a
+        // write — bypass mode skips the classifier's auto-clear, so we
+        // explicitly null it out alongside setting `synthesis: true`.
+        writeWithFrontmatterPatch(wiki, pagePath, page.content, fm, {
+          synthesis: true,
+          unsupported: undefined,
+        });
       }
       result.syntheses++;
       continue;

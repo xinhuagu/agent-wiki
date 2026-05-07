@@ -47,9 +47,12 @@ export interface Db2LineageDiagnostic {
 
 /**
  * Resolved in-program definition of a SQL host variable. Phase A: just the
- * shape needed to render a link from the DB2 table page to the data item's
- * declaration. Phase B will add `originCopybook?` so the wiki can also link
- * to the copybook this field came from.
+ * shape needed to render the host var with its PIC inline, so a wiki
+ * reader can eyeball type alignment with the SQL column. Phase B will add
+ * `originCopybook?` so the wiki can also link to the copybook this field
+ * came from. Source `loc` is intentionally NOT included here — there's no
+ * consumer for it yet (the field-lineage page doesn't link to per-line
+ * anchors), and shipping unused data through JSON invites drift.
  */
 export interface HostVarDataItemRef {
   /** Field name as declared (uppercased to match COBOL). */
@@ -58,8 +61,6 @@ export interface HostVarDataItemRef {
   level: number;
   picture?: string;
   usage?: string;
-  /** Source location of the declaration; lets the wiki link to it. */
-  loc: SourceLocation;
 }
 
 /**
@@ -131,12 +132,16 @@ function extractHostVars(rawText: string): string[] {
 }
 
 /**
- * Recursive name lookup over a program's data tree. SQL host vars can be
- * any data item — top-level (`01 WS-NAME`) or nested (`05 WS-CUST-ID`
- * inside `01 WS-CUSTOMER`) — so a flat top-level scan would miss the
- * common case. Returns the first match (depth-first); duplicate names
- * across REDEFINES are extremely rare in host-var usage and not worth
- * the disambiguation cost here.
+ * Recursive name lookup over a list of data item subtrees. SQL host vars
+ * can be any data item — top-level (`01 WS-NAME`) or nested (`05 CUST-ID`
+ * inside `01 CUSTOMER-RECORD`) — so a flat top-level scan would miss the
+ * common case (the field is in a copybook-defined record). Returns the
+ * first depth-first match; duplicate names across REDEFINES are rare in
+ * host-var usage and not worth disambiguation cost here.
+ *
+ * `item.name.toUpperCase()` is defensive — the parser already canonicalizes
+ * to uppercase, but hand-constructed test fixtures sometimes don't, and
+ * the cost is negligible.
  */
 function findDataItemByName(items: DataItemNode[], name: string): DataItemNode | undefined {
   const upper = name.toUpperCase();
@@ -150,6 +155,19 @@ function findDataItemByName(items: DataItemNode[], name: string): DataItemNode |
   return undefined;
 }
 
+/**
+ * Resolve a SQL host var name against a program's full data surface —
+ * WORKING-STORAGE first, then LINKAGE. The LINKAGE side matters for
+ * callee programs that receive their host vars via CALL USING (e.g.,
+ * a subprogram that reads :CUSTOMER-ID where CUSTOMER-ID is declared
+ * in LINKAGE, not WS). Searching only `dataItems` would emit a false
+ * `host-var-unresolved` diagnostic for that pattern.
+ */
+function resolveHostVar(program: CobolCodeModel, name: string): DataItemNode | undefined {
+  return findDataItemByName(program.dataItems, name)
+    ?? findDataItemByName(program.linkageItems, name);
+}
+
 function toHostVarRef(name: string, dataItem: DataItemNode | undefined): HostVarRef {
   if (!dataItem) return { name };
   return {
@@ -159,7 +177,6 @@ function toHostVarRef(name: string, dataItem: DataItemNode | undefined): HostVar
       level: dataItem.level,
       picture: dataItem.picture,
       usage: dataItem.usage,
-      loc: dataItem.loc,
     },
   };
 }
@@ -285,7 +302,7 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
       }
       const hostVarNames = extractHostVars(ref.rawText);
       const hostVars: HostVarRef[] = hostVarNames.map((name) => {
-        const dataItem = findDataItemByName(program.dataItems, name);
+        const dataItem = resolveHostVar(program, name);
         if (!dataItem) {
           const dedupeKey = `${programId}|${name}`;
           if (!seenUnresolved.has(dedupeKey)) {

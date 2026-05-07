@@ -304,6 +304,73 @@ describe("buildDb2TableLineage", () => {
     expect(unresolved).toHaveLength(1);
   });
 
+  it("resolves host vars declared in LINKAGE (callee subprogram pattern)", () => {
+    // A callee subprogram receives its host vars via CALL USING, so they
+    // live in LINKAGE, not WORKING-STORAGE. Searching only dataItems
+    // would emit a spurious `host-var-unresolved` for this very common
+    // pattern in COBOL/DB2 systems.
+    const callee = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-LOCAL           PIC X(8).
+       LINKAGE SECTION.
+       01  LK-CUSTOMER-ID     PIC 9(8).
+       01  LK-NAME            PIC X(30).
+       PROCEDURE DIVISION USING LK-CUSTOMER-ID, LK-NAME.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL UPDATE CUSTOMERS SET NAME = :LK-NAME
+             WHERE ID = :LK-CUSTOMER-ID END-EXEC.
+           GOBACK.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT NAME INTO :WS-NAME FROM CUSTOMERS END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(callee, "CALLEE.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const writerEntry = lineage!.entries.find((e) => e.writer.programId === "program:CALLEE");
+    const lkId = writerEntry?.writer.hostVars.find((hv) => hv.name === "LK-CUSTOMER-ID");
+    expect(lkId?.dataItem?.picture).toBe("9(8)");
+    expect(lkId?.dataItem?.level).toBe(1);
+    const lkName = writerEntry?.writer.hostVars.find((hv) => hv.name === "LK-NAME");
+    expect(lkName?.dataItem?.picture).toBe("X(30)");
+    // LINKAGE-declared host vars are NOT unresolved.
+    const unresolved = lineage!.diagnostics.filter((d) => d.kind === "host-var-unresolved");
+    expect(unresolved).toHaveLength(0);
+  });
+
+  it("emits one host-var-unresolved per program when the SAME missing name appears in multiple programs", () => {
+    // The dedup key is `${programId}|${name}` — same name in two programs
+    // must NOT collapse to one diagnostic, since the user has to fix both
+    // programs independently.
+    const writer = programWith("WRITER", [[
+      "EXEC SQL INSERT INTO T (X) VALUES (:WS-MISSING) END-EXEC",
+    ]]);
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-MISSING FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const unresolved = lineage!.diagnostics.filter(
+      (d) => d.kind === "host-var-unresolved" && d.hostVar === "WS-MISSING",
+    );
+    expect(unresolved).toHaveLength(2);
+    const programIds = unresolved.map((d) => d.programId).sort();
+    expect(programIds).toEqual(["program:READER", "program:WRITER"]);
+  });
+
   it("resolves nested host vars (declared as a child of a group record)", () => {
     // Override the standard fixture with a program that declares the SQL host
     // var as a 05-level child of a group record — this is the typical layout

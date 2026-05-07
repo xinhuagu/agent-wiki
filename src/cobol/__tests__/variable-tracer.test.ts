@@ -127,6 +127,54 @@ describe("COBOL extractDataflowEdges", () => {
     expect(addEdge).toBeDefined();
     expect(addEdge!.line).toBeGreaterThan(0);
   });
+
+  it("does not shatter multi-word literals into pseudo-variables (#20 phase B)", () => {
+    // Pre-fix: lexer emitted `"DAS IST EIN TEST"` as one LITERAL token,
+    // parser joined into rawText with spaces, dataflow re-split on
+    // whitespace producing phantom `IST` / `EIN` / `TEST` reads. Phase B
+    // iterates typed tokens and skips whole LITERALs.
+    const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. STR-LIT.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-MSG    PIC X(40).
+       PROCEDURE DIVISION.
+       A100.
+           MOVE "DAS IST EIN TEST" TO WS-MSG.
+           STOP RUN.
+`;
+    const ast = parse(source, "STR-LIT.cbl");
+    const literalEdges = extractDataflowEdges(ast);
+    // No edges sourced from any literal-internal word.
+    const phantoms = literalEdges.filter(
+      (e) => e.from === "DAS" || e.from === "IST" || e.from === "EIN" || e.from === "TEST",
+    );
+    expect(phantoms).toHaveLength(0);
+    // The MOVE-from-literal is correctly classified as no-edge (target
+    // gets no incoming dataflow because the source is a literal).
+    expect(literalEdges.filter((e) => e.to === "WS-MSG")).toHaveLength(0);
+  });
+
+  it("does not produce phantom edges from numeric literals", () => {
+    // Companion case: numerics also tokenize as LITERAL/NUMERIC and were
+    // previously re-split. Ensure they don't surface as variables either.
+    const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. NUM-LIT.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-COUNT  PIC 9(4).
+       PROCEDURE DIVISION.
+       A100.
+           MOVE 12345 TO WS-COUNT.
+           STOP RUN.
+`;
+    const ast = parse(source, "NUM-LIT.cbl");
+    const numericEdges = extractDataflowEdges(ast);
+    const fromNumber = numericEdges.filter((e) => /^[0-9]/.test(e.from));
+    expect(fromNumber).toHaveLength(0);
+  });
 });
 
 describe("COBOL extractDataflowEdges — EXEC SQL host variables", () => {

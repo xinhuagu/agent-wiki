@@ -552,6 +552,9 @@ class Parser {
     const isExecBlock = verb === "EXEC";
     const operands: string[] = [];
     const rawParts: string[] = [verb];
+    // Phase B: keep the typed tokens so downstream consumers don't have to
+    // re-split rawText (which historically shattered multi-word literals).
+    const tokens: Token[] = [start];
 
     // Collect operands until period, next verb, or end
     while (!this.atEnd()) {
@@ -566,12 +569,14 @@ class Parser {
       // END-xxx terminates the current statement
       if (t.type === "VERB" && t.value.startsWith("END-")) {
         rawParts.push(t.value);
+        tokens.push(t);
         this.advance();
         this.consumePeriod();
         break;
       }
 
       rawParts.push(t.value);
+      tokens.push(t);
       if (t.type === "IDENTIFIER" || t.type === "LITERAL" || t.type === "NUMERIC") {
         operands.push(t.value);
       }
@@ -583,6 +588,7 @@ class Parser {
       verb,
       operands,
       rawText: rawParts.join(" "),
+      tokens,
       loc: this.loc(start),
     };
   }

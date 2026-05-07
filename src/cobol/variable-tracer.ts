@@ -101,6 +101,10 @@ const VERB_RULES: Record<string, VerbRule> = {
       "REPLACING": "write",
       "BEFORE": "read",      // BEFORE/AFTER INITIAL <delim> — delim is read
       "AFTER": "read",
+      // INITIAL is intentionally NOT a marker: it's a no-op keyword
+      // between BEFORE/AFTER and the delim. The BEFORE/AFTER marker has
+      // already set mode=read; INITIAL is keyword-filtered (Phase C),
+      // and the delim that follows is classified read (correct).
     },
     fallback: "read",
   },
@@ -148,6 +152,7 @@ const NON_VARIABLE_KEYWORDS = new Set([
   "POINTER", "OVERFLOW",                       // STRING/UNSTRING WITH POINTER, ON OVERFLOW
   "COUNT", "CHARACTER", "CHARACTERS",          // UNSTRING COUNT IN, INSPECT CHARACTERS
   "LEADING", "TRAILING", "FIRST", "INITIAL",   // INSPECT REPLACING / INITIALIZE
+  "FOR",                                       // INSPECT TALLYING <var> FOR ALL/LEADING/CHARACTERS
   "=", "(", ")", "<", ">", "+", "-", "*", "/",
 ]);
 
@@ -249,7 +254,13 @@ function classifyStatement(
 
 const DATAFLOW_VERBS = new Set([
   "MOVE", "COMPUTE", "ADD", "SUBTRACT", "MULTIPLY", "DIVIDE",
-  "SET", "STRING", "UNSTRING", "READ", "WRITE", "REWRITE",
+  "SET", "STRING", "UNSTRING",
+  // #20 phase D: INSPECT extracts real dataflow (TALLYING writes a count
+  // var from reading the inspected target; REPLACING is in-place r/w).
+  // Was previously excluded — adding it now that the markers in
+  // VERB_RULES correctly classify the clause arguments.
+  "INSPECT",
+  "READ", "WRITE", "REWRITE",
   "SORT", "MERGE", "RELEASE", "RETURN",
 ]);
 
@@ -310,21 +321,24 @@ function edgesFromStatement(
     }
     if (!isDataflowVariable(tok)) continue;
 
-    // Qualified-name collapse: NAME OF/IN PARENT → emit "NAME OF PARENT"
-    // and skip the OF/IN + parent tokens. The format matches the existing
-    // `traceVariable` qualified-name shape.
+    // Qualified-name collapse: NAME [OF/IN PARENT]+ → emit a single
+    // chained qualified node ("A OF B OF C") matching the existing
+    // `traceVariable` shape. The while loop handles multi-level
+    // qualification (COBOL allows arbitrary depth) so e.g.
+    // `MOVE A OF B OF C TO D` produces ONE source node `"A OF B OF C"`,
+    // not `"A OF B"` + a phantom outermost-qualifier `C`.
     let name = tok;
-    const next = stmt.tokens[i + 1];
-    const nextNext = stmt.tokens[i + 2];
-    if (
-      next && nextNext
-      && (next.type === "OF" || next.type === "IN")
-      && nextNext.type === "IDENTIFIER"
-      && isDataflowVariable(nextNext.value.toUpperCase())
+    let j = i + 1;
+    while (
+      j + 1 < stmt.tokens.length
+      && (stmt.tokens[j].type === "OF" || stmt.tokens[j].type === "IN")
+      && stmt.tokens[j + 1].type === "IDENTIFIER"
+      && isDataflowVariable(stmt.tokens[j + 1].value.toUpperCase())
     ) {
-      name = `${tok} ${next.value.toUpperCase()} ${nextNext.value.toUpperCase()}`;
-      i += 2;
+      name = `${name} ${stmt.tokens[j].value.toUpperCase()} ${stmt.tokens[j + 1].value.toUpperCase()}`;
+      j += 2;
     }
+    i = j - 1;  // -1 because the for-loop's i++ will advance to j next
 
     if (currentAccess === "read") {
       reads.push(name);

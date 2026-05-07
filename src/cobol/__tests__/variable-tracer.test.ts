@@ -227,6 +227,37 @@ describe("COBOL extractDataflowEdges", () => {
     expect(allEdges.some((e) => e.from === "IN" || e.to === "IN")).toBe(false);
   });
 
+  it("collapses multi-level qualifiers: A OF B OF C TO D produces one chained node (#20 phase C)", () => {
+    // COBOL allows arbitrary qualification depth. The while-loop
+    // collapse must capture all OF/IN chain segments — without it, only
+    // the innermost OF would be folded and outer parents would surface
+    // as phantom variables.
+    const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. DEEP-Q.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  C.
+           05  B.
+               10  A      PIC X(4).
+       01  D                  PIC X(4).
+       PROCEDURE DIVISION.
+       A100.
+           MOVE A OF B OF C TO D.
+           STOP RUN.
+`;
+    const ast = parse(source, "DEEP-Q.cbl");
+    const moveEdges = extractDataflowEdges(ast).filter((e) => e.via === "MOVE");
+    expect(moveEdges).toHaveLength(1);
+    expect(moveEdges[0].from).toBe("A OF B OF C");
+    expect(moveEdges[0].to).toBe("D");
+    // Critically, no phantom edge from the outermost qualifier `C`.
+    const phantomC = extractDataflowEdges(ast).filter(
+      (e) => e.from === "C" || e.from === "B",
+    );
+    expect(phantomC).toHaveLength(0);
+  });
+
   it("STRING WITH POINTER classifies the pointer var as both read and written (#20 phase D)", () => {
     // Phase D: WITH POINTER var is read-and-written each iteration. The
     // POINTER marker switches access to "both" so the pointer var is
@@ -255,6 +286,80 @@ describe("COBOL extractDataflowEdges", () => {
     expect(ptrAsTo).toBe(true);
     // POINTER itself is not an edge endpoint (it's now a marker keyword).
     expect(stringEdges.some((e) => e.from === "POINTER" || e.to === "POINTER")).toBe(false);
+    // Known-noise: the simple Cartesian model produces WS-SRC → WS-PTR
+    // and WS-PTR → WS-RES even though semantically the pointer doesn't
+    // dataflow to/from source/result. Eliminating these requires a
+    // per-clause state machine — out of scope for #20 phase D, see the
+    // PR description's "Known limitation" section. Asserting the noise
+    // edges exist locks the trade-off so a future state-machine fix
+    // explicitly removes them.
+    expect(stringEdges.some((e) => e.from === "WS-SRC" && e.to === "WS-PTR")).toBe(true);
+    expect(stringEdges.some((e) => e.from === "WS-PTR" && e.to === "WS-RES")).toBe(true);
+  });
+
+  it("UNSTRING: DELIMITER IN <var> and COUNT IN <var> are writes, not reads (#20 phase D)", () => {
+    // UNSTRING-specific markers: `DELIMITER IN <var>` captures which
+    // delimiter matched (write to var); `COUNT IN <var>` captures how
+    // many chars matched (write). Pre-fix these were classified by the
+    // surrounding mode (often read) so the captures appeared as
+    // phantom inputs to the UNSTRING dataflow.
+    const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. UNS-CAP.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-INPUT     PIC X(40).
+       01  WS-DEL       PIC X(1).
+       01  WS-PART1     PIC X(20).
+       01  WS-WHICH-DEL PIC X(1).
+       01  WS-LEN       PIC 9(4).
+       PROCEDURE DIVISION.
+       A100.
+           UNSTRING WS-INPUT DELIMITED BY WS-DEL
+             INTO WS-PART1 DELIMITER IN WS-WHICH-DEL COUNT IN WS-LEN.
+           STOP RUN.
+`;
+    const ast = parse(source, "UNS-CAP.cbl");
+    const unstringEdges = extractDataflowEdges(ast).filter((e) => e.via === "UNSTRING");
+    // Capture vars receive output, so they appear as `to`, not `from`.
+    expect(unstringEdges.some((e) => e.to === "WS-WHICH-DEL")).toBe(true);
+    expect(unstringEdges.some((e) => e.to === "WS-LEN")).toBe(true);
+    // No clause keyword surfaces as an endpoint.
+    for (const kw of ["DELIMITED", "DELIMITER", "COUNT", "BY", "IN"]) {
+      expect(unstringEdges.some((e) => e.from === kw || e.to === kw)).toBe(false);
+    }
+  });
+
+  it("INSPECT: BEFORE/AFTER INITIAL <delim> classifies delim as read (#20 phase D)", () => {
+    // INSPECT TALLYING / REPLACING with a BEFORE/AFTER INITIAL clause:
+    // the delim var is a read (it's a literal-or-var pattern to match,
+    // not a write target). Pre-fix the surrounding mode (TALLYING set
+    // to write) would have leaked into the delim classification.
+    const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. INS-BA.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-INPUT   PIC X(40).
+       01  WS-COUNT   PIC 9(4).
+       01  WS-DELIM   PIC X(1).
+       PROCEDURE DIVISION.
+       A100.
+           INSPECT WS-INPUT TALLYING WS-COUNT FOR ALL "X"
+             BEFORE INITIAL WS-DELIM.
+           STOP RUN.
+`;
+    const ast = parse(source, "INS-BA.cbl");
+    const inspectEdges = extractDataflowEdges(ast).filter((e) => e.via === "INSPECT");
+    // WS-COUNT is the tally write target.
+    expect(inspectEdges.some((e) => e.to === "WS-COUNT")).toBe(true);
+    // WS-DELIM (the delim) is read, never written.
+    expect(inspectEdges.some((e) => e.to === "WS-DELIM")).toBe(false);
+    expect(inspectEdges.some((e) => e.from === "WS-DELIM")).toBe(true);
+    // INITIAL / BEFORE / AFTER never as endpoints.
+    for (const kw of ["INITIAL", "BEFORE", "AFTER"]) {
+      expect(inspectEdges.some((e) => e.from === kw || e.to === kw)).toBe(false);
+    }
   });
 
   it("STRING DELIMITED clause keywords are not treated as variables (#20 phase D)", () => {

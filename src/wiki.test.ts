@@ -122,6 +122,58 @@ describe("Wiki.loadConfig", () => {
     const wiki = new Wiki(TEST_ROOT, wsDir);
     expect(wiki.config.workspace).toBe(wsDir);
   });
+
+  it("cobol.systemCalleesAdditional defaults to [] when no config sets it (#26 phase 2)", () => {
+    const wiki = freshWiki();
+    expect(wiki.config.cobol.systemCalleesAdditional).toEqual([]);
+  });
+
+  it("cobol.systemCalleesAdditional reads from .agent-wiki.yaml main config (#26 phase 2)", () => {
+    Wiki.init(TEST_ROOT);
+    writeFileSync(
+      join(TEST_ROOT, ".agent-wiki.yaml"),
+      "version: '2'\n"
+        + "wiki:\n  path: wiki/\n  raw_path: raw/\n  schemas_path: schemas/\n"
+        + "cobol:\n  systemCalleesAdditional:\n    - YOURRTN1\n    - YOURRTN2\n",
+    );
+    const wiki = new Wiki(TEST_ROOT);
+    expect(wiki.config.cobol.systemCalleesAdditional).toEqual(["YOURRTN1", "YOURRTN2"]);
+  });
+
+  it("cobol.systemCalleesAdditional from .agent-wiki.local.yaml is concatenated with main (#26 phase 2)", () => {
+    // Local file is gitignored — site-specific names go there. Loaded
+    // independently of the main config and concatenated, so users can
+    // ship a project default in `.agent-wiki.yaml` AND extend per-site
+    // without touching the committed file.
+    Wiki.init(TEST_ROOT);
+    writeFileSync(
+      join(TEST_ROOT, ".agent-wiki.yaml"),
+      "version: '2'\n"
+        + "wiki:\n  path: wiki/\n  raw_path: raw/\n  schemas_path: schemas/\n"
+        + "cobol:\n  systemCalleesAdditional:\n    - SHARED-RTN\n",
+    );
+    writeFileSync(
+      join(TEST_ROOT, ".agent-wiki.local.yaml"),
+      "cobol:\n  systemCalleesAdditional:\n    - SITE-LOCAL-A\n    - SITE-LOCAL-B\n",
+    );
+    const wiki = new Wiki(TEST_ROOT);
+    expect(wiki.config.cobol.systemCalleesAdditional).toContain("SHARED-RTN");
+    expect(wiki.config.cobol.systemCalleesAdditional).toContain("SITE-LOCAL-A");
+    expect(wiki.config.cobol.systemCalleesAdditional).toContain("SITE-LOCAL-B");
+    expect(wiki.config.cobol.systemCalleesAdditional).toHaveLength(3);
+  });
+
+  it("cobol.systemCalleesAdditional works with ONLY .agent-wiki.local.yaml (no main cobol section) (#26 phase 2)", () => {
+    // The realistic deployment: `.agent-wiki.yaml` ships with no cobol
+    // section, all site-specific names live in the gitignored local file.
+    Wiki.init(TEST_ROOT);  // default config has no cobol section
+    writeFileSync(
+      join(TEST_ROOT, ".agent-wiki.local.yaml"),
+      "cobol:\n  systemCalleesAdditional:\n    - SITE-ONLY-1\n",
+    );
+    const wiki = new Wiki(TEST_ROOT);
+    expect(wiki.config.cobol.systemCalleesAdditional).toEqual(["SITE-ONLY-1"]);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════

@@ -637,4 +637,521 @@ describe("buildCallBoundLineage", () => {
       .sort();
     expect(childNames).toEqual(["WS-A", "WS-B"]);
   });
+
+  it("classifies CALL of an IBM runtime API as system-call, not unresolved-callee (#26 phase 1)", () => {
+    // CALL to an IBM-published runtime (MQ / Language Environment / CICS
+    // batch family) shouldn't be reported as a missing user program. The
+    // SYSTEM_CALLEES whitelist routes these to a dedicated `system-call`
+    // diagnostic so the noise floor stays low and genuine user-program
+    // gaps stand out.
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-MQ-HCONN        PIC 9(9).
+       01  WS-MQ-OPTIONS      PIC 9(9).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "MQCONN" USING WS-MQ-HCONN WS-MQ-OPTIONS.
+           CALL "CEEDATE" USING WS-MQ-HCONN WS-MQ-OPTIONS.
+           STOP RUN.
+`;
+    // Need a second user program in the corpus so the analyzer doesn't
+    // bail at the < 2 programs guard.
+    const otherUser = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. OTHER.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-X       PIC X(8).
+       PROCEDURE DIVISION USING LK-X.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+    const lineage = buildCallBoundLineage([
+      model(caller, "CALLER.cbl"),
+      model(otherUser, "OTHER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const systemCalls = lineage!.diagnostics.filter((d) => d.kind === "system-call");
+    expect(systemCalls).toHaveLength(2);
+    expect(systemCalls.map((d) => d.target).sort()).toEqual(["CEEDATE", "MQCONN"]);
+    // The IBM-API targets do NOT show up as unresolved-callee.
+    const unresolved = lineage!.diagnostics.filter((d) => d.kind === "unresolved-callee");
+    expect(unresolved.some((d) => d.target === "MQCONN" || d.target === "CEEDATE")).toBe(false);
+    // Rationale points the user at the IBM-runtime classification.
+    expect(systemCalls[0]!.rationale).toContain("IBM");
+    // Summary count is updated.
+    expect(lineage!.summary.diagnosticsByKind["system-call"]).toBe(2);
+  });
+
+  it("resolves USING arg defined in a COPY'd copybook (#26 phase 3)", () => {
+    // Phase 3: parser doesn't inline-expand COPY, so a `01 TEST-RECORD`
+    // declared inside a copybook never appears in `caller.dataItems`.
+    // Pre-fix the analyzer fired `caller-arg-not-top-level` for every
+    // COPY-supplied USING arg. With the copybook fallback, the resolver
+    // walks the parsed copybooks the caller COPYs and finds the record.
+    const copybook = `
+       01  TEST-RECORD.
+           05  FIELD-A   PIC X(10).
+           05  FIELD-B   PIC 9(5).
+`;
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER01.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY TESTREC.
+       PROCEDURE DIVISION.
+       A100.
+           CALL "CALLEE01" USING TEST-RECORD.
+           STOP RUN.
+`;
+    const callee = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE01.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-RECORD.
+           05  LK-FIELD-A PIC X(10).
+           05  LK-FIELD-B PIC 9(5).
+       PROCEDURE DIVISION USING LK-RECORD.
+       A100.
+           GOBACK.
+`;
+    const lineage = buildCallBoundLineage([
+      model(copybook, "TESTREC.cpy"),
+      model(caller, "CALLER01.cbl"),
+      model(callee, "CALLEE01.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    // No caller-arg-not-top-level diagnostic — copybook fallback resolves it.
+    expect(lineage!.diagnostics.some((d) => d.kind === "caller-arg-not-top-level")).toBe(false);
+    // Pair succeeds.
+    expect(lineage!.entries.length).toBeGreaterThan(0);
+    const topPair = lineage!.entries.find((e) => e.position === 0);
+    expect(topPair?.caller.fieldName).toBe("TEST-RECORD");
+  });
+
+  it("inline data item shadows a same-named copybook item (#26 phase 3 precedence)", () => {
+    // Resolution order: caller's own dataItems first, then copybooks.
+    // A program declaring `01 TEST-RECORD` inline AND copying a
+    // copybook with the same name uses the inline declaration.
+    const copybook = `
+       01  TEST-RECORD.
+           05  CPY-FIELD   PIC X(99).
+`;
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER02.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  TEST-RECORD.
+           05  WS-FIELD    PIC X(10).
+           COPY TESTREC.
+       PROCEDURE DIVISION.
+       A100.
+           CALL "CALLEE02" USING TEST-RECORD.
+           STOP RUN.
+`;
+    const callee = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE02.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-RECORD.
+           05  LK-FIELD    PIC X(10).
+       PROCEDURE DIVISION USING LK-RECORD.
+       A100.
+           GOBACK.
+`;
+    const lineage = buildCallBoundLineage([
+      model(copybook, "TESTREC.cpy"),
+      model(caller, "CALLER02.cbl"),
+      model(callee, "CALLEE02.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const topPair = lineage!.entries.find((e) => e.position === 0);
+    // The pair child count reflects the INLINE TEST-RECORD (1 child:
+    // WS-FIELD), not the copybook's TEST-RECORD (1 child: CPY-FIELD).
+    // Since both have 1 child the count is the same; what differs is
+    // which child name surfaces in nested pairs.
+    expect(topPair).toBeDefined();
+    const childPair = lineage!.entries.find((e) => e.position === 0 && e.caller.fieldName === "WS-FIELD");
+    expect(childPair).toBeDefined();
+  });
+
+  it("CICS DFHCOMMAREA: caller's single USING arg pairs with DFHCOMMAREA when callee has multiple LINKAGE records (#26 phase 4)", () => {
+    // Realistic CICS program shape: LINKAGE declares both the implicit
+    // DFHCOMMAREA and additional work records. Pre-fix the analyzer
+    // compared raw linkage count (>1) against caller's single USING arg
+    // and fired a false `arity-mismatch`. Phase 4 narrows the effective
+    // linkage to just DFHCOMMAREA in this case (the CICS convention).
+    const cicsCallee = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CICSCALEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  DFHCOMMAREA.
+           05  COMM-FIELD   PIC X(20).
+       01  LK-EXTRA.
+           05  EXTRA-FIELD  PIC X(10).
+       PROCEDURE DIVISION.
+           GOBACK.
+`;
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-COMM-RECORD.
+           05  WS-COMM-FIELD   PIC X(20).
+       PROCEDURE DIVISION.
+       A100.
+           CALL "CICSCALEE" USING WS-COMM-RECORD.
+           STOP RUN.
+`;
+    const lineage = buildCallBoundLineage([
+      model(cicsCallee, "CICSCALEE.cbl"),
+      model(caller, "CALLER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    // No arity-mismatch; pair succeeds with DFHCOMMAREA.
+    expect(lineage!.diagnostics.some((d) => d.kind === "arity-mismatch")).toBe(false);
+    expect(lineage!.entries.length).toBeGreaterThan(0);
+    // Pair callee side is DFHCOMMAREA, not LK-EXTRA.
+    const topEntry = lineage!.entries.find((e) => e.position === 0);
+    expect(topEntry?.callee.fieldName).toBe("DFHCOMMAREA");
+  });
+
+  it("CICS DFHCOMMAREA: simple single-LINKAGE case still works (no regression #26 phase 4)", () => {
+    // The single-DFHCOMMAREA case worked pre-fix (arity matches at 1=1).
+    // Verify the Phase 4 fallthrough doesn't break it.
+    const cicsCallee = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CICSCALEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  DFHCOMMAREA.
+           05  COMM-FIELD   PIC X(20).
+       PROCEDURE DIVISION.
+           GOBACK.
+`;
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-COMM-RECORD.
+           05  WS-COMM-FIELD   PIC X(20).
+       PROCEDURE DIVISION.
+       A100.
+           CALL "CICSCALEE" USING WS-COMM-RECORD.
+           STOP RUN.
+`;
+    const lineage = buildCallBoundLineage([
+      model(cicsCallee, "CICSCALEE.cbl"),
+      model(caller, "CALLER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    expect(lineage!.diagnostics.filter((d) => d.kind === "arity-mismatch")).toHaveLength(0);
+    expect(lineage!.entries.length).toBeGreaterThan(0);
+  });
+
+  it("CICS DFHCOMMAREA: 2-arg caller does NOT trigger DFHCOMMAREA narrowing (#26 phase 4)", () => {
+    // Phase 4 only applies when caller passes exactly 1 arg. If the
+    // caller passes multiple args, the standard pair-by-position
+    // handling runs (and may surface a real arity-mismatch).
+    const cicsCallee = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CICSCALEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  DFHCOMMAREA.
+           05  COMM-FIELD   PIC X(20).
+       01  LK-EXTRA.
+           05  EXTRA-FIELD  PIC X(10).
+       PROCEDURE DIVISION.
+           GOBACK.
+`;
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-A    PIC X(20).
+       01  WS-B    PIC X(10).
+       01  WS-C    PIC X(5).
+       PROCEDURE DIVISION.
+       A100.
+           CALL "CICSCALEE" USING WS-A WS-B WS-C.
+           STOP RUN.
+`;
+    const lineage = buildCallBoundLineage([
+      model(cicsCallee, "CICSCALEE.cbl"),
+      model(caller, "CALLER.cbl"),
+    ]);
+
+    // 3 args vs 2 LINKAGE records → real arity-mismatch, narrowing
+    // doesn't apply.
+    expect(lineage!.diagnostics.some((d) => d.kind === "arity-mismatch")).toBe(true);
+  });
+
+  it("project-local extraSystemCallees option promotes additional names to system-call (#26 phase 2)", () => {
+    // Phase 2: site-specific runtime libraries shouldn't go in the
+    // open-source whitelist, but should be classifiable as system-call
+    // by callers passing a project-local extension list (loaded from a
+    // gitignored `.agent-wiki.local.yaml`). Synthetic placeholder name
+    // `YOURRTN1` stands in for what would be a real site runtime in
+    // production.
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-A       PIC X(8).
+       PROCEDURE DIVISION.
+       A100.
+           CALL "YOURRTN1" USING WS-A.
+           STOP RUN.
+`;
+    const otherUser = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. OTHER.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-X       PIC X(8).
+       PROCEDURE DIVISION USING LK-X.
+       A100.
+           GOBACK.
+`;
+    const models = [
+      model(caller, "CALLER.cbl"),
+      model(otherUser, "OTHER.cbl"),
+    ];
+
+    // Without the option: YOURRTN1 is treated as missing user program.
+    const lineageDefault = buildCallBoundLineage(models);
+    expect(lineageDefault!.diagnostics.some(
+      (d) => d.kind === "unresolved-callee" && d.target === "YOURRTN1",
+    )).toBe(true);
+
+    // With the option: YOURRTN1 is reclassified as system-call.
+    const lineageWithExtra = buildCallBoundLineage(models, {
+      extraSystemCallees: ["YOURRTN1"],
+    });
+    expect(lineageWithExtra!.diagnostics.some(
+      (d) => d.kind === "system-call" && d.target === "YOURRTN1",
+    )).toBe(true);
+    expect(lineageWithExtra!.diagnostics.some(
+      (d) => d.kind === "unresolved-callee" && d.target === "YOURRTN1",
+    )).toBe(false);
+  });
+
+  it("extraSystemCallees is case-insensitive — array input (#26 phase 2)", () => {
+    // Caller-passed names are uppercased before matching, so the
+    // local-config can use any case convention without affecting
+    // detection.
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-A       PIC X(8).
+       PROCEDURE DIVISION.
+       A100.
+           CALL "MIXEDCASE" USING WS-A.
+           STOP RUN.
+`;
+    const otherUser = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. OTHER.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-X       PIC X(8).
+       PROCEDURE DIVISION USING LK-X.
+       A100.
+           GOBACK.
+`;
+    const lineage = buildCallBoundLineage(
+      [model(caller, "CALLER.cbl"), model(otherUser, "OTHER.cbl")],
+      { extraSystemCallees: ["mixedcase"] },
+    );
+    const sysCall = lineage!.diagnostics.find(
+      (d) => d.kind === "system-call" && d.target === "MIXEDCASE",
+    );
+    expect(sysCall).toBeDefined();
+    // Phase 2 rationale split: project-local extension has its own text,
+    // distinct from the IBM-whitelist branch.
+    expect(sysCall!.rationale).toContain("project-local system-call extension");
+    expect(sysCall!.rationale).not.toContain("IBM");
+  });
+
+  it("extraSystemCallees accepts spread-from-Set input via uppercase normalization (#26 phase 2)", () => {
+    // Caller has a Set in hand (e.g., already-deduped config). Spreading
+    // it into an array still yields correct case-insensitive matching.
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-A       PIC X(8).
+       PROCEDURE DIVISION.
+       A100.
+           CALL "SETCASE" USING WS-A.
+           STOP RUN.
+`;
+    const otherUser = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. OTHER.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-X       PIC X(8).
+       PROCEDURE DIVISION USING LK-X.
+       A100.
+           GOBACK.
+`;
+    const lineage = buildCallBoundLineage(
+      [model(caller, "CALLER.cbl"), model(otherUser, "OTHER.cbl")],
+      { extraSystemCallees: [...new Set(["setcase"])] },  // spread from Set
+    );
+    expect(lineage!.diagnostics.some(
+      (d) => d.kind === "system-call" && d.target === "SETCASE",
+    )).toBe(true);
+  });
+
+  it("system-call rationale on IBM-whitelist match retains IBM-specific attribution (#26 phase 1)", () => {
+    // IBM-whitelist branch and project-local extension branch produce
+    // different rationale text so users can tell which classification
+    // path matched.
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-A       PIC X(8).
+       PROCEDURE DIVISION.
+       A100.
+           CALL "MQCONN" USING WS-A.
+           STOP RUN.
+`;
+    const otherUser = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. OTHER.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-X       PIC X(8).
+       PROCEDURE DIVISION USING LK-X.
+       A100.
+           GOBACK.
+`;
+    const lineage = buildCallBoundLineage([
+      model(caller, "CALLER.cbl"),
+      model(otherUser, "OTHER.cbl"),
+    ]);
+    const sysCall = lineage!.diagnostics.find(
+      (d) => d.kind === "system-call" && d.target === "MQCONN",
+    );
+    expect(sysCall).toBeDefined();
+    expect(sysCall!.rationale).toContain("IBM");
+    expect(sysCall!.rationale).not.toContain("project-local");
+  });
+
+  it("Phase 3 copybook resolver is deterministic across input orders for duplicate canonical names", () => {
+    // Two copybook files share the basename TESTREC.cpy from different
+    // directories. The map sort by sourceFile should produce the same
+    // resolution regardless of the input array order.
+    const cpyA = `
+       01  TEST-RECORD.
+           05  FIELD-V1   PIC X(10).
+`;
+    const cpyB = `
+       01  TEST-RECORD.
+           05  FIELD-V2   PIC X(99).
+`;
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY TESTREC.
+       PROCEDURE DIVISION.
+       A100.
+           CALL "CALLEE" USING TEST-RECORD.
+           STOP RUN.
+`;
+    const callee = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-RECORD.
+           05  LK-FIELD    PIC X(10).
+       PROCEDURE DIVISION USING LK-RECORD.
+       A100.
+           GOBACK.
+`;
+    const a = model(cpyA, "dir-a/TESTREC.cpy");
+    const b = model(cpyB, "dir-b/TESTREC.cpy");
+    const c = model(caller, "CALLER.cbl");
+    const d = model(callee, "CALLEE.cbl");
+
+    const findChildName = (lineage: ReturnType<typeof buildCallBoundLineage>): string | undefined =>
+      lineage?.entries.find((e) => e.position === 0 && e.caller.fieldName !== "TEST-RECORD")?.caller.fieldName;
+
+    const lineage1 = buildCallBoundLineage([a, b, c, d]);
+    const lineage2 = buildCallBoundLineage([b, a, c, d]);
+    // Both orders should resolve to the same copybook variant.
+    // dir-a sorts before dir-b → FIELD-V1 wins deterministically.
+    expect(findChildName(lineage1)).toBe("FIELD-V1");
+    expect(findChildName(lineage2)).toBe("FIELD-V1");
+  });
+
+  it("dynamic CALL <var> resolving to an IBM API name does NOT match the whitelist (#26 phase 1)", () => {
+    // The whitelist is gated behind targetKind === "literal" — a runtime-
+    // resolved CALL <variable> stays a dynamic-call diagnostic regardless
+    // of whether the value at the call site happens to match an IBM API
+    // name. Static lineage can't see the variable's runtime value.
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PROG-NAME       PIC X(8).
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           MOVE "MQCONN" TO WS-PROG-NAME.
+           CALL WS-PROG-NAME USING WS-A.
+           STOP RUN.
+`;
+    const otherUser = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. OTHER.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-X       PIC X(8).
+       PROCEDURE DIVISION USING LK-X.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+    const lineage = buildCallBoundLineage([
+      model(caller, "CALLER.cbl"),
+      model(otherUser, "OTHER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    expect(lineage!.diagnostics.some((d) => d.kind === "system-call")).toBe(false);
+    expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(true);
+  });
 });

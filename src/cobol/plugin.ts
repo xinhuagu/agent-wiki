@@ -375,7 +375,10 @@ export const cobolPlugin: CodeAnalysisPlugin = {
     return { serialized, wikiPages };
   },
 
-  buildDerivedArtifacts(parsedDir: string): {
+  buildDerivedArtifacts(
+    parsedDir: string,
+    options?: { config?: import("../wiki.js").WikiConfig },
+  ): {
     artifacts: Array<{ path: string; content: string }>;
     wikiPages: Array<{ path: string; content: string }>;
     staleArtifacts?: string[];
@@ -400,7 +403,12 @@ export const cobolPlugin: CodeAnalysisPlugin = {
     }
 
     const copybookLineage = buildFieldLineage(models);
-    const callLineage = buildCallBoundLineage(models);
+    // #26 phase 2: pull project-local system-call additions from config.
+    // Caller (server.ts) threads `wiki.config` through; plugin doesn't
+    // need to read .agent-wiki.local.yaml directly.
+    const callLineage = buildCallBoundLineage(models, {
+      extraSystemCallees: options?.config?.cobol?.systemCalleesAdditional,
+    });
     const db2Lineage = buildDb2TableLineage(models);
     const lineage = combineFieldLineage(copybookLineage, {
       callBound: callLineage,

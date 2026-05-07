@@ -878,6 +878,7 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
 const CALL_BOUND_KIND_ORDER: readonly CallBoundLineage["diagnostics"][number]["kind"][] = [
   "unresolved-callee",
   "dynamic-call",
+  "system-call",
   "arity-mismatch",
   "shape-mismatch",
   "caller-arg-not-top-level",

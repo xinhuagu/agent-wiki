@@ -178,8 +178,16 @@ export interface CodeAnalysisPlugin {
    * previously parsed models of this language (e.g. lineage JSON, summary
    * tables) plus any wiki pages derived from them.
    * Artifact paths are relative to raw/parsed/<lang>/.
+   *
+   * `options.config` carries the full WikiConfig — plugins that need
+   * project-local configuration (e.g., COBOL's `systemCalleesAdditional`
+   * from #26 phase 2) read it from there. Optional and backward-compatible:
+   * existing plugins ignore it.
    */
-  buildDerivedArtifacts?(parsedDir: string): {
+  buildDerivedArtifacts?(
+    parsedDir: string,
+    options?: { config?: import("./wiki.js").WikiConfig },
+  ): {
     artifacts: Array<{ path: string; content: string }>;
     wikiPages: Array<{ path: string; content: string }>;
     staleArtifacts?: string[];

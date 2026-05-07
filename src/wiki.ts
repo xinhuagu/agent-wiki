@@ -178,6 +178,19 @@ export interface WikiConfig {
      */
     rejectUnsupportedWrites: boolean;
   };
+  /** COBOL plugin configuration. Optional sections loaded from
+   *  `.agent-wiki.yaml` and merged with `.agent-wiki.local.yaml`
+   *  (the local file is gitignored — site-specific names go there). */
+  cobol: {
+    /**
+     * Phase 2 (#26). Extra callee names to treat as `system-call`
+     * rather than `unresolved-callee`, in addition to the built-in
+     * IBM whitelist. Used by `buildCallBoundLineage` so site-specific
+     * runtime libraries don't clutter the unresolved-callee diagnostic
+     * count. Names are case-insensitive.
+     */
+    systemCalleesAdditional: string[];
+  };
 }
 
 // System pages that lint should treat specially
@@ -462,11 +475,22 @@ _Chronological view of all knowledge in this wiki._
     let raw: Record<string, unknown> = {};
     const configPath = join(root, ".agent-wiki.yaml");
     const homeConfigPath = join(process.env.HOME ?? "~", ".agent-wiki.yaml");
+    // #26 phase 2: project-local override file. Gitignored — site-specific
+    // names (e.g., COBOL system-call extensions) belong here, never in the
+    // committed `.agent-wiki.yaml`.
+    const localConfigPath = join(root, ".agent-wiki.local.yaml");
 
     if (existsSync(configPath)) {
       raw = (yaml.load(readFileSync(configPath, "utf-8")) as Record<string, unknown>) ?? {};
     } else if (existsSync(homeConfigPath)) {
       raw = (yaml.load(readFileSync(homeConfigPath, "utf-8")) as Record<string, unknown>) ?? {};
+    }
+
+    // Local-override file is loaded INDEPENDENTLY of the main config — it
+    // exists or it doesn't, regardless of which main config was found.
+    let localRaw: Record<string, unknown> = {};
+    if (existsSync(localConfigPath)) {
+      localRaw = (yaml.load(readFileSync(localConfigPath, "utf-8")) as Record<string, unknown>) ?? {};
     }
 
     const wikiData = (raw.wiki ?? {}) as Record<string, string>;
@@ -476,6 +500,16 @@ _Chronological view of all knowledge in this wiki._
     const searchData = (raw.search ?? {}) as Record<string, unknown>;
     const autoLinkData = (raw.auto_link ?? {}) as Record<string, unknown>;
     const evidenceData = (raw.evidence ?? {}) as Record<string, unknown>;
+    // Cobol section: merge committed + local. Arrays concat, scalars
+    // local-overrides-committed (only systemCalleesAdditional today).
+    const cobolDataMain = (raw.cobol ?? {}) as Record<string, unknown>;
+    const cobolDataLocal = (localRaw.cobol ?? {}) as Record<string, unknown>;
+    const systemCalleesAdditional: string[] = [
+      ...(Array.isArray(cobolDataMain.systemCalleesAdditional)
+        ? cobolDataMain.systemCalleesAdditional as string[] : []),
+      ...(Array.isArray(cobolDataLocal.systemCalleesAdditional)
+        ? cobolDataLocal.systemCalleesAdditional as string[] : []),
+    ];
 
     // Resolve workspace directory (priority: override > env > config > root)
     let workspace: string;
@@ -538,6 +572,9 @@ _Chronological view of all knowledge in this wiki._
           evidenceData.reject_unsupported_writes,
           false,
         ),
+      },
+      cobol: {
+        systemCalleesAdditional,
       },
     };
   }

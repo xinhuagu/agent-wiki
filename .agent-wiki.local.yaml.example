@@ -1,0 +1,19 @@
+# Project-local agent-wiki overrides — copy this file to
+# `.agent-wiki.local.yaml` and customize for your deployment.
+#
+# This file is gitignored (#26 phase 2). It carries site-specific
+# runtime library names that should NOT be hardcoded into the
+# open-source parser's IBM whitelist. The built-in whitelist already
+# covers IBM MQ / CSQB batch / Language Environment / CICS DFHCOMMAREA.
+# Add only YOUR site's additional runtime callees here.
+
+cobol:
+  # Additional callee names to treat as `system-call` rather than
+  # `unresolved-callee`. Case-insensitive. Each entry is a CALL target
+  # (literal program name) you know is a runtime/library service, not
+  # a user program in your corpus.
+  systemCalleesAdditional:
+    - YOURRTN1   # placeholder — replace with your runtime program names
+    - YOURRTN2
+
+  # Reserved for future phases — schema may extend.

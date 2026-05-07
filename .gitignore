@@ -8,4 +8,7 @@ coverage/
 .aceclaw/
 .lint-cache.json
 .agent-wiki.yaml
+# #26 phase 2 — project-local override for COBOL system-call whitelist etc.
+# Site-specific runtime program names go here, never committed.
+.agent-wiki.local.yaml
 .tmp-lint-bench/

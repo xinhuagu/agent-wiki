@@ -1262,7 +1262,7 @@ function rebuildDeferredGraphs(wiki: Wiki): void {
       }
     }
     if (plugin.buildDerivedArtifacts) {
-      const derived = plugin.buildDerivedArtifacts(parsedDir);
+      const derived = plugin.buildDerivedArtifacts(parsedDir, { config: wiki.config });
       if (derived) {
         applyDerivedArtifacts(wiki, plugin.id, derived);
       }
@@ -2105,7 +2105,7 @@ export async function handleTool(
           }
         }
         if (plugin.buildDerivedArtifacts) {
-          const derived = plugin.buildDerivedArtifacts(parsedDir);
+          const derived = plugin.buildDerivedArtifacts(parsedDir, { config: wiki.config });
           if (derived) {
             applyDerivedArtifacts(wiki, plugin.id, derived);
           }
@@ -2266,7 +2266,7 @@ export async function handleTool(
       }
       if (plugin.buildDerivedArtifacts && !opts?.skipGraphRebuild) {
         const parsedDir = join(wiki.config.rawDir, "parsed", lang);
-        const derived = plugin.buildDerivedArtifacts(parsedDir);
+        const derived = plugin.buildDerivedArtifacts(parsedDir, { config: wiki.config });
         if (derived) {
           artifacts.push(...applyDerivedArtifacts(wiki, lang, derived));
           for (const page of derived.wikiPages) {

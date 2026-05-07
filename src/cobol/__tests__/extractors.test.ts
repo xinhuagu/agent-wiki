@@ -122,6 +122,91 @@ describe("COBOL extractors", () => {
     });
   });
 
+  describe("COPY REPLACING detection (#21)", () => {
+    // Pre-#21 the parser tried to find REPLACING in stmt.operands, but
+    // REPLACING/BY are typed keyword tokens excluded from operands, so
+    // detection always failed and `c.replacing` was always undefined.
+    // The fix uses rawText.indexOf("REPLACING") instead — best-effort
+    // tokenization that produces a non-empty array on detection.
+    function copyModel(source: string) {
+      const ast = parse(`
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CP-RPL.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       ${source}
+       PROCEDURE DIVISION.
+       A100.
+           STOP RUN.
+`, "CP-RPL.cbl");
+      return extractModel(ast);
+    }
+
+    it("plain COPY (no REPLACING) leaves c.replacing undefined", () => {
+      const model = copyModel("           COPY CUSTID.");
+      expect(model.copies).toHaveLength(1);
+      expect(model.copies[0].replacing).toBeUndefined();
+    });
+
+    it("COPY ... REPLACING X BY Y (single-token) populates c.replacing", () => {
+      const model = copyModel("           COPY CUSTID REPLACING CUST-ID BY ORDER-ID.");
+      expect(model.copies).toHaveLength(1);
+      expect(model.copies[0].replacing).toBeDefined();
+      expect(model.copies[0].replacing!.length).toBeGreaterThan(0);
+      // Single-token form tokenizes cleanly: ["CUST-ID", "BY", "ORDER-ID"]
+      expect(model.copies[0].replacing).toContain("CUST-ID");
+      expect(model.copies[0].replacing).toContain("ORDER-ID");
+    });
+
+    it("COPY ... REPLACING ==X== BY ==Y== (pseudo-text) produces non-empty array", () => {
+      // Pseudo-text form shatters because `=` lexes as a single-char
+      // operator. The resulting array is messy but length > 0, which is
+      // what consumers (field-lineage exact-program filter, graph reason
+      // marker, plugin metadata flag, db2-table-lineage rationale gate)
+      // need to detect REPLACING presence. Fully structured pseudo-text
+      // parsing is out of scope.
+      const model = copyModel("           COPY CUSTID REPLACING ==CUST-== BY ==ORDER-==.");
+      expect(model.copies).toHaveLength(1);
+      expect(model.copies[0].replacing).toBeDefined();
+      expect(model.copies[0].replacing!.length).toBeGreaterThan(0);
+    });
+
+    it("multiple REPLACING pairs in one COPY all surface in c.replacing", () => {
+      const model = copyModel(
+        "           COPY CUSTID REPLACING A BY X B BY Y."
+      );
+      expect(model.copies[0].replacing).toContain("A");
+      expect(model.copies[0].replacing).toContain("X");
+      expect(model.copies[0].replacing).toContain("B");
+      expect(model.copies[0].replacing).toContain("Y");
+    });
+
+    it("copybook names containing 'REPLACING' do not false-positive (#25 review fix)", () => {
+      // The lexer types `REPLACING-UTIL` as a single IDENTIFIER (hyphens
+      // are word chars), so a substring `indexOf("REPLACING")` would
+      // find the embedded match and falsely flag the COPY as using
+      // REPLACING. The split-on-whitespace + exact-element match avoids
+      // this — REPLACING-UTIL is one token, doesn't equal "REPLACING".
+      const model = copyModel("           COPY REPLACING-UTIL.");
+      expect(model.copies).toHaveLength(1);
+      expect(model.copies[0].copybook).toBe("REPLACING-UTIL");
+      expect(model.copies[0].replacing).toBeUndefined();
+    });
+
+    it("copybook name containing 'REPLACING' AND an actual REPLACING clause both work", () => {
+      // Belt-and-suspenders: the embedded REPLACING in the copybook
+      // name should be ignored; the actual REPLACING keyword should be
+      // detected. Asserts the split-based match locates the real
+      // keyword, not the embedded substring.
+      const model = copyModel(
+        "           COPY REPLACING-UTIL REPLACING X BY Y."
+      );
+      expect(model.copies[0].copybook).toBe("REPLACING-UTIL");
+      expect(model.copies[0].replacing).toContain("X");
+      expect(model.copies[0].replacing).toContain("Y");
+    });
+  });
+
   describe("CALL USING arg extraction", () => {
     it("returns empty usingArgs when CALL has no USING clause", () => {
       const src = `

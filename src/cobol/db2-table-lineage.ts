@@ -367,12 +367,15 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
           const dedupeKey = `${programId}|${name}`;
           if (!seenUnresolved.has(dedupeKey)) {
             seenUnresolved.add(dedupeKey);
-            // Only mention REPLACING when the program actually uses COPY at
-            // all — otherwise the note is misleading noise on programs that
-            // typo'd a pure-inline-WS field. We can't yet detect REPLACING
-            // specifically (parser doesn't surface it through `c.replacing`,
-            // see follow-up issue), so this is a conservative best-effort.
-            const replacingClause = program.copies.length > 0
+            // Mention REPLACING only when the program actually uses
+            // `COPY ... REPLACING` somewhere — the resolver doesn't apply
+            // the substitution, so a renamed field surfaces as unresolved
+            // and the user needs the breadcrumb. Now that the parser
+            // populates `c.replacing` correctly (#21), this gate is
+            // accurate per-program (was: heuristic on `copies.length > 0`).
+            const replacingClause = program.copies.some(
+              (c) => c.replacing && c.replacing.length > 0,
+            )
               ? ` \`COPY ... REPLACING\` renames are not yet applied during `
                 + `resolution and may also surface here.`
               : "";

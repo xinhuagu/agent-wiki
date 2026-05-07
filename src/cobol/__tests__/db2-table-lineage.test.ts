@@ -598,13 +598,50 @@ describe("buildDb2TableLineage", () => {
     expect(parsedBuf?.dataItem?.originCopybook).toBe("REDEF");
   });
 
-  it("rationale lists REPLACING as a possible cause when the program uses COPY", () => {
-    // The parser can't yet surface REPLACING per-copy (REPLACING/BY are
-    // typed tokens excluded from `stmt.operands` — see follow-up issue),
-    // so the resolver gates the REPLACING breadcrumb on the cheaper
-    // signal: does the program use COPY at all? If yes, the note appears
-    // alongside the typo / missing-copybook causes. If no, omitting it
-    // avoids misleading users on pure-inline-WS programs.
+  it("rationale lists REPLACING as a possible cause when the program uses COPY ... REPLACING (#21)", () => {
+    // Now that #21 fixed the parser's REPLACING detection (rawText-based
+    // instead of stmt.operands-based, which always missed because
+    // REPLACING/BY are typed keyword tokens), the gate is accurate
+    // per-program: ONLY programs that actually use REPLACING get the
+    // breadcrumb, not every program that uses any COPY.
+    const copybook = `
+       01  CUSTOMER-RECORD.
+           05  CUST-ID         PIC 9(8).
+`;
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY CUSTID REPLACING CUST-ID BY ORDER-ID.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO T (X) VALUES (:WS-MISSING) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(copybook, "CUSTID.cpy"),
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    const unresolved = lineage!.diagnostics.find(
+      (d) => d.kind === "host-var-unresolved" && d.hostVar === "WS-MISSING",
+    );
+    expect(unresolved?.rationale).toContain("REPLACING");
+  });
+
+  it("rationale OMITS REPLACING note when program uses COPY but NOT REPLACING (#21 accurate gate)", () => {
+    // Companion test: prior to #21, this case would have falsely
+    // surfaced the REPLACING breadcrumb because the gate was the loose
+    // heuristic `program.copies.length > 0`. Now the gate uses the
+    // accurate per-copy REPLACING flag, so a plain COPY (no REPLACING)
+    // doesn't trigger the note.
     const copybook = `
        01  CUSTOMER-RECORD.
            05  CUST-ID         PIC 9(8).
@@ -634,7 +671,10 @@ describe("buildDb2TableLineage", () => {
     const unresolved = lineage!.diagnostics.find(
       (d) => d.kind === "host-var-unresolved" && d.hostVar === "WS-MISSING",
     );
-    expect(unresolved?.rationale).toContain("REPLACING");
+    expect(unresolved?.rationale).not.toContain("REPLACING");
+    // Other breadcrumbs still present.
+    expect(unresolved?.rationale).toContain("typos");
+    expect(unresolved?.rationale).toContain("copybook");
   });
 
   it("rationale OMITS REPLACING note for pure-inline-WS programs (no COPY)", () => {

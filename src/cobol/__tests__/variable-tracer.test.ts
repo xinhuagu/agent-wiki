@@ -170,6 +170,120 @@ describe("COBOL extractDataflowEdges", () => {
     expect(literalToken?.value).toBe('"DAS IST EIN TEST"');
   });
 
+  it("collapses qualified references into one edge: MOVE A OF G1 TO B OF G2 (#20 phase C)", () => {
+    // Pre-fix: lexer emitted OF as a typed token but dataflow re-split
+    // rawText, treating OF as a "variable" token. With OF passing the
+    // identifier check, MOVE A OF GROUP-1 TO B OF GROUP-2 produced a
+    // 2x2 Cartesian (A→B, A→GROUP-2, GROUP-1→B, GROUP-1→GROUP-2) plus
+    // OF→OF self-edges. Phase C: OF/IN are keywords, and adjacent
+    // IDENT OF IDENT collapses to one qualified node matching
+    // traceVariable's existing format.
+    const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. QUAL-MV.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  GROUP-1.
+           05  A      PIC X(4).
+       01  GROUP-2.
+           05  B      PIC X(4).
+       PROCEDURE DIVISION.
+       A100.
+           MOVE A OF GROUP-1 TO B OF GROUP-2.
+           STOP RUN.
+`;
+    const ast = parse(source, "QUAL-MV.cbl");
+    const moveEdges = extractDataflowEdges(ast).filter((e) => e.via === "MOVE");
+    // Exactly one edge between the qualified names.
+    expect(moveEdges).toHaveLength(1);
+    expect(moveEdges[0].from).toBe("A OF GROUP-1");
+    expect(moveEdges[0].to).toBe("B OF GROUP-2");
+    // Critically, no separate edges from/to the parent group names.
+    const gParent = extractDataflowEdges(ast).filter(
+      (e) => e.from === "GROUP-1" || e.to === "GROUP-2" || e.from === "OF" || e.to === "OF",
+    );
+    expect(gParent).toHaveLength(0);
+  });
+
+  it("does not surface bare OF/IN as a dataflow variable (#20 phase C keywords)", () => {
+    // Spot check: even without qualifier collapse firing (e.g., a non-
+    // canonical OF in some bizarre fixture), OF / IN should not show up
+    // as edge endpoints because they're now in NON_VARIABLE_KEYWORDS.
+    const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. NO-OF.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  X    PIC X(4).
+       01  Y    PIC X(4).
+       PROCEDURE DIVISION.
+       A100.
+           MOVE X TO Y.
+           STOP RUN.
+`;
+    const ast = parse(source, "NO-OF.cbl");
+    const allEdges = extractDataflowEdges(ast);
+    expect(allEdges.some((e) => e.from === "OF" || e.to === "OF")).toBe(false);
+    expect(allEdges.some((e) => e.from === "IN" || e.to === "IN")).toBe(false);
+  });
+
+  it("STRING WITH POINTER classifies the pointer var as both read and written (#20 phase D)", () => {
+    // Phase D: WITH POINTER var is read-and-written each iteration. The
+    // POINTER marker switches access to "both" so the pointer var is
+    // classified r/w. WS-PTR should appear as a self-edge candidate
+    // (reads + writes), so non-self edges include WS-PTR on both sides.
+    const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. STR-PTR.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-SRC    PIC X(8).
+       01  WS-RES    PIC X(40).
+       01  WS-PTR    PIC 9(4) COMP.
+       PROCEDURE DIVISION.
+       A100.
+           STRING WS-SRC INTO WS-RES WITH POINTER WS-PTR.
+           STOP RUN.
+`;
+    const ast = parse(source, "STR-PTR.cbl");
+    const stringEdges = extractDataflowEdges(ast).filter((e) => e.via === "STRING");
+    // Pointer var participates as both read and write — appears in edges
+    // both as `from` and as `to`.
+    const ptrAsFrom = stringEdges.some((e) => e.from === "WS-PTR");
+    const ptrAsTo = stringEdges.some((e) => e.to === "WS-PTR");
+    expect(ptrAsFrom).toBe(true);
+    expect(ptrAsTo).toBe(true);
+    // POINTER itself is not an edge endpoint (it's now a marker keyword).
+    expect(stringEdges.some((e) => e.from === "POINTER" || e.to === "POINTER")).toBe(false);
+  });
+
+  it("STRING DELIMITED clause keywords are not treated as variables (#20 phase D)", () => {
+    // Phase C+D combined: STRING SRC DELIMITED BY DELIM INTO TARGET.
+    // The DELIMITED / BY / WITH / OVERFLOW clause keywords were
+    // previously surfaced as phantom variables. Now they're keyword-
+    // filtered (Phase C) and also act as access-mode markers (Phase D).
+    const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. STR-DEL.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-SRC      PIC X(8).
+       01  WS-DELIM    PIC X(1).
+       01  WS-RES      PIC X(40).
+       PROCEDURE DIVISION.
+       A100.
+           STRING WS-SRC DELIMITED BY WS-DELIM INTO WS-RES.
+           STOP RUN.
+`;
+    const ast = parse(source, "STR-DEL.cbl");
+    const stringEdges = extractDataflowEdges(ast).filter((e) => e.via === "STRING");
+    // No edges with clause keywords as endpoints.
+    const phantomKeywords = ["DELIMITED", "BY", "WITH", "POINTER", "OVERFLOW"];
+    for (const kw of phantomKeywords) {
+      expect(stringEdges.some((e) => e.from === kw || e.to === kw)).toBe(false);
+    }
+  });
+
   it("typed-token path matches existing numeric-prefix filtering for NUMERIC tokens", () => {
     // Numeric literals (`12345`) were already filtered pre-Phase-B by
     // `isDataflowVariable`'s `^[0-9]` check, so this case isn't a new

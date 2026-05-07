@@ -78,6 +78,16 @@ export interface StatementNode {
   verb: string;
   operands: string[];
   rawText: string;
+  /**
+   * The verb plus every consumed token in order, with their lexer-assigned
+   * types. Lets downstream consumers (dataflow extraction, qualifier
+   * resolution) iterate typed tokens instead of re-splitting `rawText` on
+   * whitespace — which historically shattered multi-word string literals
+   * into phantom pseudo-identifiers (#20 phase B). For literals (`LITERAL`
+   * type), the token's `value` is the verbatim source string including
+   * spaces; consumers should treat the entire token as opaque.
+   */
+  tokens: Token[];
   loc: SourceLocation;
 }
 

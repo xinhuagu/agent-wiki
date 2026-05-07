@@ -236,12 +236,19 @@ function edgesFromStatement(
   const rule = VERB_RULES[verb];
   if (!rule) return [];
 
-  const tokens = stmt.rawText.split(/\s+/).map((t) => t.toUpperCase());
+  // Phase B: iterate typed tokens instead of re-splitting rawText. Whole
+  // LITERAL tokens are dropped — pre-fix, the lexer correctly produced
+  // one LITERAL for `"DAS IST EIN TEST"` but the parser joined it back
+  // into rawText with spaces, which dataflow then re-split into
+  // ["DAS", "IST", "EIN", "TEST"], creating phantom pseudo-variables.
+  // Numeric tokens are also dropped — they're never dataflow variables.
   let currentAccess: AccessMode = rule.defaultBefore;
   const reads: string[] = [];
   const writes: string[] = [];
 
-  for (const tok of tokens) {
+  for (const t of stmt.tokens) {
+    if (t.type === "LITERAL" || t.type === "NUMERIC") continue;
+    const tok = t.value.toUpperCase();
     if (rule.markers[tok] !== undefined) {
       currentAccess = rule.markers[tok];
       continue;

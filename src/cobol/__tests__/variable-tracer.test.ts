@@ -127,6 +127,72 @@ describe("COBOL extractDataflowEdges", () => {
     expect(addEdge).toBeDefined();
     expect(addEdge!.line).toBeGreaterThan(0);
   });
+
+  it("does not shatter multi-word literals into pseudo-variables (#20 phase B)", () => {
+    // Pre-fix: lexer emitted `"DAS IST EIN TEST"` as one LITERAL token,
+    // parser joined into rawText with spaces, dataflow re-split on
+    // whitespace producing phantom `IST` / `EIN` / `TEST` reads. Phase B
+    // iterates typed tokens and skips whole LITERALs.
+    const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. STR-LIT.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-MSG    PIC X(40).
+       PROCEDURE DIVISION.
+       A100.
+           MOVE "DAS IST EIN TEST" TO WS-MSG.
+           STOP RUN.
+`;
+    const ast = parse(source, "STR-LIT.cbl");
+    const literalEdges = extractDataflowEdges(ast);
+    // No edges sourced from any literal-internal word.
+    const phantoms = literalEdges.filter(
+      (e) => e.from === "DAS" || e.from === "IST" || e.from === "EIN" || e.from === "TEST",
+    );
+    expect(phantoms).toHaveLength(0);
+    // The MOVE-from-literal is correctly classified as no-edge (target
+    // gets no incoming dataflow because the source is a literal).
+    expect(literalEdges.filter((e) => e.to === "WS-MSG")).toHaveLength(0);
+
+    // Verify the underlying contract: the parser preserves the literal's
+    // internal whitespace as a single token's value. This is the
+    // representation invariant `StatementNode.tokens` JSDoc claims; if a
+    // future lexer change strips internal spaces, this fails before the
+    // higher-level "no phantoms" assertion masks the regression.
+    const moveStmt = ast.divisions
+      .flatMap((d) => d.sections)
+      .flatMap((s) => s.paragraphs)
+      .flatMap((p) => p.statements)
+      .find((s) => s.verb === "MOVE");
+    expect(moveStmt).toBeDefined();
+    const literalToken = moveStmt!.tokens.find((t) => t.type === "LITERAL");
+    expect(literalToken?.value).toBe('"DAS IST EIN TEST"');
+  });
+
+  it("typed-token path matches existing numeric-prefix filtering for NUMERIC tokens", () => {
+    // Numeric literals (`12345`) were already filtered pre-Phase-B by
+    // `isDataflowVariable`'s `^[0-9]` check, so this case isn't a new
+    // win — but the typed-token migration introduces a second filter
+    // path (`t.type === "NUMERIC"` short-circuit). This test locks the
+    // two paths agree, so a future cleanup that removes `^[0-9]` (now
+    // redundant with type checking) doesn't regress numeric handling.
+    const source = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. NUM-LIT.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-COUNT  PIC 9(4).
+       PROCEDURE DIVISION.
+       A100.
+           MOVE 12345 TO WS-COUNT.
+           STOP RUN.
+`;
+    const ast = parse(source, "NUM-LIT.cbl");
+    const numericEdges = extractDataflowEdges(ast);
+    const fromNumber = numericEdges.filter((e) => /^[0-9]/.test(e.from));
+    expect(fromNumber).toHaveLength(0);
+  });
 });
 
 describe("COBOL extractDataflowEdges — EXEC SQL host variables", () => {

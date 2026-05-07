@@ -60,11 +60,13 @@ export interface HostVarDataItemRef {
   picture?: string;
   usage?: string;
   /**
-   * Logical name of the copybook the field came from, exactly as written
-   * in the program's `COPY <name>` directive (preserves whatever case
-   * convention the source uses). Absent when the field was declared
-   * inline in WORKING-STORAGE or LINKAGE — i.e., absence ≠ unresolved,
-   * absence = "this field doesn't trace back to a copybook".
+   * Canonical (uppercased) name of the copybook the field came from, as
+   * recorded by the parser from the program's `COPY <name>` directive.
+   * The lexer canonicalizes all identifiers to upper case at tokenize
+   * time, so this string is always the upper form regardless of the
+   * source's case convention. Absent when the field was declared inline
+   * in WORKING-STORAGE or LINKAGE — i.e., absence ≠ unresolved, absence
+   * = "this field doesn't trace back to a copybook".
    */
   originCopybook?: string;
 }
@@ -176,9 +178,11 @@ interface ResolvedHostVar {
  *      COPY, so copybook fields aren't in `program.dataItems` even though
  *      they're visible to SQL)
  *
- * Returns the matching data item plus, when found via #3, the logical
- * copybook name as written in the `COPY` directive — preserves the case
- * convention the source uses (`COPY CustId` → `"CustId"`, not `"CUSTID"`).
+ * Inline (#1) takes precedence over a copybook field of the same name —
+ * the program's own declaration shadows what's COPY'd in. Returns the
+ * matching data item plus, when found via #3, the canonical (uppercased)
+ * copybook name as the lexer captured it. COPY REPLACING-aware lookup is
+ * not yet implemented: a renamed field still surfaces as unresolved.
  */
 function resolveHostVar(
   program: CobolCodeModel,
@@ -305,8 +309,10 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
   // Index parsed copybooks by their canonical name so host-var resolution
   // can fall back from the program's own data tree to the copybooks it
   // includes via COPY. One canonical name can map to multiple parsed
-  // copybook files in pathological cases (same logical name in two
-  // directories) — keep all of them; the resolver picks the first match.
+  // copybook files (same logical name from two directories) — keep all,
+  // sorted by sourceFile so the resolver's "first match wins" picks the
+  // same one regardless of input order. Without sorting, `originCopybook`
+  // would flip across machines depending on filesystem listing order.
   const copybooksByLogicalName = new Map<string, CobolCodeModel[]>();
   for (const model of models) {
     if (!isCopybook(model.sourceFile)) continue;
@@ -314,6 +320,9 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
     const list = copybooksByLogicalName.get(key) ?? [];
     list.push(model);
     copybooksByLogicalName.set(key, list);
+  }
+  for (const list of copybooksByLogicalName.values()) {
+    list.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));
   }
 
   const tableState = new Map<string, TableSides>();
@@ -366,7 +375,8 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
                 + `nor in any copybook the program COPYs. The lineage table will `
                 + `show the name with a \`(?)\` flag; check for typos or for a `
                 + `copybook that's referenced via COPY but not present in the `
-                + `parsed corpus.`,
+                + `parsed corpus. \`COPY ... REPLACING\` renames are not yet `
+                + `applied during resolution and may also surface here.`,
             });
           }
         }

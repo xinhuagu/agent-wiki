@@ -505,4 +505,110 @@ describe("buildDb2TableLineage", () => {
     expect(unresolved).toHaveLength(1);
     expect(unresolved[0].rationale).toContain("copybook");
   });
+
+  it("inline WS field shadows a copybook field of the same name", () => {
+    // Three-tier precedence (WS → LINKAGE → copybook) must keep WS first.
+    // If a program declares WS-NAME inline AND copies a copybook that also
+    // has WS-NAME, the inline declaration wins — and originCopybook is
+    // absent because the resolver never reached the copybook tier.
+    const copybook = `
+       01  COPYBOOK-WS-NAME       PIC X(99).
+       01  WS-NAME                PIC X(99).
+`;
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-NAME            PIC X(30).
+           COPY OVERLAP.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO T (X) VALUES (:WS-NAME) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-ID FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(copybook, "OVERLAP.cpy"),
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    const wsName = lineage!.entries[0].writer.hostVars.find((hv) => hv.name === "WS-NAME");
+    // Inline X(30) wins over copybook's X(99) — and origin is absent.
+    expect(wsName?.dataItem?.picture).toBe("X(30)");
+    expect(wsName?.dataItem?.originCopybook).toBeUndefined();
+  });
+
+  it("resolves REDEFINES siblings inside a copybook", () => {
+    // REDEFINES in a copybook — both the original and the redefining alias
+    // must resolve as distinct items via depth-first walk through children.
+    const copybook = `
+       01  RECORD-AREA.
+           05  RAW-BUF         PIC X(8).
+           05  PARSED-BUF REDEFINES RAW-BUF.
+               10  PARSED-PART PIC X(4).
+               10  PARSED-TAG  PIC X(4).
+`;
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY REDEF.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO T (RAW, TAG)
+             VALUES (:RAW-BUF, :PARSED-TAG) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT RAW INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(copybook, "REDEF.cpy"),
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    const writerEntry = lineage!.entries.find((e) => e.writer.programId === "program:WRITER");
+    const rawBuf = writerEntry?.writer.hostVars.find((hv) => hv.name === "RAW-BUF");
+    const parsedTag = writerEntry?.writer.hostVars.find((hv) => hv.name === "PARSED-TAG");
+    expect(rawBuf?.dataItem?.picture).toBe("X(8)");
+    expect(parsedTag?.dataItem?.picture).toBe("X(4)");
+    expect(rawBuf?.dataItem?.originCopybook).toBe("REDEF");
+    expect(parsedTag?.dataItem?.originCopybook).toBe("REDEF");
+  });
+
+  it("unresolved-host-var rationale lists REPLACING as a possible cause", () => {
+    // The rationale is static (not conditional on detecting REPLACING) —
+    // the parser doesn't currently populate `copy.replacing` reliably
+    // (REPLACING/BY are typed tokens excluded from `stmt.operands`), so
+    // we can't detect actual REPLACING usage per-program. The text
+    // unconditionally lists REPLACING as a candidate cause so the user
+    // gets the breadcrumb regardless. When the parser is fixed, the
+    // rationale can become conditional.
+    const writer = programWith("WRITER", [[
+      "EXEC SQL INSERT INTO T (X) VALUES (:WS-MISSING) END-EXEC",
+    ]]);
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    const unresolved = lineage!.diagnostics.find(
+      (d) => d.kind === "host-var-unresolved" && d.hostVar === "WS-MISSING",
+    );
+    expect(unresolved?.rationale).toContain("REPLACING");
+  });
 });

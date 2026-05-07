@@ -50,11 +50,17 @@ describe("buildDb2TableLineage", () => {
     expect(entry.table).toBe("CUSTOMERS");
     expect(entry.writer.programId).toBe("program:WRITER");
     expect(entry.writer.operations).toEqual(["INSERT"]);
-    expect(entry.writer.hostVars).toContain("WS-NAME");
+    expect(entry.writer.hostVars.map((hv) => hv.name)).toContain("WS-NAME");
     expect(entry.reader.programId).toBe("program:READER");
     expect(entry.reader.operations).toEqual(["SELECT"]);
-    expect(entry.reader.hostVars).toContain("WS-NAME");
-    expect(entry.reader.hostVars).toContain("WS-ID");
+    expect(entry.reader.hostVars.map((hv) => hv.name)).toContain("WS-NAME");
+    expect(entry.reader.hostVars.map((hv) => hv.name)).toContain("WS-ID");
+    // Phase A: each resolved host var carries a DataItem ref with shape info.
+    const wsName = entry.writer.hostVars.find((hv) => hv.name === "WS-NAME");
+    expect(wsName?.dataItem?.picture).toBe("X(30)");
+    expect(wsName?.dataItem?.level).toBe(1);
+    const wsId = entry.reader.hostVars.find((hv) => hv.name === "WS-ID");
+    expect(wsId?.dataItem?.picture).toBe("9(8)");
   });
 
   it("emits one entry per (writer × reader) pair when multiple writers feed one reader", () => {
@@ -241,5 +247,98 @@ describe("buildDb2TableLineage", () => {
       "  VALUES (:WS-ID) END-EXEC",
     ]]);
     expect(buildDb2TableLineage([model(writer, "WRITER.cbl")])).toBeNull();
+  });
+
+  it("emits host-var-unresolved diagnostic when SQL references a name not in the data tree", () => {
+    // The fixture only declares WS-NAME and WS-ID; :WS-MISSING is bogus.
+    const writer = programWith("WRITER", [[
+      "EXEC SQL INSERT INTO ORDERS (ID, NAME)",
+      "  VALUES (:WS-ID, :WS-MISSING) END-EXEC",
+    ]]);
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT NAME INTO :WS-NAME FROM ORDERS END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const unresolved = lineage!.diagnostics.filter((d) => d.kind === "host-var-unresolved");
+    expect(unresolved).toHaveLength(1);
+    expect(unresolved[0].programId).toBe("program:WRITER");
+    expect(unresolved[0].hostVar).toBe("WS-MISSING");
+    expect(unresolved[0].rationale).toContain("WS-MISSING");
+    expect(lineage!.summary.diagnosticsByKind["host-var-unresolved"]).toBe(1);
+    // The unresolved name still appears on the participant (without dataItem)
+    // so the wiki can render it with a `(?)` flag rather than dropping it.
+    const writerEntry = lineage!.entries.find((e) => e.writer.programId === "program:WRITER");
+    const missing = writerEntry?.writer.hostVars.find((hv) => hv.name === "WS-MISSING");
+    expect(missing).toBeDefined();
+    expect(missing?.dataItem).toBeUndefined();
+  });
+
+  it("dedupes host-var-unresolved diagnostics — same name across multiple SQL blocks fires once", () => {
+    const writer = programWith("WRITER", [
+      [
+        "EXEC SQL INSERT INTO T (X) VALUES (:WS-MISSING) END-EXEC",
+      ],
+      [
+        "EXEC SQL UPDATE T SET X = :WS-MISSING WHERE ID = :WS-ID END-EXEC",
+      ],
+    ]);
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const unresolved = lineage!.diagnostics.filter(
+      (d) => d.kind === "host-var-unresolved" && d.hostVar === "WS-MISSING",
+    );
+    expect(unresolved).toHaveLength(1);
+  });
+
+  it("resolves nested host vars (declared as a child of a group record)", () => {
+    // Override the standard fixture with a program that declares the SQL host
+    // var as a 05-level child of a group record — this is the typical layout
+    // when the field lives in a copybook-defined record like CUSTOMER-RECORD.
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  CUSTOMER-RECORD.
+           05  CUST-ID         PIC 9(8).
+           05  CUST-NAME       PIC X(30).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (ID, NAME)
+             VALUES (:CUST-ID, :CUST-NAME) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT ID INTO :WS-ID FROM CUSTOMERS END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const writerEntry = lineage!.entries.find((e) => e.writer.programId === "program:WRITER");
+    const custId = writerEntry?.writer.hostVars.find((hv) => hv.name === "CUST-ID");
+    expect(custId?.dataItem?.level).toBe(5);
+    expect(custId?.dataItem?.picture).toBe("9(8)");
+    // No unresolved diagnostic for the nested fields.
+    const unresolved = lineage!.diagnostics.filter((d) => d.kind === "host-var-unresolved");
+    expect(unresolved).toHaveLength(0);
   });
 });

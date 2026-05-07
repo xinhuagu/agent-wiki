@@ -766,63 +766,192 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
     lines.push("");
   }
 
-  if (callBound && callBound.entries.length > 0) {
+  if (callBound && (callBound.entries.length > 0 || callBound.diagnostics.length > 0)) {
     lines.push("## Call Boundary Field Lineage");
     lines.push("");
     lines.push(`Cross-program field flow at static \`CALL ... USING\` sites. Top-level entries link a caller's USING argument to the callee's matching LINKAGE record by position; child entries descend into matching group children. Confidence is \`deterministic\` when names align (after stripping a short prefix like \`WS-\`/\`LK-\`) and \`high\` when only structure aligns.`);
     lines.push("");
-    lines.push(`Coverage: ${callBound.summary.callSites} call site(s), ${callBound.entries.length} field pair(s).`);
+    // `callSites` only counts CALLs that resolved to a callee in the corpus
+    // and matched arity. Sites blocked at those gates appear in the Excluded
+    // subsection below — wording reflects this so a "0 call sites" display
+    // doesn't mislead when the source actually has CALLs that all failed.
+    const totalDiag = callBound.diagnostics.length;
+    const coverage = totalDiag > 0
+      ? `Coverage: ${callBound.summary.callSites} resolved call site(s), ${callBound.entries.length} field pair(s); ${totalDiag} excluded — see below.`
+      : `Coverage: ${callBound.summary.callSites} call site(s), ${callBound.entries.length} field pair(s).`;
+    lines.push(coverage);
     lines.push("");
-    const grouped = groupCallBoundByPair(callBound.entries);
-    for (const group of grouped) {
-      const detCount = group.entries.filter((e) => e.confidence === "deterministic").length;
-      const highCount = group.entries.filter((e) => e.confidence === "high").length;
-      lines.push(`### ${displayLabel(group.callerProgramId)} → ${displayLabel(group.calleeProgramId)}`);
-      lines.push("");
-      const summary = highCount > 0
-        ? `${group.entries.length} pair(s): ${detCount} deterministic, ${highCount} high-confidence (name divergence — review below).`
-        : `${group.entries.length} pair(s), all deterministic.`;
-      lines.push(`*${summary}*`);
-      lines.push("");
-      lines.push("| Pos | Caller | Callee | Confidence | Evidence |");
-      lines.push("|-----|--------|--------|------------|----------|");
-      for (const entry of group.entries) {
-        const evidence = [
-          entry.evidence.shapeMatch,
-          entry.evidence.nameSuffixMatch ? "name-aligned" : null,
-          entry.evidence.levelMatch ? "same-level" : null,
-        ].filter((value): value is string => Boolean(value)).join(", ");
-        lines.push(
-          `| ${entry.position} | ${entry.caller.qualifiedName} | ${entry.callee.qualifiedName} | ${entry.confidence} | ${evidence} |`
-        );
+    if (callBound.entries.length > 0) {
+      const grouped = groupCallBoundByPair(callBound.entries);
+      for (const group of grouped) {
+        const detCount = group.entries.filter((e) => e.confidence === "deterministic").length;
+        const highCount = group.entries.filter((e) => e.confidence === "high").length;
+        lines.push(`### ${displayLabel(group.callerProgramId)} → ${displayLabel(group.calleeProgramId)}`);
+        lines.push("");
+        const summary = highCount > 0
+          ? `${group.entries.length} pair(s): ${detCount} deterministic, ${highCount} high-confidence (name divergence — review below).`
+          : `${group.entries.length} pair(s), all deterministic.`;
+        lines.push(`*${summary}*`);
+        lines.push("");
+        lines.push("| Pos | Caller | Callee | Confidence | Evidence |");
+        lines.push("|-----|--------|--------|------------|----------|");
+        for (const entry of group.entries) {
+          const evidence = [
+            entry.evidence.shapeMatch,
+            entry.evidence.nameSuffixMatch ? "name-aligned" : null,
+            entry.evidence.levelMatch ? "same-level" : null,
+          ].filter((value): value is string => Boolean(value)).join(", ");
+          lines.push(
+            `| ${entry.position} | ${entry.caller.qualifiedName} | ${entry.callee.qualifiedName} | ${entry.confidence} | ${evidence} |`
+          );
+        }
+        lines.push("");
       }
-      lines.push("");
+    }
+    if (callBound.diagnostics.length > 0) {
+      renderCallBoundExclusions(lines, callBound.diagnostics);
     }
   }
 
-  if (db2 && db2.entries.length > 0) {
+  if (db2 && (db2.entries.length > 0 || db2.diagnostics.length > 0)) {
     lines.push("## DB2 Table Lineage");
     lines.push("");
     lines.push(`Cross-program field flow inferred from shared DB2 tables. A pair appears when one program writes to a table (\`INSERT\` / \`UPDATE\` / \`DELETE\` / \`MERGE\`) and another reads from it (\`SELECT\` / \`FETCH\`). Host variables on each side are listed; mapping them to specific columns requires a SQL parser and is out of scope here.`);
     lines.push("");
-    lines.push(`Coverage: ${db2.summary.sharedTables} shared table(s), ${db2.entries.length} writer→reader pair(s).`);
+    const totalDb2Diag = db2.diagnostics.length;
+    const db2Coverage = totalDb2Diag > 0
+      ? `Coverage: ${db2.summary.sharedTables} shared table(s), ${db2.entries.length} writer→reader pair(s); ${totalDb2Diag} excluded — see below.`
+      : `Coverage: ${db2.summary.sharedTables} shared table(s), ${db2.entries.length} writer→reader pair(s).`;
+    lines.push(db2Coverage);
     lines.push("");
-    lines.push("| Table | Writer | Writer Ops | Writer Host Vars | Reader | Reader Ops | Reader Host Vars |");
-    lines.push("|-------|--------|------------|------------------|--------|------------|------------------|");
-    for (const entry of db2.entries) {
-      const writerVars = entry.writer.hostVars.length > 0 ? entry.writer.hostVars.join(", ") : "—";
-      const readerVars = entry.reader.hostVars.length > 0 ? entry.reader.hostVars.join(", ") : "—";
-      lines.push(
-        `| ${entry.table} | ${displayLabel(entry.writer.programId)} | ${entry.writer.operations.join(", ")} | ${writerVars} | ${displayLabel(entry.reader.programId)} | ${entry.reader.operations.join(", ")} | ${readerVars} |`
-      );
+    if (db2.entries.length > 0) {
+      lines.push("| Table | Writer | Writer Ops | Writer Host Vars | Reader | Reader Ops | Reader Host Vars |");
+      lines.push("|-------|--------|------------|------------------|--------|------------|------------------|");
+      for (const entry of db2.entries) {
+        const writerVars = entry.writer.hostVars.length > 0 ? entry.writer.hostVars.join(", ") : "—";
+        const readerVars = entry.reader.hostVars.length > 0 ? entry.reader.hostVars.join(", ") : "—";
+        lines.push(
+          `| ${entry.table} | ${displayLabel(entry.writer.programId)} | ${entry.writer.operations.join(", ")} | ${writerVars} | ${displayLabel(entry.reader.programId)} | ${entry.reader.operations.join(", ")} | ${readerVars} |`
+        );
+      }
+      lines.push("");
     }
-    lines.push("");
+    if (db2.diagnostics.length > 0) {
+      renderDb2Exclusions(lines, db2.diagnostics);
+    }
   }
 
   return {
     path: "cobol/field-lineage.md",
     content: lines.join("\n"),
   };
+}
+
+// Fixed kind order for the rendered diagnostic table — orders rows by
+// severity / "earliness in pipeline" so the user reads roughly upstream-to-
+// downstream. Pinned here so the wiki page is byte-stable across rebuilds
+// regardless of which diagnostic fired first in the parsed corpus.
+//
+// Typed against the union so removing a valid kind from the type fails
+// typecheck. The renderer additionally falls back to rendering any kinds
+// not listed here at the end of the table, so a future contributor adding
+// a new kind doesn't silently drop its data — they'll see it appended,
+// notice the missing pinned position, and update this array.
+const CALL_BOUND_KIND_ORDER: readonly CallBoundLineage["diagnostics"][number]["kind"][] = [
+  "unresolved-callee",
+  "dynamic-call",
+  "arity-mismatch",
+  "shape-mismatch",
+  "caller-arg-not-top-level",
+];
+
+const DB2_KIND_ORDER: readonly Db2Lineage["diagnostics"][number]["kind"][] = [
+  "non-classifiable-op",
+  "writer-only",
+  "reader-only",
+  "self-loop",
+];
+
+/**
+ * Render an "Excluded by diagnostic" subsection under a lineage family.
+ * Counts per kind plus one sample so the user can see what's being skipped
+ * without scrolling through hundreds of identical entries.
+ */
+function renderCallBoundExclusions(
+  lines: string[],
+  diagnostics: NonNullable<CallBoundLineage["diagnostics"]>,
+): void {
+  const byKind = new Map<string, { count: number; sample: typeof diagnostics[number] }>();
+  for (const d of diagnostics) {
+    const existing = byKind.get(d.kind);
+    if (!existing) byKind.set(d.kind, { count: 1, sample: d });
+    else existing.count++;
+  }
+  lines.push("### Excluded by diagnostic");
+  lines.push("");
+  lines.push(`${diagnostics.length} call site(s) or arg pair(s) excluded from the table above. Sample row per kind:`);
+  lines.push("");
+  lines.push("| Kind | Count | Sample |");
+  lines.push("|------|-------|--------|");
+  for (const kind of CALL_BOUND_KIND_ORDER) {
+    const bucket = byKind.get(kind);
+    if (!bucket) continue;
+    const { count, sample } = bucket;
+    const sampleText = `\`${sample.target}\` in ${displayLabel(sample.callerProgramId)} (line ${sample.callSite.line})`;
+    lines.push(`| ${kind} | ${count} | ${sampleText} |`);
+  }
+  // Fallback: any kinds not in the pinned order render at the end (in
+  // insertion order). Prevents silent data loss when a new kind is added
+  // to the type union without updating CALL_BOUND_KIND_ORDER.
+  const known = new Set<string>(CALL_BOUND_KIND_ORDER);
+  for (const [kind, { count, sample }] of byKind) {
+    if (known.has(kind)) continue;
+    const sampleText = `\`${sample.target}\` in ${displayLabel(sample.callerProgramId)} (line ${sample.callSite.line})`;
+    lines.push(`| ${kind} | ${count} | ${sampleText} |`);
+  }
+  lines.push("");
+}
+
+function renderDb2Exclusions(
+  lines: string[],
+  diagnostics: NonNullable<Db2Lineage["diagnostics"]>,
+): void {
+  const byKind = new Map<string, { count: number; sample: typeof diagnostics[number] }>();
+  for (const d of diagnostics) {
+    const existing = byKind.get(d.kind);
+    if (!existing) byKind.set(d.kind, { count: 1, sample: d });
+    else existing.count++;
+  }
+  lines.push("### Excluded by diagnostic");
+  lines.push("");
+  lines.push(`${diagnostics.length} reference(s) or table(s) excluded from the table above. Sample row per kind:`);
+  lines.push("");
+  lines.push("| Kind | Count | Sample |");
+  lines.push("|------|-------|--------|");
+  const renderRow = (
+    kind: string,
+    count: number,
+    sample: { programId?: string; table?: string; operation?: string },
+  ): void => {
+    const parts: string[] = [];
+    if (sample.programId) parts.push(displayLabel(sample.programId));
+    if (sample.table) parts.push(`table \`${sample.table}\``);
+    if (sample.operation) parts.push(`op \`${sample.operation}\``);
+    const sampleText = parts.length > 0 ? parts.join(", ") : "—";
+    lines.push(`| ${kind} | ${count} | ${sampleText} |`);
+  };
+  for (const kind of DB2_KIND_ORDER) {
+    const bucket = byKind.get(kind);
+    if (!bucket) continue;
+    renderRow(kind, bucket.count, bucket.sample);
+  }
+  // Fallback for kinds not in DB2_KIND_ORDER — see CALL renderer for rationale.
+  const known = new Set<string>(DB2_KIND_ORDER);
+  for (const [kind, { count, sample }] of byKind) {
+    if (known.has(kind)) continue;
+    renderRow(kind, count, sample);
+  }
+  lines.push("");
 }
 
 interface CallBoundGroup {

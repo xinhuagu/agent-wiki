@@ -136,7 +136,7 @@ describe("buildCallBoundLineage", () => {
     ]);
   });
 
-  it("does not emit entries when USING arity differs from LINKAGE arity", () => {
+  it("emits arity-mismatch diagnostic when USING arity differs from LINKAGE arity", () => {
     const caller = `
        IDENTIFICATION DIVISION.
        PROGRAM-ID. CALLER.
@@ -166,10 +166,14 @@ describe("buildCallBoundLineage", () => {
       model(callee, "CALLEE.cbl"),
     ]);
 
-    expect(lineage).toBeNull();
+    expect(lineage).not.toBeNull();
+    expect(lineage!.entries).toHaveLength(0);
+    expect(lineage!.diagnostics).toHaveLength(1);
+    expect(lineage!.diagnostics[0]!.kind).toBe("arity-mismatch");
+    expect(lineage!.diagnostics[0]!.target).toBe("CALLEE");
   });
 
-  it("does not emit entries when scalar PICs differ", () => {
+  it("emits shape-mismatch diagnostic when scalar PICs differ", () => {
     const caller = `
        IDENTIFICATION DIVISION.
        PROGRAM-ID. CALLER.
@@ -198,10 +202,12 @@ describe("buildCallBoundLineage", () => {
       model(callee, "CALLEE.cbl"),
     ]);
 
-    expect(lineage).toBeNull();
+    expect(lineage).not.toBeNull();
+    expect(lineage!.entries).toHaveLength(0);
+    expect(lineage!.diagnostics.map((d) => d.kind)).toEqual(["shape-mismatch"]);
   });
 
-  it("does not emit entries when one side is a group and the other is a scalar", () => {
+  it("emits shape-mismatch diagnostic when one side is a group and the other is a scalar", () => {
     const caller = `
        IDENTIFICATION DIVISION.
        PROGRAM-ID. CALLER.
@@ -231,7 +237,9 @@ describe("buildCallBoundLineage", () => {
       model(callee, "CALLEE.cbl"),
     ]);
 
-    expect(lineage).toBeNull();
+    expect(lineage).not.toBeNull();
+    expect(lineage!.entries).toHaveLength(0);
+    expect(lineage!.diagnostics.map((d) => d.kind)).toEqual(["shape-mismatch"]);
   });
 
   it("does not emit entries when callee is unresolved (no parsed program with that name)", () => {
@@ -242,7 +250,7 @@ describe("buildCallBoundLineage", () => {
     expect(lineage).toBeNull();
   });
 
-  it("does not emit entries for dynamic CALL where target is a variable", () => {
+  it("emits dynamic-call diagnostic when CALL target is a variable identifier", () => {
     const caller = `
        IDENTIFICATION DIVISION.
        PROGRAM-ID. CALLER.
@@ -262,10 +270,93 @@ describe("buildCallBoundLineage", () => {
       model(calleeWithLinkageGroup, "CALLEE.cbl"),
     ]);
 
-    expect(lineage).toBeNull();
+    expect(lineage).not.toBeNull();
+    expect(lineage!.entries).toHaveLength(0);
+    expect(lineage!.diagnostics.map((d) => d.kind)).toEqual(["dynamic-call"]);
+    expect(lineage!.diagnostics[0]!.target).toBe("WS-PROG-NAME");
   });
 
-  it("does not emit entries when caller's USING arg is not a top-level data item", () => {
+  it("attaches a weak/inferred envelope to high-confidence entries (name divergence)", () => {
+    // Top-level group pair matches deterministically; descended children
+    // have divergent names → child entries are confidence: "high" → envelope
+    // should be weak/inferred.
+    const callerSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-REC.
+           05  WS-FOO         PIC X(5).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "CALLEE" USING WS-REC.
+           STOP RUN.
+`;
+    const calleeSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-REC.
+           05  LK-COMPLETELY-OTHER-NAME PIC X(5).
+       PROCEDURE DIVISION USING LK-REC.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+    const lineage = buildCallBoundLineage([
+      model(callerSrc, "CALLER.cbl"),
+      model(calleeSrc, "CALLEE.cbl"),
+    ]);
+    expect(lineage).not.toBeNull();
+    const child = lineage!.entries.find((e) => e.confidence === "high");
+    expect(child).toBeDefined();
+    expect(child!.envelope.confidence).toBe("weak");
+    expect(child!.envelope.basis).toBe("inferred");
+    expect(child!.envelope.abstain).toBe(false);
+  });
+
+  it("attaches an EvidenceEnvelope to each entry derived from confidence tier", () => {
+    const callerSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-A               PIC X(5).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "CALLEE" USING WS-A.
+           STOP RUN.
+`;
+    const calleeSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-A               PIC X(5).
+       PROCEDURE DIVISION USING LK-A.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+    const lineage = buildCallBoundLineage([
+      model(callerSrc, "CALLER.cbl"),
+      model(calleeSrc, "CALLEE.cbl"),
+    ]);
+    expect(lineage).not.toBeNull();
+    const entry = lineage!.entries[0]!;
+    expect(entry.envelope.confidence).toBe("strong");
+    expect(entry.envelope.basis).toBe("deterministic");
+    expect(entry.envelope.abstain).toBe(false);
+    expect(entry.envelope.provenance).toEqual([
+      { raw: "CALLER.cbl", line: expect.any(Number) },
+      { raw: "CALLEE.cbl" },
+    ]);
+  });
+
+  it("emits caller-arg-not-top-level diagnostic when USING arg is nested", () => {
     const caller = `
        IDENTIFICATION DIVISION.
        PROGRAM-ID. CALLER.
@@ -295,7 +386,9 @@ describe("buildCallBoundLineage", () => {
       model(callee, "CALLEE.cbl"),
     ]);
 
-    expect(lineage).toBeNull();
+    expect(lineage).not.toBeNull();
+    expect(lineage!.entries).toHaveLength(0);
+    expect(lineage!.diagnostics.map((d) => d.kind)).toEqual(["caller-arg-not-top-level"]);
   });
 
   it("does not emit entries when CALL has no USING clause", () => {

@@ -154,11 +154,29 @@ describe("COBOL extractDataflowEdges", () => {
     // The MOVE-from-literal is correctly classified as no-edge (target
     // gets no incoming dataflow because the source is a literal).
     expect(literalEdges.filter((e) => e.to === "WS-MSG")).toHaveLength(0);
+
+    // Verify the underlying contract: the parser preserves the literal's
+    // internal whitespace as a single token's value. This is the
+    // representation invariant `StatementNode.tokens` JSDoc claims; if a
+    // future lexer change strips internal spaces, this fails before the
+    // higher-level "no phantoms" assertion masks the regression.
+    const moveStmt = ast.divisions
+      .flatMap((d) => d.sections)
+      .flatMap((s) => s.paragraphs)
+      .flatMap((p) => p.statements)
+      .find((s) => s.verb === "MOVE");
+    expect(moveStmt).toBeDefined();
+    const literalToken = moveStmt!.tokens.find((t) => t.type === "LITERAL");
+    expect(literalToken?.value).toBe('"DAS IST EIN TEST"');
   });
 
-  it("does not produce phantom edges from numeric literals", () => {
-    // Companion case: numerics also tokenize as LITERAL/NUMERIC and were
-    // previously re-split. Ensure they don't surface as variables either.
+  it("typed-token path matches existing numeric-prefix filtering for NUMERIC tokens", () => {
+    // Numeric literals (`12345`) were already filtered pre-Phase-B by
+    // `isDataflowVariable`'s `^[0-9]` check, so this case isn't a new
+    // win — but the typed-token migration introduces a second filter
+    // path (`t.type === "NUMERIC"` short-circuit). This test locks the
+    // two paths agree, so a future cleanup that removes `^[0-9]` (now
+    // redundant with type checking) doesn't regress numeric handling.
     const source = `
        IDENTIFICATION DIVISION.
        PROGRAM-ID. NUM-LIT.

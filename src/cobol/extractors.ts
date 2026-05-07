@@ -359,18 +359,32 @@ function extractStatementRelations(
   }
 
   if (verb === "COPY") {
-    // COPY copybook-name [REPLACING ...]
+    // COPY copybook-name [REPLACING <pair>+]
     const copybook = stmt.operands[0];
     if (copybook) {
+      // #21 fix: extract REPLACING pairs from rawText, NOT stmt.operands.
+      // The parser's parseStatement only pushes IDENTIFIER/LITERAL/NUMERIC
+      // tokens to operands; REPLACING and BY have their own typed token
+      // types (KEYWORD_MAP), so they never appear in operands. The old
+      // code's `stmt.operands.indexOf("REPLACING")` always returned -1,
+      // leaving `c.replacing` undefined for every program with COPY
+      // REPLACING — silently disabling the field-lineage exact-program
+      // filter, the graph reason marker, and plugin metadata.
+      //
+      // Best-effort tokenization: take everything after REPLACING in
+      // rawText and split on whitespace. Single-token form
+      // (`REPLACING X BY Y`) tokenizes cleanly; pseudo-text form
+      // (`REPLACING ==X== BY ==Y==`) shatters because `=` lexes as a
+      // single-char operator, but the resulting array is non-empty so
+      // consumers checking `length > 0` get the correct boolean signal.
+      // Fully structured pseudo-text parsing is out of scope.
       const replacing: string[] = [];
       const raw = stmt.rawText.toUpperCase();
-      if (raw.includes("REPLACING")) {
-        // Collect replacement pairs from operands after REPLACING
-        const replIdx = stmt.operands.indexOf("REPLACING");
-        if (replIdx >= 0) {
-          for (let i = replIdx + 1; i < stmt.operands.length; i++) {
-            replacing.push(stmt.operands[i]);
-          }
+      const replIdx = raw.indexOf("REPLACING");
+      if (replIdx >= 0) {
+        const after = raw.substring(replIdx + "REPLACING".length).trim();
+        if (after) {
+          replacing.push(...after.split(/\s+/));
         }
       }
       model.copies.push({

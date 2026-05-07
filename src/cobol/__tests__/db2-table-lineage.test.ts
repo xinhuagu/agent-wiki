@@ -408,4 +408,101 @@ describe("buildDb2TableLineage", () => {
     const unresolved = lineage!.diagnostics.filter((d) => d.kind === "host-var-unresolved");
     expect(unresolved).toHaveLength(0);
   });
+
+  it("resolves host vars defined in a COPY'd copybook and tags originCopybook", () => {
+    // Phase B: parser does NOT inline-expand COPY, so copybook fields
+    // aren't in program.dataItems. Without copybook fallback, every
+    // SQL host var sourced from a copybook would emit a spurious
+    // host-var-unresolved.
+    const copybook = `
+       01  CUSTOMER-RECORD.
+           05  CUST-ID         PIC 9(8).
+           05  CUST-NAME       PIC X(30).
+`;
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY CUSTID.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (ID, NAME)
+             VALUES (:CUST-ID, :CUST-NAME) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT ID INTO :WS-ID FROM CUSTOMERS END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(copybook, "CUSTID.cpy"),
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const writerEntry = lineage!.entries.find((e) => e.writer.programId === "program:WRITER");
+    const custId = writerEntry?.writer.hostVars.find((hv) => hv.name === "CUST-ID");
+    expect(custId?.dataItem?.picture).toBe("9(8)");
+    expect(custId?.dataItem?.originCopybook).toBe("CUSTID");
+    const custName = writerEntry?.writer.hostVars.find((hv) => hv.name === "CUST-NAME");
+    expect(custName?.dataItem?.originCopybook).toBe("CUSTID");
+    // No unresolved diagnostic — copybook search picked them up.
+    const unresolved = lineage!.diagnostics.filter((d) => d.kind === "host-var-unresolved");
+    expect(unresolved).toHaveLength(0);
+  });
+
+  it("inline WS fields don't carry originCopybook — absence ≠ unresolved", () => {
+    const writer = programWith("WRITER", [[
+      "EXEC SQL INSERT INTO T (X) VALUES (:WS-NAME) END-EXEC",
+    ]]);
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    const wsName = lineage!.entries[0].writer.hostVars.find((hv) => hv.name === "WS-NAME");
+    expect(wsName?.dataItem).toBeDefined();        // resolved …
+    expect(wsName?.dataItem?.originCopybook).toBeUndefined();  // … but inline, not from a copybook
+  });
+
+  it("emits host-var-unresolved when COPY references a copybook NOT in the parsed corpus", () => {
+    // Program copies CUSTID but no CUSTID.cpy is passed — the resolver
+    // can't follow the breadcrumb. Should still emit the diagnostic, with
+    // the rationale pointing at the missing-copybook case.
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY CUSTID.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO T (X) VALUES (:CUST-ID) END-EXEC.
+           STOP RUN.
+`;
+    const reader = programWith("READER", [[
+      "EXEC SQL SELECT X INTO :WS-NAME FROM T END-EXEC",
+    ]]);
+
+    const lineage = buildDb2TableLineage([
+      // CUSTID.cpy intentionally NOT included
+      model(writer, "WRITER.cbl"),
+      model(reader, "READER.cbl"),
+    ]);
+
+    expect(lineage).not.toBeNull();
+    const unresolved = lineage!.diagnostics.filter(
+      (d) => d.kind === "host-var-unresolved" && d.hostVar === "CUST-ID",
+    );
+    expect(unresolved).toHaveLength(1);
+    expect(unresolved[0].rationale).toContain("copybook");
+  });
 });

@@ -2156,11 +2156,19 @@ export async function handleTool(
 
       try {
         const week = summarizeLastWeek(wiki.config.workspace);
-        if (week.unsupportedCount > 0) {
+        if (week.totalWrites > 0 || week.unsupportedTransitions > 0) {
+          const ratioStr =
+            week.wouldRejectRatio === null
+              ? ""
+              : ` — ${(week.wouldRejectRatio * 100).toFixed(1)}% blocked-or-would-block under Phase 2b`;
           wiki.log(
             "evidence",
             "log.md",
-            `Last 7 days: ${week.unsupportedCount} unsupported wiki_write(s) (no sources, no synthesis flag).`,
+            `Last 7 days: ${week.unsupportedWrites} unsupported `
+              + `+ ${week.rejectedWrites} rejected `
+              + `/ ${week.totalWrites} wiki_write(s) `
+              + `(${week.unsupportedTransitions} new unsupported pages)`
+              + `${ratioStr}.`,
           );
         }
       } catch { /* ignore */ }

@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appendUnsupportedWriteEvent,
+  appendWriteEvent,
+  counterLogPath,
+  readWriteCounter,
   readWriteLog,
   rotateEventLog,
   summarizeLastWeek,
@@ -110,9 +113,13 @@ describe("rotateEventLog", () => {
     expect(remaining).not.toContain("old.md");
   });
 
-  it("returns zero counts when no log file exists", () => {
+  it("returns zero counts when no log files exist", () => {
     const result = rotateEventLog(workspace);
-    expect(result).toEqual({ entriesBefore: 0, entriesAfter: 0, bytesAfter: 0 });
+    expect(result.entriesBefore).toBe(0);
+    expect(result.entriesAfter).toBe(0);
+    expect(result.bytesAfter).toBe(0);
+    expect(result.unsupported).toEqual({ entriesBefore: 0, entriesAfter: 0, bytesAfter: 0 });
+    expect(result.counter).toEqual({ entriesBefore: 0, entriesAfter: 0, bytesAfter: 0 });
   });
 
   it("drops oldest entries when total exceeds size cap", () => {
@@ -146,7 +153,7 @@ describe("rotateEventLog", () => {
 });
 
 describe("summarizeLastWeek", () => {
-  it("counts only events within the past 7 days", () => {
+  it("counts unsupported transitions only within the past 7 days", () => {
     const now = new Date("2026-05-06T00:00:00.000Z");
     appendUnsupportedWriteEvent(workspace, {
       page: "in.md", timestamp: "2026-05-04T00:00:00.000Z",
@@ -156,10 +163,148 @@ describe("summarizeLastWeek", () => {
       page: "out.md", timestamp: "2026-04-20T00:00:00.000Z",
       hadSynthesisFlag: false, rawSourcesCount: 0,
     });
-    expect(summarizeLastWeek(workspace, now).unsupportedCount).toBe(1);
+    expect(summarizeLastWeek(workspace, now).unsupportedTransitions).toBe(1);
   });
 
-  it("returns zero when no log file exists", () => {
-    expect(summarizeLastWeek(workspace).unsupportedCount).toBe(0);
+  it("returns zero counts and null ratio when no log files exist", () => {
+    expect(summarizeLastWeek(workspace)).toEqual({
+      unsupportedTransitions: 0,
+      unsupportedWrites: 0,
+      rejectedWrites: 0,
+      totalWrites: 0,
+      wouldRejectRatio: null,
+    });
+  });
+
+  it("computes ratio as (unsupported + rejected) / total (mode-invariant)", () => {
+    const now = new Date("2026-05-06T00:00:00.000Z");
+    // Counter: 5 total — 2 grounded, 1 synthesis, 1 unsupported, 1 rejected.
+    // Numerator (would-reject) = unsupported + rejected = 2.
+    appendWriteEvent(workspace, "grounded",    "2026-05-04T00:00:00.000Z");
+    appendWriteEvent(workspace, "grounded",    "2026-05-04T00:01:00.000Z");
+    appendWriteEvent(workspace, "synthesis",   "2026-05-05T00:00:00.000Z");
+    appendWriteEvent(workspace, "unsupported", "2026-05-04T00:00:00.000Z");
+    appendWriteEvent(workspace, "rejected",    "2026-05-05T01:00:00.000Z");
+    const result = summarizeLastWeek(workspace, now);
+    expect(result.unsupportedWrites).toBe(1);
+    expect(result.rejectedWrites).toBe(1);
+    expect(result.totalWrites).toBe(5);
+    expect(result.wouldRejectRatio).toBeCloseTo(0.4);
+  });
+
+  it("ratio stays meaningful in reject mode (rejectedWrites carries the signal)", () => {
+    const now = new Date("2026-05-06T00:00:00.000Z");
+    // Phase 2b enabled — wiki.write never produces kind="unsupported";
+    // the equivalent writes show up as kind="rejected" instead.
+    appendWriteEvent(workspace, "grounded",  "2026-05-04T00:00:00.000Z");
+    appendWriteEvent(workspace, "rejected",  "2026-05-04T01:00:00.000Z");
+    appendWriteEvent(workspace, "rejected",  "2026-05-04T02:00:00.000Z");
+    const result = summarizeLastWeek(workspace, now);
+    expect(result.unsupportedWrites).toBe(0);
+    expect(result.rejectedWrites).toBe(2);
+    expect(result.totalWrites).toBe(3);
+    // 2/3 ≈ 0.667 — the ratio still reflects "fraction of writes 2b blocks",
+    // even though all unsupported attempts went through the rejected path.
+    expect(result.wouldRejectRatio).toBeCloseTo(2 / 3);
+  });
+
+  it("reports transitions and unsupportedWrites independently when re-edits inflate the latter", () => {
+    const now = new Date("2026-05-06T00:00:00.000Z");
+    // 1 transition (page first becomes unsupported), 3 unsupported writes
+    // (the transition + 2 re-edits while still unsupported), plus 1 grounded
+    // — 4 total writes, 3 of which would be rejected by 2b.
+    appendUnsupportedWriteEvent(workspace, {
+      page: "p.md", timestamp: "2026-05-04T00:00:00.000Z",
+      hadSynthesisFlag: false, rawSourcesCount: 0,
+    });
+    appendWriteEvent(workspace, "unsupported", "2026-05-04T00:00:00.000Z");
+    appendWriteEvent(workspace, "unsupported", "2026-05-04T01:00:00.000Z");
+    appendWriteEvent(workspace, "unsupported", "2026-05-04T02:00:00.000Z");
+    appendWriteEvent(workspace, "grounded",    "2026-05-05T00:00:00.000Z");
+    const result = summarizeLastWeek(workspace, now);
+    expect(result.unsupportedTransitions).toBe(1);
+    expect(result.unsupportedWrites).toBe(3);
+    expect(result.totalWrites).toBe(4);
+    expect(result.wouldRejectRatio).toBeCloseTo(0.75);
+  });
+
+  it("excludes counter events outside the 7-day window from the denominator", () => {
+    const now = new Date("2026-05-06T00:00:00.000Z");
+    appendWriteEvent(workspace, "grounded", "2026-05-04T00:00:00.000Z"); // in
+    appendWriteEvent(workspace, "grounded", "2026-04-20T00:00:00.000Z"); // out of 7d (still in 30d)
+    const result = summarizeLastWeek(workspace, now);
+    expect(result.totalWrites).toBe(1);
+    expect(result.wouldRejectRatio).toBe(0);
+  });
+
+  it("excludes rejected entries from unsupportedTransitions (Phase 2b log noise)", () => {
+    const now = new Date("2026-05-06T00:00:00.000Z");
+    // The unsupported log carries TWO event shapes: warn-mode transitions
+    // (no `rejected` flag) and reject-mode attempts (`rejected: true`,
+    // emitted once per retry). Only the former count as transitions —
+    // otherwise a retry loop in reject mode would balloon the count.
+    appendUnsupportedWriteEvent(workspace, {
+      page: "real-transition.md", timestamp: "2026-05-04T00:00:00.000Z",
+      hadSynthesisFlag: false, rawSourcesCount: 0,
+    });
+    appendUnsupportedWriteEvent(workspace, {
+      page: "blocked.md", timestamp: "2026-05-04T01:00:00.000Z",
+      hadSynthesisFlag: false, rawSourcesCount: 0,
+      rejected: true, rejectReason: "fresh",
+    });
+    appendUnsupportedWriteEvent(workspace, {
+      page: "blocked.md", timestamp: "2026-05-04T01:01:00.000Z",
+      hadSynthesisFlag: false, rawSourcesCount: 0,
+      rejected: true, rejectReason: "fresh",
+    });
+    const result = summarizeLastWeek(workspace, now);
+    expect(result.unsupportedTransitions).toBe(1);
+  });
+});
+
+describe("appendWriteEvent / readWriteCounter", () => {
+  it("appends classified writes to the counter file", () => {
+    appendWriteEvent(workspace, "grounded", "2026-05-06T10:00:00.000Z");
+    appendWriteEvent(workspace, "synthesis", "2026-05-06T10:01:00.000Z");
+    appendWriteEvent(workspace, "unsupported", "2026-05-06T10:02:00.000Z");
+    appendWriteEvent(workspace, "rejected", "2026-05-06T10:03:00.000Z");
+    appendWriteEvent(workspace, "legacy", "2026-05-06T10:04:00.000Z");
+    const events = readWriteCounter(workspace, new Date("2026-05-07T00:00:00.000Z"));
+    expect(events.map((e) => e.kind)).toEqual([
+      "grounded", "synthesis", "unsupported", "rejected", "legacy",
+    ]);
+  });
+
+  it("filters counter entries older than 30 days on read", () => {
+    appendWriteEvent(workspace, "grounded", "2026-01-01T00:00:00.000Z");
+    appendWriteEvent(workspace, "grounded", "2026-05-05T00:00:00.000Z");
+    const events = readWriteCounter(workspace, new Date("2026-05-06T00:00:00.000Z"));
+    expect(events).toHaveLength(1);
+  });
+
+  it("does not throw when the counter directory is unwritable", () => {
+    const nonexistent = join(workspace, "blocked", "path");
+    writeFileSync(join(workspace, "blocked"), "not a dir");
+    expect(() =>
+      appendWriteEvent(nonexistent, "grounded", "2026-05-06T10:00:00.000Z"),
+    ).not.toThrow();
+  });
+});
+
+describe("rotateEventLog (counter file)", () => {
+  it("rotates the counter file alongside the unsupported log", () => {
+    appendWriteEvent(workspace, "grounded", "2025-01-01T00:00:00.000Z"); // old
+    appendWriteEvent(workspace, "grounded", "2026-05-05T00:00:00.000Z"); // new
+    appendUnsupportedWriteEvent(workspace, {
+      page: "u.md", timestamp: "2026-05-05T00:00:00.000Z",
+      hadSynthesisFlag: false, rawSourcesCount: 0,
+    });
+    const result = rotateEventLog(workspace, new Date("2026-05-06T00:00:00.000Z"));
+    expect(result.counter.entriesBefore).toBe(2);
+    expect(result.counter.entriesAfter).toBe(1);
+    expect(result.unsupported.entriesAfter).toBe(1);
+    const remaining = readFileSync(counterLogPath(workspace), "utf-8");
+    expect(remaining).not.toContain("2025-01-01");
+    expect(remaining).toContain("2026-05-05");
   });
 });

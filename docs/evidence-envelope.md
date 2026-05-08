@@ -127,7 +127,26 @@ interface UnsupportedWriteEvent {
 
 **Storage**: append-only JSONL at `.agent-wiki/evidence-write-log.jsonl` (already-ignored `.agent-wiki/` namespace). Rotation policy: cap at 10 MB / 30 days, whichever first; `wiki_admin lint` truncates.
 
-**Aggregation**: Phase 4 dashboard reads this log. Until 4 ships, `wiki_admin rebuild` emits a one-line summary into `wiki/log.md` ("last week: 12 unsupported writes, 3 synthesis-flagged, 0 grounded").
+The unsupported log only captures the **numerator** — distinct unsupported transitions and rejected attempts. To put that count in context, a sibling **per-write counter** at `.agent-wiki/evidence-write-counter.jsonl` records every classified write attempt:
+
+```ts
+interface WriteEvent {
+  timestamp: string;            // ISO 8601
+  kind: "grounded" | "synthesis" | "unsupported" | "rejected" | "legacy";
+}
+```
+
+Same rotation policy. The counter ticks on every classified `wiki_write` (system pages and bypassed writes excluded), regardless of whether the unsupported log dedupes the event. This keeps the "denominator" honest: `(unsupportedWrites + rejectedWrites) / totalWrites` reflects how often unsupported attempts occur versus total write volume — see `wouldRejectRatio` below.
+
+**Aggregation**: Phase 4 dashboard reads both logs. Until 4 ships, `wiki_admin rebuild` emits a one-line summary into `wiki/log.md` ("last 7 days: 12 unsupported + 0 rejected / 47 wiki_write(s) (5 new unsupported pages) — 25.5% blocked-or-would-block under Phase 2b"). Three numerators are surfaced because they answer different questions:
+
+- **`unsupportedWrites`** — every write that ended up unsupported in warn mode, including re-edits.
+- **`rejectedWrites`** — every write blocked under Phase 2b reject mode.
+- **`unsupportedTransitions`** — distinct *new* unsupported pages introduced (deduped on transition; lower bound, useful for authoring-intent vs. churn).
+
+The headline ratio is `(unsupportedWrites + rejectedWrites) / totalWrites` — **mode-invariant**: in warn mode, `rejectedWrites` is 0 and the ratio is what 2b would block; in reject mode, `unsupportedWrites` is 0 (those writes go through the reject path instead) and the ratio is what 2b is currently blocking. Either way the same number drives threshold decisions.
+
+The ratio is omitted when the counter file is empty (early deployments would otherwise read as 0%).
 
 Without this hook in Phase 2a, Phase 2b is guesswork. Including it now means the data is collected from day one.
 

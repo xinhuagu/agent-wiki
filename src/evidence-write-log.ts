@@ -70,6 +70,7 @@ const ROTATION_MAX_AGE_DAYS = 30;
 /** Path conventions, relative to a workspace root. */
 const EVIDENCE_DIR = ".agent-wiki";
 const WRITE_LOG_FILE = "evidence-write-log.jsonl";
+const COUNTER_LOG_FILE = "evidence-write-counter.jsonl";
 const MIGRATION_MARKER_FILE = "evidence-migrated";
 
 export function evidenceDir(workspace: string): string {
@@ -78,8 +79,34 @@ export function evidenceDir(workspace: string): string {
 export function writeLogPath(workspace: string): string {
   return join(workspace, EVIDENCE_DIR, WRITE_LOG_FILE);
 }
+export function counterLogPath(workspace: string): string {
+  return join(workspace, EVIDENCE_DIR, COUNTER_LOG_FILE);
+}
 export function migrationMarkerPath(workspace: string): string {
   return join(workspace, EVIDENCE_DIR, MIGRATION_MARKER_FILE);
+}
+
+/**
+ * Classification kinds for the per-write counter. Mirrors the branches in
+ * `wiki.ts` evidence classification — every classified write emits exactly
+ * one event, regardless of whether it transitions in/out of unsupported.
+ *
+ * - `grounded`   — page has non-empty `sources: [...]`
+ * - `synthesis`  — page has `synthesis: true` or `type: synthesis`
+ * - `unsupported`— page has neither, soft-warn mode (Phase 2a)
+ * - `rejected`   — page has neither, hard-reject mode (Phase 2b)
+ * - `legacy`     — page is tagged `legacyUnsupported`, soft-warn (skipped in unsupported log)
+ */
+export type WriteEventKind =
+  | "grounded"
+  | "synthesis"
+  | "unsupported"
+  | "rejected"
+  | "legacy";
+
+export interface WriteEvent {
+  timestamp: string;
+  kind: WriteEventKind;
 }
 
 /** Append a single unsupported-write event. Best-effort — never throws. */
@@ -97,6 +124,26 @@ export function appendUnsupportedWriteEvent(
 }
 
 /**
+ * Append a per-write counter event — fired on every evidence-classified
+ * write so the dashboard can compute (unsupported / total) ratios. Unlike
+ * `appendUnsupportedWriteEvent` (which dedupes on the unsupported transition),
+ * this fires on every classified write attempt. Best-effort — never throws.
+ */
+export function appendWriteEvent(
+  workspace: string,
+  kind: WriteEventKind,
+  timestamp: string,
+): void {
+  try {
+    const path = counterLogPath(workspace);
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, JSON.stringify({ timestamp, kind }) + "\n");
+  } catch {
+    // Telemetry must never break the write itself.
+  }
+}
+
+/**
  * Read the log and return entries within the rotation window. Entries
  * outside the time window are silently dropped from the returned list
  * (they're cleaned out of the file by `rotateEventLog`). Best-effort —
@@ -106,17 +153,34 @@ export function readWriteLog(
   workspace: string,
   now: Date = new Date(),
 ): UnsupportedWriteEvent[] {
-  const path = writeLogPath(workspace);
+  return readJsonlInWindow<UnsupportedWriteEvent>(writeLogPath(workspace), now);
+}
+
+/**
+ * Read the per-write counter log within the 30-day rotation window. Same
+ * filtering rules as `readWriteLog`.
+ */
+export function readWriteCounter(
+  workspace: string,
+  now: Date = new Date(),
+): WriteEvent[] {
+  return readJsonlInWindow<WriteEvent>(counterLogPath(workspace), now);
+}
+
+function readJsonlInWindow<T extends { timestamp?: string }>(
+  path: string,
+  now: Date,
+): T[] {
   if (!existsSync(path)) return [];
   try {
     const cutoffMs = now.getTime() - ROTATION_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
     const lines = readFileSync(path, "utf-8").split("\n");
-    const events: UnsupportedWriteEvent[] = [];
+    const events: T[] = [];
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       try {
-        const entry = JSON.parse(trimmed) as UnsupportedWriteEvent;
+        const entry = JSON.parse(trimmed) as T;
         if (!entry.timestamp) continue;
         const t = new Date(entry.timestamp).getTime();
         if (Number.isFinite(t) && t >= cutoffMs) events.push(entry);
@@ -131,15 +195,39 @@ export function readWriteLog(
 }
 
 /**
- * Truncate the log file in-place to rotation policy: drop entries older
- * than 30 days, then if the result still exceeds 10 MB drop oldest
- * entries until it fits. Called from `wiki_admin lint`.
+ * Truncate both evidence log files (the unsupported-only log and the
+ * per-write counter) to rotation policy: drop entries older than 30 days,
+ * then if the result still exceeds 10 MB drop oldest entries until it
+ * fits. Called from `wiki_admin lint`.
+ *
+ * Returns combined counts across both files for the legacy single-file
+ * shape; per-file detail is available via `counter` / `unsupported`.
  */
 export function rotateEventLog(
   workspace: string,
   now: Date = new Date(),
+): {
+  entriesBefore: number;
+  entriesAfter: number;
+  bytesAfter: number;
+  unsupported: { entriesBefore: number; entriesAfter: number; bytesAfter: number };
+  counter: { entriesBefore: number; entriesAfter: number; bytesAfter: number };
+} {
+  const unsupported = rotateJsonlFile(writeLogPath(workspace), now);
+  const counter = rotateJsonlFile(counterLogPath(workspace), now);
+  return {
+    entriesBefore: unsupported.entriesBefore + counter.entriesBefore,
+    entriesAfter: unsupported.entriesAfter + counter.entriesAfter,
+    bytesAfter: unsupported.bytesAfter + counter.bytesAfter,
+    unsupported,
+    counter,
+  };
+}
+
+function rotateJsonlFile(
+  path: string,
+  now: Date,
 ): { entriesBefore: number; entriesAfter: number; bytesAfter: number } {
-  const path = writeLogPath(workspace);
   if (!existsSync(path)) {
     return { entriesBefore: 0, entriesAfter: 0, bytesAfter: 0 };
   }
@@ -152,7 +240,7 @@ export function rotateEventLog(
   const kept: { line: string; ts: number }[] = [];
   for (const line of lines) {
     try {
-      const entry = JSON.parse(line) as UnsupportedWriteEvent;
+      const entry = JSON.parse(line) as { timestamp?: string };
       const t = entry.timestamp ? new Date(entry.timestamp).getTime() : NaN;
       if (Number.isFinite(t) && t >= cutoffMs) {
         kept.push({ line, ts: t });
@@ -183,17 +271,65 @@ export function rotateEventLog(
  * Count writes in the last 7 days, broken down for a one-line summary
  * the rebuild step appends to wiki/log.md. Phase 4 will replace this
  * with a richer dashboard.
+ *
+ * Returned numerators answer different questions:
+ *
+ * - `unsupportedTransitions` — distinct pages that *became* unsupported
+ *   (from `evidence-write-log.jsonl`, deduped on transition). Answers:
+ *   "how many new unsupported pages did agents introduce?"
+ *
+ * - `unsupportedWrites` — every write that ended up unsupported in
+ *   warn mode, including re-edits (counter `kind: "unsupported"`).
+ *
+ * - `rejectedWrites` — every write blocked under Phase 2b reject mode
+ *   (counter `kind: "rejected"`).
+ *
+ * `wouldRejectRatio` = `(unsupportedWrites + rejectedWrites) / totalWrites`.
+ * Mode-invariant: in warn mode, `rejectedWrites = 0` and the ratio
+ * reflects what 2b would block; in reject mode, `unsupportedWrites = 0`
+ * and the ratio reflects what 2b is currently blocking. `null` when
+ * `totalWrites === 0` to avoid a misleading 0% on early deployments.
  */
 export function summarizeLastWeek(
   workspace: string,
   now: Date = new Date(),
-): { unsupportedCount: number } {
+): {
+  unsupportedTransitions: number;
+  unsupportedWrites: number;
+  rejectedWrites: number;
+  totalWrites: number;
+  wouldRejectRatio: number | null;
+} {
   const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
   const cutoff = now.getTime() - sevenDaysMs;
-  const events = readWriteLog(workspace, now);
-  const recent = events.filter((e) => {
-    const t = new Date(e.timestamp).getTime();
+  const within = (ts: string) => {
+    const t = new Date(ts).getTime();
     return Number.isFinite(t) && t >= cutoff;
-  });
-  return { unsupportedCount: recent.length };
+  };
+  // Exclude `rejected: true` entries: the unsupported log carries BOTH
+  // warn-mode transitions (deduped) AND reject-mode attempts (one per
+  // blocked retry). Only the former are real "new unsupported pages".
+  const unsupportedTransitions = readWriteLog(workspace, now)
+    .filter((e) => within(e.timestamp) && !e.rejected)
+    .length;
+  const recentCounter = readWriteCounter(workspace, now)
+    .filter((e) => within(e.timestamp));
+  const totalWrites = recentCounter.length;
+  const unsupportedWrites = recentCounter.filter(
+    (e) => e.kind === "unsupported",
+  ).length;
+  const rejectedWrites = recentCounter.filter(
+    (e) => e.kind === "rejected",
+  ).length;
+  const wouldRejectRatio =
+    totalWrites === 0
+      ? null
+      : (unsupportedWrites + rejectedWrites) / totalWrites;
+  return {
+    unsupportedTransitions,
+    unsupportedWrites,
+    rejectedWrites,
+    totalWrites,
+    wouldRejectRatio,
+  };
 }

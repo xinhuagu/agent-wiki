@@ -1292,6 +1292,84 @@ This is a test.
       }
     });
   });
+
+  describe("evidence-first phase 2a — per-write counter (denominator)", () => {
+    // The counter file (.agent-wiki/evidence-write-counter.jsonl) ticks on
+    // every classified write — its kind enum mirrors the five branches in
+    // wiki.ts so the dashboard can compute (unsupported / total) ratios
+    // and split blocked vs stamped events. This block exercises each branch
+    // end-to-end through wiki.write() to lock in that the call sites stay
+    // wired as the classification logic evolves.
+    it("ticks 'grounded' on writes with non-empty sources", async () => {
+      const { readWriteCounter } = await import("./evidence-write-log.js");
+      const wiki = freshWiki();
+      wiki.write("g.md", "---\ntitle: G\nsources: [raw/x.md]\n---\nGrounded.");
+      const events = readWriteCounter(wiki.config.workspace);
+      expect(events.map((e) => e.kind)).toEqual(["grounded"]);
+    });
+
+    it("ticks 'synthesis' on writes with synthesis: true or type: synthesis", async () => {
+      const { readWriteCounter } = await import("./evidence-write-log.js");
+      const wiki = freshWiki();
+      wiki.write("s1.md", "---\ntitle: S1\nsynthesis: true\n---\nAggregated.");
+      wiki.write("s2.md", "---\ntitle: S2\ntype: synthesis\n---\nAggregated.");
+      const events = readWriteCounter(wiki.config.workspace);
+      expect(events.map((e) => e.kind)).toEqual(["synthesis", "synthesis"]);
+    });
+
+    it("ticks 'unsupported' on every write that ends up unsupported (NOT deduped)", async () => {
+      const { readWriteCounter, readWriteLog } = await import("./evidence-write-log.js");
+      const wiki = freshWiki();
+      wiki.write("u.md", "---\ntitle: U\n---\nFirst.");
+      wiki.write("u.md", "---\ntitle: U\n---\nSecond.");
+      wiki.write("u.md", "---\ntitle: U\n---\nThird.");
+      // Counter ticks every attempt — three events. This is the denominator
+      // semantic that makes the ratio apples-to-apples with totalWrites.
+      expect(
+        readWriteCounter(wiki.config.workspace)
+          .filter((e) => e.kind === "unsupported")
+      ).toHaveLength(3);
+      // Unsupported log dedupes on transition — only the first write fires.
+      expect(
+        readWriteLog(wiki.config.workspace).filter((e) => e.page === "u.md")
+      ).toHaveLength(1);
+    });
+
+    it("ticks 'rejected' on hard-reject mode blocks", async () => {
+      const { readWriteCounter } = await import("./evidence-write-log.js");
+      const wiki = freshWiki();
+      wiki.config.evidence.rejectUnsupportedWrites = true;
+      try {
+        wiki.write("blocked.md", "---\ntitle: B\n---\nNothing.");
+      } catch { /* expected */ }
+      const events = readWriteCounter(wiki.config.workspace);
+      expect(events.map((e) => e.kind)).toEqual(["rejected"]);
+    });
+
+    it("ticks 'legacy' on warn-mode re-edits of legacyUnsupported pages", async () => {
+      const { readWriteCounter } = await import("./evidence-write-log.js");
+      const wiki = freshWiki();
+      // Migration-style seed: counter records this as 'legacy' (the seed
+      // itself flows through the legacy soft-warn branch since the page
+      // arrives with the flag set in submitted content).
+      wiki.write("seed.md", "---\ntitle: S\nlegacyUnsupported: true\n---\nOld.");
+      // Re-edit without the flag in content — on-disk flag preserved,
+      // counter ticks again.
+      wiki.write("seed.md", "---\ntitle: S\n---\nRevised.");
+      const events = readWriteCounter(wiki.config.workspace);
+      expect(events.map((e) => e.kind)).toEqual(["legacy", "legacy"]);
+    });
+
+    it("does not tick the counter on system pages (index/log/timeline)", async () => {
+      const { readWriteCounter } = await import("./evidence-write-log.js");
+      const wiki = freshWiki();
+      wiki.rebuildIndex();
+      // Rebuild may write index.md / timeline.md internally — none of those
+      // should reach the counter, since system pages bypass classification.
+      const events = readWriteCounter(wiki.config.workspace);
+      expect(events).toEqual([]);
+    });
+  });
 });
 
 describe("wiki.delete", () => {

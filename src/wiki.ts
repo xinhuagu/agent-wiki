@@ -30,7 +30,7 @@ import yaml from "js-yaml";
 import { VERSION } from "./version.js";
 import { SearchEngine, type SearchResult, type SearchConfig, DEFAULT_SEARCH_CONFIG } from "./search.js";
 import { extractText, extractDocument, guessMime } from "./extraction.js";
-import { appendUnsupportedWriteEvent } from "./evidence-write-log.js";
+import { appendUnsupportedWriteEvent, appendWriteEvent } from "./evidence-write-log.js";
 import type { AtlassianConfig, ConfluenceImportResult, JiraImportResult } from "./atlassian.js";
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -1520,6 +1520,7 @@ _Chronological view of all knowledge in this wiki._
             rejected: true,
             rejectReason: isLegacy ? "legacy" : "fresh",
           });
+          appendWriteEvent(this.config.workspace, "rejected", now);
           if (isLegacy) {
             throw new Error(
               `wiki_write rejected: \`${pagePath}\` is tagged \`legacyUnsupported\` `
@@ -1537,16 +1538,16 @@ _Chronological view of all knowledge in this wiki._
           );
         } else if (isLegacy) {
           // Phase 2a warn mode: preserve the legacy marker, never stamp
-          // `unsupported`, stay silent on telemetry. Re-asserting the flag
-          // handles the case where the submitter dropped it from their
-          // content but it was set on disk.
+          // `unsupported`, stay silent on the unsupported telemetry. The
+          // counter still ticks so legacy edits show up in the denominator.
           parsed.data.legacyUnsupported = true;
           if (parsed.data.unsupported === true) delete parsed.data.unsupported;
+          appendWriteEvent(this.config.workspace, "legacy", now);
         } else {
           parsed.data.unsupported = true;
-          // Dedupe: only fire telemetry on the transition into unsupported,
-          // not on subsequent edits of an already-unsupported page. Phase 2b
-          // wants distinct assertions, not write counts.
+          // Dedupe: only fire unsupported telemetry on the transition into
+          // unsupported, not on subsequent edits of an already-unsupported
+          // page. Phase 2b wants distinct assertions, not write counts.
           if (!existingHadUnsupported) {
             appendUnsupportedWriteEvent(this.config.workspace, {
               page: pagePath,
@@ -1556,11 +1557,19 @@ _Chronological view of all knowledge in this wiki._
               rawSourcesCount: 0,
             });
           }
+          // Counter ticks on every unsupported write attempt (no dedupe) so
+          // the denominator matches the actual write rate.
+          appendWriteEvent(this.config.workspace, "unsupported", now);
         }
       } else {
         // Page is grounded or synthesis — clear any prior unsupported markers.
         if (parsed.data.unsupported === true) delete parsed.data.unsupported;
         if (parsed.data.legacyUnsupported === true) delete parsed.data.legacyUnsupported;
+        appendWriteEvent(
+          this.config.workspace,
+          synthesisFlag ? "synthesis" : "grounded",
+          now,
+        );
       }
     }
 

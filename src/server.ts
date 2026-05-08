@@ -18,6 +18,8 @@ import {
 import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { buildSearchEnvelope, downgradeForReadPage } from "./evidence-search.js";
 import { rotateEventLog, summarizeLastWeek } from "./evidence-write-log.js";
+import { appendSearchEvent, rotateSearchLog } from "./evidence-search-log.js";
+import { runEvidenceReport } from "./evidence-report.js";
 import { migrateExistingPagesForEvidence } from "./evidence-migration.js";
 import type { EvidenceEnvelope } from "./evidence.js";
 import { join, resolve, basename, extname } from "node:path";
@@ -382,13 +384,14 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           "- `init`: Initialize a new knowledge base — creates wiki/, raw/, schemas/ directories and default templates.\n" +
           "- `config`: Show current workspace configuration: directories, lint settings, search settings, entity templates.\n" +
           "- `rebuild`: Rebuild index.md, timeline.md, code knowledge graphs, and optionally the vector index (when search.hybrid is enabled).\n" +
-          "- `lint`: Run comprehensive health checks: contradictions, orphan pages, broken links, raw file integrity (SHA-256), synthesis page integrity. Set apply_fixes=true to auto-repair fixable issues.",
+          "- `lint`: Run comprehensive health checks: contradictions, orphan pages, broken links, raw file integrity (SHA-256), synthesis page integrity. Set apply_fixes=true to auto-repair fixable issues.\n" +
+          "- `evidence-report`: Aggregate evidence-first telemetry into a corpus-level Markdown report (source coverage, lineage diagnostics, 4-week write trend). Set write=true to also persist the report to wiki/evidence-report.md.",
         inputSchema: {
           type: "object" as const,
           properties: {
             action: {
               type: "string",
-              enum: ["init", "config", "rebuild", "lint"],
+              enum: ["init", "config", "rebuild", "lint", "evidence-report"],
               description: "Administration action to perform",
             },
             path: {
@@ -402,6 +405,10 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             apply_fixes: {
               type: "boolean",
               description: "[lint] If true, automatically fix auto-fixable issues (missing frontmatter → inject title/type/tags). Default: false.",
+            },
+            write: {
+              type: "boolean",
+              description: "[evidence-report] If true, persist the report to wiki/evidence-report.md in addition to returning it. Default: false.",
             },
           },
           required: ["action"],
@@ -1845,7 +1852,9 @@ export async function handleTool(
             return true;
           }).slice(0, searchLimit)
         : rawResults;
-      const envelope = buildSearchEnvelope(results, searchQuery);
+      const envelope = buildSearchEnvelope(results, searchQuery, (e) =>
+        appendSearchEvent(wiki.config.workspace, e),
+      );
 
       // Knowledge gap: guide the agent when the search finds nothing
       if (results.length === 0) {
@@ -1971,7 +1980,9 @@ export async function handleTool(
         ? await wiki.searchHybrid(query, limit)
         : wiki.search(query, limit);
 
-      const envelope = buildSearchEnvelope(results, query);
+      const envelope = buildSearchEnvelope(results, query, (e) =>
+        appendSearchEvent(wiki.config.workspace, e),
+      );
 
       // Knowledge gap: guide the agent when the search finds nothing
       if (results.length === 0) {
@@ -2024,12 +2035,25 @@ export async function handleTool(
     case "wiki_lint": {
       const applyFixes = (args.apply_fixes as boolean) ?? false;
       const report = wiki.lint(applyFixes);
-      // Roll evidence-write-log to its rotation policy (10 MB / 30 days).
+      // Roll evidence telemetry logs to their rotation policy (10 MB / 30 days).
       // Best-effort — never fails the lint call.
       try {
         rotateEventLog(wiki.config.workspace);
       } catch { /* ignore */ }
+      try {
+        rotateSearchLog(wiki.config.workspace);
+      } catch { /* ignore */ }
       return JSON.stringify(report, null, 2);
+    }
+
+    case "wiki_evidence_report": {
+      const write = (args.write as boolean) ?? false;
+      const result = runEvidenceReport(wiki, { write });
+      return JSON.stringify({
+        report: result.report,
+        markdown: result.markdown,
+        writtenTo: result.writtenTo,
+      }, null, 2);
     }
 
     // wiki_log removed — use wiki_read("log.md") instead
@@ -2833,7 +2857,8 @@ export async function handleTool(
         case "config": return handleTool(wiki, "wiki_config", args, opts);
         case "rebuild": return handleTool(wiki, "wiki_rebuild", args, opts);
         case "lint": return handleTool(wiki, "wiki_lint", args, opts);
-        default: throw new Error(`Unknown wiki_admin action: "${action}". Expected: init | config | rebuild | lint`);
+        case "evidence-report": return handleTool(wiki, "wiki_evidence_report", args, opts);
+        default: throw new Error(`Unknown wiki_admin action: "${action}". Expected: init | config | rebuild | lint | evidence-report`);
       }
     }
 

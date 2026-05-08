@@ -193,8 +193,17 @@ export interface WikiConfig {
   };
 }
 
-// System pages that lint should treat specially
-const SYSTEM_PAGES = new Set(["index.md", "log.md", "timeline.md"]);
+// System pages that lint should treat specially. `evidence-report.md` is
+// the auto-regenerated output of wiki_admin --action evidence-report; it
+// lives here (not in the lint/orphan tally, not in the source-coverage
+// tally) so the report doesn't show up as user-authored content and
+// doesn't inflate the very metrics it publishes.
+const SYSTEM_PAGES = new Set([
+  "index.md",
+  "log.md",
+  "timeline.md",
+  "evidence-report.md",
+]);
 
 /**
  * Resolve a boolean config flag from (env var, YAML value), with the env var
@@ -212,9 +221,9 @@ function resolveBooleanFlag(envValue: string | undefined, yamlValue: unknown, de
 }
 
 /** Check if a page path is a system page.
- *  Root-level: index.md, log.md, timeline.md.
+ *  Root-level: index.md, log.md, timeline.md, evidence-report.md.
  *  Nested: any * /index.md — reserved for auto-generated directory indexes. */
-function isSystemPage(pagePath: string): boolean {
+export function isSystemPage(pagePath: string): boolean {
   const normalized = pagePath.replace(/\\/g, "/");
   if (SYSTEM_PAGES.has(normalized)) return true;
   return normalized.endsWith("/index.md");

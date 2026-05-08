@@ -2311,6 +2311,27 @@ describe("consolidated tool: wiki_admin", () => {
     const wiki = freshWiki();
     await expect(handleTool(wiki, "wiki_admin", {})).rejects.toThrow(/Unknown wiki_admin action/);
   });
+
+  it("action:evidence-report returns markdown + structured report", async () => {
+    const wiki = freshWiki();
+    wiki.write("g.md", "---\ntitle: G\nsources: [raw/x.md]\n---\nGrounded.");
+    const result = await handleTool(wiki, "wiki_admin", { action: "evidence-report" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.markdown).toContain("# Evidence Report");
+    expect(parsed.report.source.grounded).toBe(1);
+    expect(parsed.writtenTo).toBeUndefined();
+  });
+
+  it("action:evidence-report with write:true persists to wiki/evidence-report.md", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_admin", {
+      action: "evidence-report",
+      write: true,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.writtenTo).toBeDefined();
+    expect(existsSync(join(wiki.config.wikiDir, "evidence-report.md"))).toBe(true);
+  });
 });
 
 describe("consolidated tool: code_query", () => {

@@ -22,6 +22,7 @@
 
 import type { SearchResult } from "./search.js";
 import type { EvidenceEnvelope, EvidenceConfidence } from "./evidence.js";
+import type { SearchEvent } from "./evidence-search-log.js";
 
 /** Absolute floor below which any top1 BM25 score is "weak in absolute terms". */
 export const ABSOLUTE_FLOOR = 2.0;
@@ -35,8 +36,23 @@ const PROVENANCE_LIMIT = 3;
 export function buildSearchEnvelope(
   results: SearchResult[],
   query: string,
+  onEvent?: (event: SearchEvent) => void,
 ): EvidenceEnvelope {
+  // Telemetry is optional. Server call sites pass a closure that appends to
+  // the search log; tests and non-server callers omit it. Keeps this module
+  // free of filesystem knowledge.
+  const log = (event: Omit<SearchEvent, "timestamp">) => {
+    if (!onEvent) return;
+    onEvent({ ...event, timestamp: new Date().toISOString() });
+  };
+
   if (results.length === 0) {
+    log({
+      abstainReason: "no-results",
+      top1Score: null,
+      top1Top2Ratio: null,
+      confidence: "absent",
+    });
     return {
       provenance: [],
       confidence: "absent",
@@ -53,6 +69,12 @@ export function buildSearchEnvelope(
     // the weak hits as supporting evidence. Mention the top hits in the
     // rationale so a debugger can still see what the engine returned.
     const sample = results.slice(0, PROVENANCE_LIMIT).map((r) => r.path).join(", ");
+    log({
+      abstainReason: "below-floor",
+      top1Score: top1,
+      top1Top2Ratio: null,
+      confidence: "absent",
+    });
     return {
       provenance: [],
       confidence: "absent",
@@ -73,6 +95,15 @@ export function buildSearchEnvelope(
       ? `Top match clearly dominates (${top1.toFixed(2)} vs ${top2.toFixed(2)}).`
       : `Top matches are close in score (${top1.toFixed(2)} vs ${top2.toFixed(2)}); ` +
         `multiple plausible answers — read several before relying on the top result.`;
+
+  log({
+    abstainReason: null,
+    top1Score: top1,
+    // Infinity is not JSON-serializable; record null when there's only one
+    // result (top2 == 0). The dashboard treats null as "single-result match".
+    top1Top2Ratio: top2 > 0 ? ratio : null,
+    confidence,
+  });
 
   return {
     provenance: results.slice(0, PROVENANCE_LIMIT).map((r) => ({ wikiPage: `wiki/${r.path}` })),

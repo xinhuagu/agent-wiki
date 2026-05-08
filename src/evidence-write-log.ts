@@ -16,15 +16,12 @@
  * See docs/evidence-envelope.md ("Unsupported-write telemetry").
  */
 
+import { join } from "node:path";
 import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+  appendJsonlEvent,
+  readJsonlInWindow,
+  rotateJsonlFile,
+} from "./jsonl-log.js";
 
 export interface UnsupportedWriteEvent {
   /** Wiki-relative path of the page that was just stamped unsupported. */
@@ -63,9 +60,6 @@ export interface UnsupportedWriteEvent {
    */
   rejectReason?: "fresh" | "legacy";
 }
-
-const ROTATION_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
-const ROTATION_MAX_AGE_DAYS = 30;
 
 /** Path conventions, relative to a workspace root. */
 const EVIDENCE_DIR = ".agent-wiki";
@@ -114,13 +108,7 @@ export function appendUnsupportedWriteEvent(
   workspace: string,
   event: UnsupportedWriteEvent,
 ): void {
-  try {
-    const path = writeLogPath(workspace);
-    mkdirSync(dirname(path), { recursive: true });
-    appendFileSync(path, JSON.stringify(event) + "\n");
-  } catch {
-    // Telemetry must never break the write itself.
-  }
+  appendJsonlEvent(writeLogPath(workspace), event);
 }
 
 /**
@@ -134,13 +122,7 @@ export function appendWriteEvent(
   kind: WriteEventKind,
   timestamp: string,
 ): void {
-  try {
-    const path = counterLogPath(workspace);
-    mkdirSync(dirname(path), { recursive: true });
-    appendFileSync(path, JSON.stringify({ timestamp, kind }) + "\n");
-  } catch {
-    // Telemetry must never break the write itself.
-  }
+  appendJsonlEvent(counterLogPath(workspace), { timestamp, kind });
 }
 
 /**
@@ -165,33 +147,6 @@ export function readWriteCounter(
   now: Date = new Date(),
 ): WriteEvent[] {
   return readJsonlInWindow<WriteEvent>(counterLogPath(workspace), now);
-}
-
-function readJsonlInWindow<T extends { timestamp?: string }>(
-  path: string,
-  now: Date,
-): T[] {
-  if (!existsSync(path)) return [];
-  try {
-    const cutoffMs = now.getTime() - ROTATION_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
-    const lines = readFileSync(path, "utf-8").split("\n");
-    const events: T[] = [];
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const entry = JSON.parse(trimmed) as T;
-        if (!entry.timestamp) continue;
-        const t = new Date(entry.timestamp).getTime();
-        if (Number.isFinite(t) && t >= cutoffMs) events.push(entry);
-      } catch {
-        // skip malformed line
-      }
-    }
-    return events;
-  } catch {
-    return [];
-  }
 }
 
 /**
@@ -221,49 +176,6 @@ export function rotateEventLog(
     bytesAfter: unsupported.bytesAfter + counter.bytesAfter,
     unsupported,
     counter,
-  };
-}
-
-function rotateJsonlFile(
-  path: string,
-  now: Date,
-): { entriesBefore: number; entriesAfter: number; bytesAfter: number } {
-  if (!existsSync(path)) {
-    return { entriesBefore: 0, entriesAfter: 0, bytesAfter: 0 };
-  }
-
-  const cutoffMs = now.getTime() - ROTATION_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
-  const lines = readFileSync(path, "utf-8").split("\n").filter((l) => l.trim());
-  const entriesBefore = lines.length;
-
-  // First pass: drop entries older than the time window.
-  const kept: { line: string; ts: number }[] = [];
-  for (const line of lines) {
-    try {
-      const entry = JSON.parse(line) as { timestamp?: string };
-      const t = entry.timestamp ? new Date(entry.timestamp).getTime() : NaN;
-      if (Number.isFinite(t) && t >= cutoffMs) {
-        kept.push({ line, ts: t });
-      }
-    } catch {
-      // malformed — drop
-    }
-  }
-
-  // Second pass: if still over size cap, drop oldest entries.
-  kept.sort((a, b) => a.ts - b.ts);
-  let totalBytes = kept.reduce((acc, { line }) => acc + Buffer.byteLength(line) + 1, 0);
-  while (totalBytes > ROTATION_MAX_BYTES && kept.length > 0) {
-    const dropped = kept.shift()!;
-    totalBytes -= Buffer.byteLength(dropped.line) + 1;
-  }
-
-  const newContent = kept.length === 0 ? "" : kept.map((k) => k.line).join("\n") + "\n";
-  writeFileSync(path, newContent);
-  return {
-    entriesBefore,
-    entriesAfter: kept.length,
-    bytesAfter: Buffer.byteLength(newContent),
   };
 }
 

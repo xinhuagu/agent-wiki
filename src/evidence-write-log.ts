@@ -181,8 +181,10 @@ export function rotateEventLog(
 
 /**
  * Count writes in the last 7 days, broken down for a one-line summary
- * the rebuild step appends to wiki/log.md. Phase 4 will replace this
- * with a richer dashboard.
+ * the rebuild step appends to wiki/log.md. Coexists with the Phase 4
+ * `wiki_admin --action evidence-report` dashboard: this stays as the
+ * cheap inline glance during rebuild; the dashboard is the full report
+ * when the operator asks for one.
  *
  * Returned numerators answer different questions:
  *

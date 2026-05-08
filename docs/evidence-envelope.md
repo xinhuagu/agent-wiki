@@ -1,10 +1,10 @@
 # Evidence Envelope
 
-**Status: Phase 0 design — interface and spec only, no consumers yet.**
+**Status: Phases 1–4 delivered. Phase 2b (hard reject) ships disabled and is operator-toggleable via `AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED` once the would-reject ratio settles. Section "Phase 0 — design" below is preserved as the original contract; downstream sections describe what shipped.**
 
 agent-wiki has accumulated many evidence-like features (raw provenance, frontmatter `sources`, COBOL lineage confidence tiers, graph edge evidence, lint, `raw_coverage`), but each tool exposes them differently. Agents using one tool's output have no reliable way to ask "is this match strong enough to act on?" The envelope is a unified contract every retrieval / query tool will adopt across the evidence-first program (#78).
 
-This document fixes the contract and the migration plan **before** any tool starts emitting envelopes. Phase 1+ implements; Phase 0 only specifies.
+This document fixes the contract and the migration plan. Phase 0 specifies; Phases 1–4 implement.
 
 ## The shape
 

@@ -13,9 +13,12 @@
  *   - COBOL field-lineage artifact (Phase 3): `raw/parsed/cobol/field-lineage.json`
  *     carries `callBoundLineage.summary` and `db2Lineage.summary` with
  *     `diagnosticsByKind`.
- *   - Search trust (Phase 1): NO telemetry source exists yet — the
- *     search engine uses an absolute BM25 floor instead of the originally
- *     planned distribution cache. Section is rendered as a TODO.
+ *   - Search trust (Phase 1 + Phase 4): per-search events from
+ *     `evidence-search-log.jsonl`, written by `buildSearchEnvelope` via
+ *     the `onEvent` callback. Yields total searches, abstain ratio,
+ *     median top1 BM25, and a top1/top2 ratio histogram. The absolute
+ *     BM25 floor still drives the abstain decision; a percentile cutoff
+ *     informed by this log is a future option (see docs/evidence-envelope.md).
  *
  * See docs/evidence-envelope.md and issue #8.
  */

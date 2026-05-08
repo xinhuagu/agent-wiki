@@ -21,7 +21,7 @@ import { rotateEventLog, summarizeLastWeek } from "./evidence-write-log.js";
 import { appendSearchEvent, rotateSearchLog } from "./evidence-search-log.js";
 import { runEvidenceReport } from "./evidence-report.js";
 import { migrateExistingPagesForEvidence } from "./evidence-migration.js";
-import type { EvidenceEnvelope } from "./evidence.js";
+import { absentDeterministic, strongDeterministic, type EvidenceEnvelope } from "./evidence.js";
 import { join, resolve, basename, extname } from "node:path";
 import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob, safePath } from "./wiki.js";
 import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
@@ -1593,7 +1593,13 @@ export async function handleTool(
         sort: sortArg as "newest" | "oldest" | "largest" | undefined,
         tag: args.tag as string | undefined,
       });
-      return JSON.stringify(report, null, 2);
+      // Coverage is computed by SHA-256 comparison between raw/ and wiki/
+      // frontmatter `sources:` — round-trippable, no inference.
+      const evidence = strongDeterministic(
+        `Coverage ${report.coveredRaw}/${report.totalRaw} `
+          + `(${(report.coverageRatio * 100).toFixed(1)}%) computed via SHA-256 over raw/.`,
+      );
+      return JSON.stringify({ ...report, evidence }, null, 2);
     }
 
     case "raw_versions": {
@@ -1602,18 +1608,25 @@ export async function handleTool(
     }
 
     case "raw_read": {
-      const result = await wiki.rawRead(args.filename as string, {
+      const filename = args.filename as string;
+      const result = await wiki.rawRead(filename, {
         pages: args.pages as string | undefined,
         sheet: args.sheet as string | undefined,
         offset: args.offset as number | undefined,
         limit: args.limit as number | undefined,
       });
       if (!result) throw new Error(`Raw file not found: ${args.filename}`);
+      // Round-trippable file read: strong + deterministic across every shape
+      // (text, paginated text, binary metadata, image with content block).
+      const evidence = strongDeterministic(
+        `Read raw/${filename} (${result.binary ? "binary" : "text"}).`,
+        [{ raw: filename }],
+      );
       if (result.binary) {
         if (result.imageData) {
           // Return text first (consistent with raw_add/raw_fetch), then image block
           return [
-            { type: "text", text: JSON.stringify({ meta: result.meta, binary: true }, null, 2) },
+            { type: "text", text: JSON.stringify({ meta: result.meta, binary: true, evidence }, null, 2) },
             { type: "image", data: result.imageData.data, mimeType: result.imageData.mimeType },
           ];
         }
@@ -1621,6 +1634,7 @@ export async function handleTool(
           meta: result.meta,
           binary: true,
           note: result.note ?? `Binary file (${result.meta?.mimeType ?? "unknown type"}, ${result.meta?.size != null ? result.meta.size + " bytes" : "unknown size"}). Content cannot be read as text. Use the file path directly if you need to process it.`,
+          evidence,
         }, null, 2);
       }
       const content = result.content!;
@@ -1636,6 +1650,7 @@ export async function handleTool(
         binary: false,
         content: finalContent,
         ...(result.paginationMeta ? { pagination: result.paginationMeta } : {}),
+        evidence,
       }, null, 2);
     }
 
@@ -2307,6 +2322,15 @@ export async function handleTool(
         }
       }
 
+      // Parse is round-trippable — every artifact is derived from the source
+      // file by the plugin's `parse` + `normalize`. Strong + deterministic
+      // regardless of how many wiki pages or graph artifacts get rebuilt.
+      const evidence = strongDeterministic(
+        `Parsed ${filePath} via plugin "${plugin.id}": `
+          + `${normalized.units.length} unit(s), ${normalized.procedures.length} procedure(s), `
+          + `${normalized.symbols.length} symbol(s), ${normalized.relations.length} relation(s).`,
+        [{ raw: filePath }],
+      );
       const output: Record<string, unknown> = {
         summary,
         normalizedModel: {
@@ -2317,6 +2341,7 @@ export async function handleTool(
         },
         artifacts,
         wikiPages: writtenPages,
+        evidence,
       };
       if (variableTrace) {
         output.variableTrace = variableTrace;
@@ -2348,21 +2373,15 @@ export async function handleTool(
       const refs = plugin.traceVariable(ast, varName);
       // Trace is intra-file structural lookup — strong when references found,
       // absent + abstain when nothing matches the requested name.
-      const traceEnvelope: EvidenceEnvelope = refs.length > 0
-        ? {
-            confidence: "strong",
-            basis: "deterministic",
-            abstain: false,
-            rationale: `${refs.length} reference(s) to \`${varName}\` in ${filePath}.`,
-            provenance: [{ raw: filePath }],
-          }
-        : {
-            confidence: "absent",
-            basis: "deterministic",
-            abstain: true,
-            rationale: `No references to \`${varName}\` found in ${filePath}.`,
-            provenance: [{ raw: filePath }],
-          };
+      const traceEnvelope = refs.length > 0
+        ? strongDeterministic(
+            `${refs.length} reference(s) to \`${varName}\` in ${filePath}.`,
+            [{ raw: filePath }],
+          )
+        : absentDeterministic(
+            `No references to \`${varName}\` found in ${filePath}.`,
+            [{ raw: filePath }],
+          );
       return JSON.stringify(
         { variable: varName, file: filePath, evidence: traceEnvelope, references: refs },
         null,
@@ -2390,7 +2409,22 @@ export async function handleTool(
       const maxDepth = Math.min(50, Math.max(1, Math.floor((args.max_depth as number | undefined) ?? 10)));
       const model = await loadParsedNormalizedModel(wiki, filePath);
       const response = buildProcedureFlowResponse(model, { path: filePath, procedure, procedureKind, maxDepth });
-      return JSON.stringify(response, null, 2);
+      // Flow is read directly off the normalized model (deterministic). Empty
+      // procedures sets means the file genuinely has no PROCEDURE DIVISION
+      // bodies — absent + abstain so callers don't act on a vacuous response.
+      const summary = response.summary as { sections: number; paragraphs: number; performRelations: number };
+      const hasContent = summary.sections + summary.paragraphs > 0;
+      const evidence = hasContent
+        ? strongDeterministic(
+            `Procedure flow for ${filePath}: ${summary.sections} section(s), `
+              + `${summary.paragraphs} paragraph(s), ${summary.performRelations} PERFORM relation(s).`,
+            [{ raw: filePath }],
+          )
+        : absentDeterministic(
+            `${filePath} has no sections or paragraphs in the parsed model.`,
+            [{ raw: filePath }],
+          );
+      return JSON.stringify({ ...response, evidence }, null, 2);
     }
 
     case "code_field_lineage": {
@@ -2466,24 +2500,52 @@ export async function handleTool(
         }
 
         const allVisited = [...visited].filter((f) => f !== startField);
+        const totalEdges = levels.reduce((s, l) => s + l.edges.length, 0);
+        // Edges come directly from the parsed model's relations[] —
+        // deterministic. Empty result means the field has no `dataflow` /
+        // `call-param` neighbors in the requested direction → absent + abstain.
+        const evidence = totalEdges > 0
+          ? strongDeterministic(
+              `Transitive ${direction} dataflow from \`${startField}\` in ${filePath}: `
+                + `${allVisited.length} reachable field(s), ${totalEdges} edge(s).`,
+              [{ raw: filePath }],
+            )
+          : absentDeterministic(
+              `No ${direction} dataflow edges from \`${startField}\` in ${filePath}.`,
+              [{ raw: filePath }],
+            );
         return JSON.stringify({
           file: filePath,
           field: startField,
           direction,
           transitive: true,
           total_fields: allVisited.length,
-          total_edges: levels.reduce((s, l) => s + l.edges.length, 0),
+          total_edges: totalEdges,
           levels,
+          evidence,
         }, null, 2);
       }
 
       let edges = allEdges;
       if (fromField) edges = edges.filter((r) => r.from === fromField);
       if (toField) edges = edges.filter((r) => r.to === toField);
+      const filterDesc = [fromField && `from=\`${fromField}\``, toField && `to=\`${toField}\``]
+        .filter(Boolean)
+        .join(", ") || "no field filter";
+      const evidence = edges.length > 0
+        ? strongDeterministic(
+            `${edges.length} dataflow edge(s) in ${filePath} (${filterDesc}).`,
+            [{ raw: filePath }],
+          )
+        : absentDeterministic(
+            `No dataflow edges match ${filterDesc} in ${filePath}.`,
+            [{ raw: filePath }],
+          );
       return JSON.stringify({
         file: filePath,
         total: edges.length,
         edges: edges.map(formatEdge),
+        evidence,
       }, null, 2);
     }
 

@@ -2770,6 +2770,220 @@ Content for backward compatibility test.`);
   });
 });
 
+describe("evidence envelope coverage: raw_* and code_* tools", () => {
+  beforeEach(cleanUp);
+  afterEach(cleanUp);
+
+  it("raw_read text response carries strong/deterministic envelope", async () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("hello.txt", { content: "hello world" });
+    const result = JSON.parse((await handleTool(wiki, "raw_read", { filename: "hello.txt" })) as string);
+    expect(result.evidence).toBeDefined();
+    expect(result.evidence.confidence).toBe("strong");
+    expect(result.evidence.basis).toBe("deterministic");
+    expect(result.evidence.abstain).toBe(false);
+    expect(result.evidence.provenance).toEqual([{ raw: "hello.txt" }]);
+  });
+
+  it("raw_read image response carries envelope in the text content block", async () => {
+    const wiki = freshWiki();
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const rawPath = join(wiki.config.rawDir, "envpixel.png");
+    writeFileSync(rawPath, pngBytes);
+    writeFileSync(
+      rawPath + ".meta.yaml",
+      'path: envpixel.png\ndownloadedAt: "2026-05-01"\nsha256: abcd\nsize: 4\nmimeType: image/png\n',
+    );
+    const result = await handleTool(wiki, "raw_read", { filename: "envpixel.png" });
+    expect(Array.isArray(result)).toBe(true);
+    const blocks = result as Array<{ type: string; text?: string }>;
+    const meta = JSON.parse(blocks[0]!.text!);
+    expect(meta.evidence.confidence).toBe("strong");
+    expect(meta.evidence.basis).toBe("deterministic");
+    expect(meta.evidence.provenance).toEqual([{ raw: "envpixel.png" }]);
+  });
+
+  it("raw_coverage response carries strong/deterministic envelope", async () => {
+    const wiki = freshWiki();
+    wiki.rawAdd("a.pdf", { content: "x" });
+    wiki.write("p.md", "---\ntitle: P\nsources: [raw/a.pdf]\n---\n");
+    const result = JSON.parse((await handleTool(wiki, "raw_coverage", {})) as string);
+    expect(result.evidence.confidence).toBe("strong");
+    expect(result.evidence.basis).toBe("deterministic");
+    expect(result.evidence.abstain).toBe(false);
+    expect(result.evidence.rationale).toMatch(/SHA-256/);
+    expect(result.evidence.provenance).toEqual([]);
+  });
+
+  it("code_parse response carries strong/deterministic envelope with raw provenance", async () => {
+    const wiki = freshWiki();
+    const cobol = `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ENVPARSE.
+       PROCEDURE DIVISION.
+           STOP RUN.`;
+    wiki.rawAdd("ENVPARSE.cbl", { content: cobol });
+    const result = JSON.parse((await handleTool(wiki, "code_parse", { path: "ENVPARSE.cbl" })) as string);
+    expect(result.evidence.confidence).toBe("strong");
+    expect(result.evidence.basis).toBe("deterministic");
+    expect(result.evidence.abstain).toBe(false);
+    expect(result.evidence.provenance).toEqual([{ raw: "ENVPARSE.cbl" }]);
+    expect(result.evidence.rationale).toMatch(/Parsed ENVPARSE\.cbl/);
+  });
+
+  it("code_procedure_flow envelope is strong when procedures exist", async () => {
+    const wiki = freshWiki();
+    const cobol = `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ENVFLOW.
+       PROCEDURE DIVISION.
+       1000-MAIN SECTION.
+           DISPLAY 'X'.
+           STOP RUN.`;
+    wiki.rawAdd("ENVFLOW.cbl", { content: cobol });
+    await handleTool(wiki, "code_parse", { path: "ENVFLOW.cbl" });
+    const result = JSON.parse(
+      (await handleTool(wiki, "code_procedure_flow", { path: "ENVFLOW.cbl" })) as string,
+    );
+    expect(result.evidence.confidence).toBe("strong");
+    expect(result.evidence.abstain).toBe(false);
+    expect(result.evidence.provenance).toEqual([{ raw: "ENVFLOW.cbl" }]);
+  });
+
+  it("code_dataflow_edges envelope is absent + abstain when no edges match", async () => {
+    const wiki = freshWiki();
+    const cobol = `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ENVEDGE.
+       PROCEDURE DIVISION.
+           STOP RUN.`;
+    wiki.rawAdd("ENVEDGE.cbl", { content: cobol });
+    await handleTool(wiki, "code_parse", { path: "ENVEDGE.cbl" });
+    const result = JSON.parse(
+      (await handleTool(wiki, "code_dataflow_edges", { path: "ENVEDGE.cbl" })) as string,
+    );
+    // No PROCEDURE DIVISION moves → no dataflow edges → absent.
+    expect(result.evidence.confidence).toBe("absent");
+    expect(result.evidence.abstain).toBe(true);
+    expect(result.total).toBe(0);
+  });
+
+  it("code_dataflow_edges envelope is strong when edges exist", async () => {
+    const wiki = freshWiki();
+    const cobol = `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ENVEDGE2.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-A PIC 9(4) VALUE 0.
+       01 WS-B PIC 9(4) VALUE 0.
+       PROCEDURE DIVISION.
+           MOVE WS-A TO WS-B.
+           STOP RUN.`;
+    wiki.rawAdd("ENVEDGE2.cbl", { content: cobol });
+    await handleTool(wiki, "code_parse", { path: "ENVEDGE2.cbl" });
+    const result = JSON.parse(
+      (await handleTool(wiki, "code_dataflow_edges", { path: "ENVEDGE2.cbl" })) as string,
+    );
+    expect(result.evidence.confidence).toBe("strong");
+    expect(result.evidence.basis).toBe("deterministic");
+    expect(result.evidence.provenance).toEqual([{ raw: "ENVEDGE2.cbl" }]);
+    expect(result.total).toBeGreaterThan(0);
+  });
+
+  it("code_dataflow_edges transitive branch carries strong envelope when reachable", async () => {
+    const wiki = freshWiki();
+    const cobol = `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ENVEDGE3.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-A PIC 9(4) VALUE 0.
+       01 WS-B PIC 9(4) VALUE 0.
+       01 WS-C PIC 9(4) VALUE 0.
+       PROCEDURE DIVISION.
+           MOVE WS-A TO WS-B.
+           MOVE WS-B TO WS-C.
+           STOP RUN.`;
+    wiki.rawAdd("ENVEDGE3.cbl", { content: cobol });
+    await handleTool(wiki, "code_parse", { path: "ENVEDGE3.cbl" });
+    const result = JSON.parse(
+      (await handleTool(wiki, "code_dataflow_edges", {
+        path: "ENVEDGE3.cbl",
+        field: "WS-A",
+        transitive: true,
+        direction: "downstream",
+      })) as string,
+    );
+    expect(result.transitive).toBe(true);
+    expect(result.evidence.confidence).toBe("strong");
+    expect(result.evidence.basis).toBe("deterministic");
+    expect(result.evidence.rationale).toMatch(/Transitive downstream/);
+    expect(result.total_edges).toBeGreaterThan(0);
+  });
+
+  it("code_dataflow_edges transitive branch is absent when start field has no edges", async () => {
+    const wiki = freshWiki();
+    const cobol = `       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ENVEDGE4.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 WS-LONELY PIC 9(4) VALUE 0.
+       PROCEDURE DIVISION.
+           STOP RUN.`;
+    wiki.rawAdd("ENVEDGE4.cbl", { content: cobol });
+    await handleTool(wiki, "code_parse", { path: "ENVEDGE4.cbl" });
+    const result = JSON.parse(
+      (await handleTool(wiki, "code_dataflow_edges", {
+        path: "ENVEDGE4.cbl",
+        field: "WS-LONELY",
+        transitive: true,
+      })) as string,
+    );
+    expect(result.transitive).toBe(true);
+    expect(result.evidence.confidence).toBe("absent");
+    expect(result.evidence.abstain).toBe(true);
+    expect(result.total_edges).toBe(0);
+  });
+
+  it("code_procedure_flow envelope is absent when model has no sections or paragraphs", async () => {
+    const wiki = freshWiki();
+    // The COBOL parser synthesizes a default section+paragraph for inline-only
+    // PROCEDURE DIVISION, so we can't trigger 0/0 via a real source. Write the
+    // normalized artifact directly to exercise the absent branch — this is the
+    // only path that produces sections+paragraphs === 0 for a parsed file.
+    wiki.rawAdd("EMPTY.cbl", { content: "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. EMPTY." });
+    const emptyModel = {
+      units: [{ name: "EMPTY", kind: "program" }],
+      procedures: [],
+      symbols: [],
+      relations: [],
+      diagnostics: [],
+    };
+    wiki.rawAddParsedArtifact("parsed/cobol/EMPTY.normalized.json", JSON.stringify(emptyModel));
+    const result = JSON.parse(
+      (await handleTool(wiki, "code_procedure_flow", { path: "EMPTY.cbl" })) as string,
+    );
+    expect(result.evidence.confidence).toBe("absent");
+    expect(result.evidence.abstain).toBe(true);
+    expect(result.evidence.rationale).toMatch(/no sections or paragraphs/);
+  });
+
+  it("raw_read binary-non-image response carries envelope alongside metadata note", async () => {
+    const wiki = freshWiki();
+    const blob = Buffer.from([0x00, 0x01, 0x02, 0x03]);
+    const rawPath = join(wiki.config.rawDir, "blob.dat");
+    writeFileSync(rawPath, blob);
+    writeFileSync(
+      rawPath + ".meta.yaml",
+      'path: blob.dat\ndownloadedAt: "2026-05-01"\nsha256: dead\nsize: 4\nmimeType: application/octet-stream\n',
+    );
+    const result = JSON.parse(
+      (await handleTool(wiki, "raw_read", { filename: "blob.dat" })) as string,
+    );
+    expect(result.binary).toBe(true);
+    expect(result.note).toMatch(/Binary file/);
+    expect(result.evidence.confidence).toBe("strong");
+    expect(result.evidence.basis).toBe("deterministic");
+    expect(result.evidence.provenance).toEqual([{ raw: "blob.dat" }]);
+  });
+});
+
 describe("batch: wiki_admin action:rebuild is deduplicated", () => {
   beforeEach(cleanUp);
   afterEach(cleanUp);

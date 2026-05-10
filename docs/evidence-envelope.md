@@ -138,7 +138,7 @@ interface WriteEvent {
 
 Same rotation policy. The counter ticks on every classified `wiki_write` (system pages and bypassed writes excluded), regardless of whether the unsupported log dedupes the event. This keeps the "denominator" honest: `(unsupportedWrites + rejectedWrites) / totalWrites` reflects how often unsupported attempts occur versus total write volume — see `wouldRejectRatio` below.
 
-**Aggregation**: Phase 4 dashboard reads both logs. Until 4 ships, `wiki_admin rebuild` emits a one-line summary into `wiki/log.md` ("last 7 days: 12 unsupported + 0 rejected / 47 wiki_write(s) (5 new unsupported pages) — 25.5% blocked-or-would-block under Phase 2b"). Three numerators are surfaced because they answer different questions:
+**Aggregation**: Phase 4 (`wiki_admin action: "evidence-report"`, see below) reads both logs and renders the corpus-level report. `wiki_admin rebuild` continues to emit a one-line summary into `wiki/log.md` ("last 7 days: 12 unsupported + 0 rejected / 47 wiki_write(s) (5 new unsupported pages) — 25.5% blocked-or-would-block under Phase 2b") so operators see the headline ratio without running the full report. Three numerators are surfaced because they answer different questions:
 
 - **`unsupportedWrites`** — every write that ended up unsupported in warn mode, including re-edits.
 - **`rejectedWrites`** — every write blocked under Phase 2b reject mode.
@@ -149,6 +149,63 @@ The headline ratio is `(unsupportedWrites + rejectedWrites) / totalWrites` — *
 The ratio is omitted when the counter file is empty (early deployments would otherwise read as 0%).
 
 Without this hook in Phase 2a, Phase 2b is guesswork. Including it now means the data is collected from day one.
+
+## Corpus-level evidence report (Phase 4)
+
+Phase 4 ships as `wiki_admin action: "evidence-report"`. The handler calls `buildEvidenceReport` (`src/evidence-report.ts`) which aggregates the four telemetry sources earlier phases populate into a single `EvidenceReport` and renders it to Markdown. Pass `write: true` to also persist the rendered report to `wiki/evidence-report.md` (a system page, so the regeneration does not tick the write counter).
+
+```bash
+agent-wiki call wiki_admin '{"action":"evidence-report"}'
+agent-wiki call wiki_admin '{"action":"evidence-report","write":true}'
+```
+
+The response carries the structured `report` (typed `EvidenceReport`) alongside the rendered `markdown`. The four sections, in order:
+
+### 1. Source coverage
+
+Walks every non-system page under `wiki/`, parses frontmatter, and buckets it. Counts are mutually exclusive — order of classification matters and is fixed:
+
+| Bucket             | Frontmatter signal                                                |
+|--------------------|-------------------------------------------------------------------|
+| `synthesis`        | `synthesis: true` **or** `type: synthesis`                        |
+| `grounded`         | non-empty `sources: [...]`                                        |
+| `unsupported`      | `unsupported: true` (Phase 2a stamp)                              |
+| `legacyUnsupported`| `legacyUnsupported: true` (grandfather flag from migration)       |
+| `other`            | none of the above — classifier was bypassed; investigate          |
+
+Pages with both `sources` and `synthesis: true` count as `synthesis` (a synthesis page that cites supports is still a synthesis page). Malformed frontmatter counts as `other` rather than crashing the report.
+
+### 2. Search trust
+
+Reads `.agent-wiki/evidence-search-log.jsonl` (rotated to 30 days). Per `SearchEvent`:
+
+- `totalSearches` and `abstainCount` (events whose `abstainReason !== null`)
+- `abstainRatio` = `abstainCount / totalSearches`, or `null` when no events
+- `medianTop1Score` — median BM25 score of the top match across the window
+- `ratioHistogram` — `top1/top2` distribution bucketed at the strong/weak boundary: `< 1.5`, `1.5–2.0`, `2.0–3.0`, `≥ 3.0`. Single-result matches (no `top2`) are excluded; they have no comparator.
+
+The 2.0 abstain floor described above still drives the per-call decision; this section just exposes corpus-wide drift.
+
+### 3. Lineage diagnostic surfacing
+
+Reads `raw/parsed/cobol/field-lineage.json` if present and pulls `summary.diagnosticsByKind` from the COBOL plugin's two cross-program lineage families:
+
+- **`callBound`** — caller `USING` ↔ callee `LINKAGE` flow. Surfaces `callSites`, `pairs`, and the per-kind diagnostic counts the lineage builder emitted (e.g., unresolved callee, ambiguous parameter binding).
+- **`db2`** — writer→reader flow via shared DB2 tables. Surfaces `sharedTables`, `pairs`, and per-kind diagnostic counts.
+
+The exact diagnostic kinds are owned by the COBOL plugin's lineage builder and may grow over time; the report surfaces whatever kinds are present in the artifact so a new diagnostic surface does not require updating the report code. Other plugins (when they add their own field-lineage artifacts) follow the same shape.
+
+### 4. Trend (last 4 weeks)
+
+Reads `.agent-wiki/evidence-write-counter.jsonl` and buckets events into the four most recent weekly windows aligned to `now`. Each `TrendBucket` carries:
+
+- `weekStart` — ISO date (YYYY-MM-DD) of the bucket's start
+- `totalWrites` — every classified write in the bucket
+- `unsupportedOrRejected` — `kind === "unsupported" || kind === "rejected"` only
+
+Counter-only by design: the unsupported log dedupes transitions and would produce misleading "5 unsupported / 0 writes" rows for early weeks. Pre-counter weeks display 0/0; this self-resolves within four weeks of running upgraded code.
+
+The rendered Markdown also draws unicode sparklines over the four buckets so the trend is readable at a glance without parsing the table.
 
 ## Synthesis-page grandfather migration (Caveat 4)
 
@@ -186,7 +243,8 @@ Phase 0 itself ships only:
 - **Hybrid search vector ranking**: when BM25 + vector blend produce a result, the envelope's confidence should probably reflect the blended score, not BM25 alone. Phase 1 decides.
 - **Multi-source pages**: a wiki page citing 5 raw sources isn't 5× more credible than one citing 1. Confidence should saturate, not multiply. Phase 2a chooses the curve.
 - **Cross-language consistency**: when future plugins (Java, Python) join, their lineage tiers may not map cleanly to the COBOL table. Each plugin documents and implements its own mapping under `src/<plugin>/`, sharing only the envelope shape from `src/evidence.ts`. The COBOL plugin's `evidence-mapping.ts` is the reference template.
-- **User-facing explanations**: `rationale` is the only freeform field. Phase 4 may add structured `evidenceFactors` for richer dashboards. Out of Phase 0.
+- **User-facing explanations**: `rationale` is the only freeform field. Phase 4 ships with structured aggregates in the corpus report rather than per-envelope `evidenceFactors`; the per-envelope rationale stays a single sentence.
+- **Search percentile cutoff**: Phase 4's `evidence-search-log.jsonl` collects the data needed to reintroduce the corpus-percentile abstain cutoff dropped in Phase 1. Decide once the log has accumulated meaningful query history.
 
 ## See also
 

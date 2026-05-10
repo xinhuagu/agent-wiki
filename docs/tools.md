@@ -21,7 +21,7 @@ agent-wiki exposes 15 public tools through the Model Context Protocol.
 | `wiki_delete` | Delete a page (guards system pages). Triggers index rebuild — stale indexes and empty dirs are cleaned up. |
 | `wiki_list` | List pages, filter by entity type or tag |
 | `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support. Use `type` or `tags` to filter without a separate `wiki_list` call. Optional hybrid BM25+vector mode: enable `search.hybrid: true` in `.agent-wiki.yaml`, then run `wiki_admin` with `action: "rebuild"` to embed all pages. Returns `knowledge_gap` when no results found — includes suggested page slug, title, type, and tags for `wiki_write`. |
-| `wiki_admin` | Unified wiki maintenance tool. Select `action`: `init`, `config`, `rebuild`, or `lint`. `rebuild` regenerates indexes/timeline and search vectors; `lint` runs health checks and optional auto-fixes. |
+| `wiki_admin` | Unified wiki maintenance tool. Select `action`: `init`, `config`, `rebuild`, `lint`, or `evidence-report`. `rebuild` regenerates indexes/timeline and search vectors; `lint` runs health checks and optional auto-fixes; `evidence-report` aggregates evidence-first telemetry into a corpus-level Markdown summary (see [Evidence-first surface](#evidence-first-surface) below). |
 
 ## Code Analysis — Language Plugins
 
@@ -38,6 +38,7 @@ agent-wiki exposes 15 public tools through the Model Context Protocol.
 | `impact` | Query the compiled COBOL knowledge graph for downstream impact. Returns affected nodes grouped by dependency depth, with evidence and unresolved/lower-confidence markers. |
 | `procedure_flow` | Query PERFORM flow inside one parsed source file. Returns section-level and paragraph-level flow, plus optional focused traversal from one procedure. |
 | `field_lineage` | Query compiled field-lineage artifacts. Returns matches across three lineage families: deterministic shared-copybook reuse, inferred cross-copybook candidates (high-confidence + ambiguous), CALL boundary field flow (caller USING ↔ callee LINKAGE), and DB2 cross-program data flow via shared tables (writer/reader pairs with host variables). Each family appears only if the corresponding parsed evidence exists. |
+| `dataflow_edges` | Query field-level dataflow edges from a parsed source file: `MOVE`/`COMPUTE`/`ADD` assignment, `EXEC SQL` host-variable, and `CALL USING` parameter edges. Filter with `from`/`to`, or set `field` + `transitive: true` to follow chains across the full graph (bounded by `max_depth`, default 10; `direction`: `downstream` / `upstream` / `both`). |
 
 ## Orchestration
 
@@ -222,6 +223,71 @@ After setup, every `wiki_write` automatically embeds the new page — no manual 
 **Graceful degradation:** If the embedding model fails or `@xenova/transformers` is unavailable, `wiki_search` silently falls back to pure BM25 — searches never fail.
 
 **Vector index persistence:** Embeddings are cached in `wiki/.search-vectors.json`. The index is invalidated and rebuilt automatically if you change `search.model`.
+
+## Evidence-first surface
+
+Every retrieval / query / read tool returns an `evidence: EvidenceEnvelope` field alongside its existing payload. The envelope is purely additive — agents that don't know about it can ignore it; agents that do can branch on `confidence` (`strong` / `weak` / `absent`) and `abstain` without parsing tool-specific detail. Full contract and adoption history: [`evidence-envelope.md`](evidence-envelope.md).
+
+### Tool responses that carry `evidence`
+
+| Tool | Envelope shape |
+|------|----------------|
+| `raw_read` | `strong` + `deterministic`; `provenance: [{ raw }]`. Round-trippable file read. |
+| `raw_coverage` | `strong` + `deterministic`; rationale carries the SHA-256-based covered/total ratio. |
+| `code_parse` | `strong` + `deterministic`; rationale carries unit/procedure/symbol/relation counts. |
+| `code_query trace_variable` | `strong` when references found, `absent` + `abstain` when none. |
+| `code_query procedure_flow` | `strong` when the parsed model has sections/paragraphs, `absent` + `abstain` when empty. |
+| `code_query field_lineage` | `strong` (deterministic match), `weak` (inferred high-confidence), or `absent` + `abstain` (ambiguous-only or no match). Mapped from COBOL lineage tiers via `cobolTierToEvidence`. |
+| `code_query impact` | `strong` + `deterministic` only when every reachable edge is deterministic and every node resolved; otherwise `weak` + `inferred` reflecting the weakest link in the path. |
+| `code_query dataflow_edges` | `strong` for non-empty edge lists; `absent` + `abstain` when the filter matches nothing. |
+| `wiki_search`, `wiki_search_read` | Built by `buildSearchEnvelope` from BM25 score relative to the corpus floor (2.0) and the top1/top2 ratio. `wiki_search_read` further downgrades by the top read page's metadata (no sources, `synthesis: true`, `legacyUnsupported`, staleness). |
+
+### `wiki_write` evidence classification
+
+Every non-system `wiki_write` is classified by frontmatter and routed through one of five outcomes. Both `.agent-wiki/evidence-write-counter.jsonl` (denominator — every classified write) and `.agent-wiki/evidence-write-log.jsonl` (numerator — distinct unsupported transitions and rejected attempts) tick accordingly. Both logs rotate at 10 MB / 30 days during `wiki_admin lint`.
+
+| Outcome | Trigger | Effect |
+|---------|---------|--------|
+| `grounded` | non-empty `sources: [...]` | Counter ticks; any prior `unsupported` / `legacyUnsupported` flag is cleared. |
+| `synthesis` | `synthesis: true` or `type: synthesis` | Counter ticks as `synthesis`; same flag-clearing as grounded. |
+| `unsupported` | empty `sources`, no synthesis flag, page not legacy | Stamps `unsupported: true` into frontmatter; counter ticks; the unsupported log fires only on the *transition* into unsupported (deduped across re-edits). |
+| `legacy` | empty `sources`, no synthesis flag, but page already carries `legacyUnsupported: true` | Preserves the legacy marker; counter ticks as `legacy`; unsupported log stays silent. |
+| `rejected` | empty `sources`, no synthesis flag, **and** Phase 2b reject mode is on | `wiki_write` throws; counter ticks as `rejected`; unsupported log fires with `rejected: true` and `rejectReason: "fresh"` or `"legacy"`. |
+
+System pages (`index.md`, `log.md`, `timeline.md`, nested `*/index.md`, `evidence-report.md`) are excluded from classification — they're synthesis by construction and would otherwise flood the signal.
+
+#### Phase 2b reject mode
+
+Phase 2b ships disabled. Toggle it on once the warn-mode would-reject ratio settles, via either:
+
+```yaml
+# .agent-wiki.yaml
+evidence:
+  reject_unsupported_writes: true
+```
+
+```bash
+export AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED=true
+```
+
+The env var takes precedence over the YAML and accepts only `true` / `false` (case-insensitive — `1` / `yes` are intentionally **not** truthy). The error message differentiates `fresh` (a brand-new unsupported page) from `legacy` (an attempt to update a `legacyUnsupported` page without resolving its evidence status). Reads of legacy pages are unaffected — only updates require committing to grounded or synthesis.
+
+#### Frontmatter flags written by the classifier
+
+| Flag | Meaning |
+|------|---------|
+| `unsupported: true` | Stamped on writes with empty `sources` and no synthesis flag, in warn mode. Cleared automatically when the page later gains `sources` or `synthesis: true`. |
+| `legacyUnsupported: true` | Set by the one-shot Phase 2a migration on pre-existing user-authored pages with empty sources. Preserved across edits until the page is updated to grounded or synthesis. |
+| `synthesis: true` | Author-set or migration-set marker for legitimate synthesis pages. Equivalent to `type: synthesis` for classification purposes. |
+
+### Corpus-level evidence report
+
+`wiki_admin action: "evidence-report"` aggregates the four telemetry surfaces — page frontmatter, the per-write counter, the search log, and the COBOL field-lineage diagnostics artifact — into a single `EvidenceReport`. The structured report is returned alongside the rendered Markdown; pass `write: true` to also persist it to `wiki/evidence-report.md`. Section breakdown and field semantics: [`evidence-envelope.md` §"Corpus-level evidence report (Phase 4)"](evidence-envelope.md#corpus-level-evidence-report-phase-4).
+
+```bash
+agent-wiki call wiki_admin '{"action":"evidence-report"}'
+agent-wiki call wiki_admin '{"action":"evidence-report","write":true}'
+```
 
 ## Auto-Linking
 

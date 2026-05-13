@@ -1,7 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { parse } from "../parser.js";
 import { extractModel } from "../extractors.js";
-import { attachCallBoundLineage, buildFieldLineage, generateFieldLineagePage } from "../field-lineage.js";
+import {
+  attachCallBoundLineage,
+  buildFieldLineage,
+  combineFieldLineage,
+  generateFieldLineagePage,
+  normalizeLoadedFieldLineage,
+  type SerializedFieldLineage,
+} from "../field-lineage.js";
 import { buildCallBoundLineage } from "../call-boundary-lineage.js";
 
 function model(source: string, filename: string) {
@@ -551,6 +558,45 @@ describe("COBOL field lineage", () => {
     expect(page.content).toContain("## Excluded Inputs");
     expect(page.content).toContain("`raw/EMPTY.cpy`");
     expect(page.content).toContain("`parsed-zero-data-items`");
+  });
+
+  it("combineFieldLineage preserves new diagnostic fields when attaching family lineages (#30)", () => {
+    // Spread-based combiner could silently drop the new fields if the
+    // implementation ever stops using `...base`. Lock it.
+    const emptyCopybook = "      *> placeholder\n";
+    const lineage = buildFieldLineage([
+      model(sharedCopybook, "CUSTOMER-REC.cpy"),
+      model(emptyCopybook, "EMPTY.cpy"),
+      model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl"),
+      model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl"),
+    ]);
+    expect(lineage).not.toBeNull();
+    expect(lineage!.diagnostics).toHaveLength(1);
+    const combined = combineFieldLineage(lineage, { callBound: null, db2: null });
+    expect(combined).not.toBeNull();
+    expect(combined!.diagnostics).toHaveLength(1);
+    expect(combined!.summary.diagnosticsByKind["parsed-zero-data-items"]).toBe(1);
+  });
+
+  it("normalizeLoadedFieldLineage fills defaults for pre-#30 artifacts (#30)", () => {
+    // Simulates an on-disk artifact written before this change: the new fields
+    // are absent. Loader must add empty defaults so downstream code can trust
+    // the typed shape.
+    const legacy = {
+      summary: {
+        deterministic: { copybooks: 1, programs: 2, fields: 3 },
+        inferred: { copybooks: 0, programs: 0, highConfidence: 0, ambiguous: 0 },
+      },
+      copybookUsage: [],
+      deterministic: [],
+      inferredHighConfidence: [],
+      inferredAmbiguous: [],
+    } as unknown as SerializedFieldLineage;
+    const normalized = normalizeLoadedFieldLineage(legacy);
+    expect(normalized.diagnostics).toEqual([]);
+    expect(normalized.summary.diagnosticsByKind).toEqual({ "parsed-zero-data-items": 0 });
+    // Existing fields untouched.
+    expect(normalized.summary.deterministic.fields).toBe(3);
   });
 
   it("generates a lineage wiki summary page", () => {

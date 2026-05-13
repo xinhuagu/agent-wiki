@@ -33,6 +33,7 @@ import { cobolPlugin } from "./cobol/plugin.js";
 import { canonicalNodeId, deserializeGraph, displayLabel, graphEdgesFrom, graphImpactOf } from "./cobol/graph.js";
 import type { CodeProcedure, CodeRelation, NormalizedCodeModel } from "./code-analysis.js";
 import type { SerializedFieldLineage, SerializedInferredFieldLineageEntry } from "./cobol/field-lineage.js";
+import { normalizeLoadedFieldLineage } from "./cobol/field-lineage.js";
 import type { GraphEdge, GraphNode, KnowledgeGraph, NodeKind, SerializedGraph } from "./cobol/graph.js";
 
 // Register built-in plugins
@@ -828,7 +829,9 @@ async function loadFieldLineageArtifact(wiki: Wiki, language: string): Promise<S
     );
   }
   try {
-    return JSON.parse(rawResult.content) as SerializedFieldLineage;
+    // Normalize pre-#30 artifacts that lack summary.diagnosticsByKind /
+    // diagnostics so the rest of the codebase can trust the typed shape.
+    return normalizeLoadedFieldLineage(JSON.parse(rawResult.content) as SerializedFieldLineage);
   } catch (err) {
     throw new Error(`Failed to parse compiled field lineage for "${plugin.id}": ${err instanceof Error ? err.message : String(err)}`);
   }

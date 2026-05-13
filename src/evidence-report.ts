@@ -47,6 +47,16 @@ export interface LineageDiagnosticsSection {
   totalDiagnostics: number;
 }
 
+/**
+ * Top-level field-lineage diagnostics — flag input models that produced no
+ * usable data (e.g. listing-extracted copybooks). Distinct from `callBound` /
+ * `db2` sections which describe cross-program join failures.
+ */
+export interface FieldLineageDiagnosticsSection {
+  diagnosticsByKind: Record<string, number>;
+  totalDiagnostics: number;
+}
+
 export interface TrendBucket {
   weekStart: string;
   unsupportedOrRejected: number;
@@ -68,6 +78,7 @@ export interface EvidenceReport {
   lineage: {
     callBound?: LineageDiagnosticsSection;
     db2?: LineageDiagnosticsSection;
+    fieldLineage?: FieldLineageDiagnosticsSection;
   };
   trend: TrendBucket[];
 }
@@ -248,6 +259,24 @@ function aggregateCobolLineage(wiki: Wiki): EvidenceReport["lineage"] {
     };
   }
 
+  // #30 — top-level field-lineage diagnostics (e.g. parsed-zero-data-items).
+  // Pre-#30 artifacts won't carry summary.diagnosticsByKind, so absence here
+  // is treated as "no diagnostics" rather than a parse failure.
+  const summary = lineage.summary as
+    | { diagnosticsByKind?: Record<string, number> }
+    | null
+    | undefined;
+  if (summary?.diagnosticsByKind) {
+    const diagnosticsByKind = summary.diagnosticsByKind;
+    const totalDiagnostics = Object.values(diagnosticsByKind).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    if (totalDiagnostics > 0) {
+      out.fieldLineage = { diagnosticsByKind, totalDiagnostics };
+    }
+  }
+
   return out;
 }
 
@@ -359,12 +388,22 @@ export function renderEvidenceReport(report: EvidenceReport): string {
   // ── Section 3: Lineage diagnostic surfacing ────────────────────────
   lines.push(`## Lineage diagnostic surfacing`);
   lines.push("");
-  if (!report.lineage.callBound && !report.lineage.db2) {
+  if (!report.lineage.callBound && !report.lineage.db2 && !report.lineage.fieldLineage) {
     lines.push(
       `_No COBOL lineage artifacts found at \`raw/parsed/cobol/field-lineage.json\`. `
         + `Run \`wiki_admin --action rebuild\` after ingesting COBOL sources to populate this section._`,
     );
   } else {
+    if (report.lineage.fieldLineage) {
+      const fl = report.lineage.fieldLineage;
+      lines.push(`### COBOL field-lineage inputs`);
+      lines.push("");
+      lines.push(`- ${fl.totalDiagnostics} diagnostic(s) surfaced`);
+      for (const [kind, count] of Object.entries(fl.diagnosticsByKind)) {
+        if (count > 0) lines.push(`  - \`${kind}\`: ${count}`);
+      }
+      lines.push("");
+    }
     if (report.lineage.callBound) {
       const cb = report.lineage.callBound;
       lines.push(`### COBOL call-bound`);

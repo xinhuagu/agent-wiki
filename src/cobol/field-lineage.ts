@@ -7,6 +7,20 @@ import type { Db2Lineage, HostVarRef } from "./db2-table-lineage.js";
 export type LineageLinkage = "deterministic";
 export type InferredLineageConfidence = "high" | "ambiguous";
 
+/**
+ * Reasons a parsed COBOL model was flagged at lineage-build time. Distinct from
+ * `CallBoundDiagnosticKind` / `Db2LineageDiagnosticKind` which describe
+ * cross-program join failures — these describe the upstream inputs themselves.
+ */
+export type FieldLineageDiagnosticKind = "parsed-zero-data-items";
+
+export interface FieldLineageDiagnostic {
+  kind: FieldLineageDiagnosticKind;
+  sourceFile: string;
+  isCopybook: boolean;
+  rationale: string;
+}
+
 export interface SerializedFieldLineageEntry {
   linkage: LineageLinkage;
   fieldName: string;
@@ -62,6 +76,7 @@ export interface SerializedFieldLineage {
       highConfidence: number;
       ambiguous: number;
     };
+    diagnosticsByKind: Record<FieldLineageDiagnosticKind, number>;
   };
   copybookUsage: Array<{
     copybookId: string;
@@ -72,6 +87,7 @@ export interface SerializedFieldLineage {
   deterministic: SerializedFieldLineageEntry[];
   inferredHighConfidence: SerializedInferredFieldLineageEntry[];
   inferredAmbiguous: SerializedInferredFieldLineageEntry[];
+  diagnostics: FieldLineageDiagnostic[];
   callBoundLineage?: CallBoundLineage | null;
   db2Lineage?: Db2Lineage | null;
 }
@@ -81,16 +97,48 @@ export interface FieldLineageAttachments {
   db2?: Db2Lineage | null;
 }
 
+function emptyDiagnosticsByKind(): Record<FieldLineageDiagnosticKind, number> {
+  return { "parsed-zero-data-items": 0 };
+}
+
+function countDiagnosticsByKind(
+  diagnostics: FieldLineageDiagnostic[],
+): Record<FieldLineageDiagnosticKind, number> {
+  const counts = emptyDiagnosticsByKind();
+  for (const d of diagnostics) counts[d.kind]++;
+  return counts;
+}
+
+/**
+ * Fill in field-lineage fields that older on-disk artifacts (pre-#30) don't
+ * carry. Loaders should run any JSON parsed from `field-lineage.json` through
+ * this before treating it as a `SerializedFieldLineage` — the interface
+ * declares the new fields non-optional, so a raw cast would silently lie.
+ */
+export function normalizeLoadedFieldLineage(raw: SerializedFieldLineage): SerializedFieldLineage {
+  const summary = raw.summary;
+  return {
+    ...raw,
+    summary: {
+      ...summary,
+      diagnosticsByKind: summary.diagnosticsByKind ?? emptyDiagnosticsByKind(),
+    },
+    diagnostics: raw.diagnostics ?? [],
+  };
+}
+
 function emptyCopybookLineage(): SerializedFieldLineage {
   return {
     summary: {
       deterministic: { copybooks: 0, programs: 0, fields: 0 },
       inferred: { copybooks: 0, programs: 0, highConfidence: 0, ambiguous: 0 },
+      diagnosticsByKind: emptyDiagnosticsByKind(),
     },
     copybookUsage: [],
     deterministic: [],
     inferredHighConfidence: [],
     inferredAmbiguous: [],
+    diagnostics: [],
   };
 }
 
@@ -383,7 +431,61 @@ function formatHostVars(hostVars: HostVarRef[]): string {
 export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLineage | null {
   const parsedCopybooks = models.filter((model) => isCopybook(model.sourceFile));
   const parsedPrograms = models.filter((model) => !isCopybook(model.sourceFile));
-  if (parsedCopybooks.length === 0 || parsedPrograms.length === 0) return null;
+
+  // Flatten every copybook once; reused for the zero-data-items diagnostic,
+  // `fieldCount` in `rawCopybookUsage`, and the inferred-candidate set below.
+  // Includes copybooks that will later be filtered out as duplicates — the
+  // dup filter is applied per-consumer, not at the flatten boundary.
+  const flattenedByCopybook = new Map<string, FlattenedField[]>();
+  for (const copybook of parsedCopybooks) {
+    const copybookId = `copybook:${resolveCanonicalId(copybook)}`;
+    const rootSiblingNames = copybook.dataItems.map((item) => item.name);
+    flattenedByCopybook.set(
+      copybookId,
+      flattenDataItems(copybook.dataItems, copybookId, copybook.sourceFile, [], rootSiblingNames),
+    );
+  }
+
+  // #30 — surface copybooks whose parsed AST yielded no data items. The
+  // canonical case is listing-extracted copybooks where header text at
+  // columns other than 7 escapes the comment filter (pre-#28). They were
+  // silently dropped from every lineage family because rawCopybookUsage
+  // filters by fieldCount; the user couldn't distinguish "no shared usage"
+  // from "the copybook itself didn't parse." Only .cpy is diagnosed — a
+  // .cbl program with zero WORKING-STORAGE data items is legitimate
+  // (PROCEDURE-only / LINKAGE-only programs).
+  //
+  // Check `copybook.dataItems` directly (per physical file), NOT the
+  // `flattenedByCopybook` cache. `resolveCanonicalId` is basename-only, so
+  // two .cpy files with the same basename collide in the cache; consulting
+  // the cache here would let a non-empty `claims/COMMON.cpy` mask an empty
+  // `billing/COMMON.cpy` (or vice-versa), defeating the diagnostic in the
+  // exact "messy listing-extracted corpus" shape it targets.
+  const diagnostics: FieldLineageDiagnostic[] = [];
+  for (const copybook of parsedCopybooks) {
+    if (copybook.dataItems.length === 0) {
+      diagnostics.push({
+        kind: "parsed-zero-data-items",
+        sourceFile: copybook.sourceFile,
+        isCopybook: true,
+        rationale:
+          "Parser produced 0 data items — listing-extracted header, "
+          + "88-level-only fragment, pure COPY chain, or unsupported format.",
+      });
+    }
+  }
+  const withDiagnostics = (base: SerializedFieldLineage): SerializedFieldLineage => ({
+    ...base,
+    summary: {
+      ...base.summary,
+      diagnosticsByKind: countDiagnosticsByKind(diagnostics),
+    },
+    diagnostics,
+  });
+
+  if (parsedCopybooks.length === 0 || parsedPrograms.length === 0) {
+    return diagnostics.length > 0 ? withDiagnostics(emptyCopybookLineage()) : null;
+  }
 
   const copybooksByLogicalName = new Map<string, CobolCodeModel[]>();
   for (const copybook of parsedCopybooks) {
@@ -429,21 +531,13 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
         sourceFile: copybook.sourceFile,
         programs: consumers,
         exactPrograms,
-        fieldCount: flattenDataItems(copybook.dataItems, copybookId, copybook.sourceFile).length,
+        fieldCount: flattenedByCopybook.get(copybookId)?.length ?? 0,
       };
     }).filter((entry) => entry.programs.length > 0)
     .sort((a, b) => a.copybookId.localeCompare(b.copybookId));
 
-  if (rawCopybookUsage.length === 0) return null;
-
-  const flattenedByCopybook = new Map<string, FlattenedField[]>();
-  for (const copybook of parsedCopybooks.filter((entry) => !duplicateLogicalNames.has(resolveCanonicalId(entry)))) {
-    const copybookId = `copybook:${resolveCanonicalId(copybook)}`;
-    const rootSiblingNames = copybook.dataItems.map((item) => item.name);
-    flattenedByCopybook.set(
-      copybookId,
-      flattenDataItems(copybook.dataItems, copybookId, copybook.sourceFile, [], rootSiblingNames),
-    );
+  if (rawCopybookUsage.length === 0) {
+    return diagnostics.length > 0 ? withDiagnostics(emptyCopybookLineage()) : null;
   }
 
   const deterministic: SerializedFieldLineageEntry[] = [];
@@ -583,7 +677,7 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
   );
 
   if (sortedDeterministic.length === 0 && inferredHighConfidence.length === 0 && inferredAmbiguous.length === 0) {
-    return null;
+    return diagnostics.length > 0 ? withDiagnostics(emptyCopybookLineage()) : null;
   }
 
   const participatingCopybookIds = new Set<string>();
@@ -635,11 +729,13 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
         highConfidence: inferredHighConfidence.length,
         ambiguous: inferredAmbiguous.length,
       },
+      diagnosticsByKind: countDiagnosticsByKind(diagnostics),
     },
     copybookUsage,
     deterministic: sortedDeterministic,
     inferredHighConfidence,
     inferredAmbiguous,
+    diagnostics,
   };
 }
 
@@ -705,7 +801,34 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
     lines.push(`| Shared DB2 tables | ${db2.summary.sharedTables} |`);
     lines.push(`| DB2 cross-program pairs | ${db2.entries.length} |`);
   }
+  // Defensive `?.` — interface declares these non-optional, but renderer may
+  // run over a pre-#30 in-memory shape (test fixture, legacy loader bypassing
+  // normalizeLoadedFieldLineage). Render a missing count rather than crash.
+  const zeroDataItemsCount = lineage.summary.diagnosticsByKind?.["parsed-zero-data-items"] ?? 0;
+  if (zeroDataItemsCount > 0) {
+    lines.push(`| Copybooks with zero parsed data items | ${zeroDataItemsCount} |`);
+  }
   lines.push("");
+
+  if (zeroDataItemsCount > 0) {
+    lines.push("## Excluded Inputs");
+    lines.push("");
+    lines.push(
+      "Copybooks whose parsed AST yielded no data items. Common causes: "
+      + "listing-extracted header text at columns other than 7, 88-level-only "
+      + "fragments, pure COPY chains, or unsupported formats.",
+    );
+    lines.push("");
+    lines.push("| File | Kind | Rationale |");
+    lines.push("|------|------|-----------|");
+    const sortedDiagnostics = [...(lineage.diagnostics ?? [])].sort((a, b) =>
+      a.sourceFile.localeCompare(b.sourceFile)
+    );
+    for (const d of sortedDiagnostics) {
+      lines.push(`| \`raw/${d.sourceFile}\` | \`${d.kind}\` | ${d.rationale} |`);
+    }
+    lines.push("");
+  }
 
   const hasCopybookContent = lineage.copybookUsage.length > 0
     || lineage.deterministic.length > 0

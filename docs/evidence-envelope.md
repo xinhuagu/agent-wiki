@@ -188,8 +188,9 @@ The 2.0 abstain floor described above still drives the per-call decision; this s
 
 ### 3. Lineage diagnostic surfacing
 
-Reads `raw/parsed/cobol/field-lineage.json` if present and pulls `summary.diagnosticsByKind` from the COBOL plugin's two cross-program lineage families:
+Reads `raw/parsed/cobol/field-lineage.json` if present and pulls diagnostics from three surfaces — two cross-program lineage families plus a top-level input-quality surface:
 
+- **`fieldLineage`** — top-level `summary.diagnosticsByKind`, flagging input models the lineage builder couldn't use (e.g. `parsed-zero-data-items` from listing-extracted copybooks whose headers escaped the col-7 comment filter). Suppressed when `totalDiagnostics === 0`.
 - **`callBound`** — caller `USING` ↔ callee `LINKAGE` flow. Surfaces `callSites`, `pairs`, and the per-kind diagnostic counts the lineage builder emitted (e.g., unresolved callee, ambiguous parameter binding).
 - **`db2`** — writer→reader flow via shared DB2 tables. Surfaces `sharedTables`, `pairs`, and per-kind diagnostic counts.
 

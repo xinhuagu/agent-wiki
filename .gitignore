@@ -12,3 +12,13 @@ coverage/
 # Site-specific runtime program names go here, never committed.
 .agent-wiki.local.yaml
 .tmp-lint-bench/
+
+# Local agent / IDE workspace dirs — never commit. PR #32 (force-pushed) leaked
+# these via `git add -A`; orphan SHA stayed publicly reachable on GitHub. Always
+# stage files explicitly; this list is the second line of defense.
+.agents/
+.claude/
+.cortex/
+skills-lock.json
+docs/diagrams/*.drawio
+docs/diagrams/*.png

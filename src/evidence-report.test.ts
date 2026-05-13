@@ -170,6 +170,51 @@ describe("buildEvidenceReport — COBOL lineage", () => {
     });
   });
 
+  it("surfaces top-level field-lineage diagnostics (#30)", () => {
+    const wiki = freshWiki();
+    const dir = join(wiki.config.rawDir, "parsed", "cobol");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "field-lineage.json"),
+      JSON.stringify({
+        summary: {
+          deterministic: { copybooks: 0, programs: 0, fields: 0 },
+          inferred: { copybooks: 0, programs: 0, highConfidence: 0, ambiguous: 0 },
+          diagnosticsByKind: { "parsed-zero-data-items": 3 },
+        },
+        diagnostics: [
+          { kind: "parsed-zero-data-items", sourceFile: "A.cpy", isCopybook: true, rationale: "..." },
+          { kind: "parsed-zero-data-items", sourceFile: "B.cpy", isCopybook: true, rationale: "..." },
+          { kind: "parsed-zero-data-items", sourceFile: "C.cpy", isCopybook: true, rationale: "..." },
+        ],
+      }),
+    );
+    const report = buildEvidenceReport(wiki);
+    expect(report.lineage.fieldLineage).toEqual({
+      diagnosticsByKind: { "parsed-zero-data-items": 3 },
+      totalDiagnostics: 3,
+    });
+  });
+
+  it("omits fieldLineage section when diagnosticsByKind is all zero (#30)", () => {
+    // Defensive: a healthy corpus carries the field with zero counts. The
+    // report should treat it as "no findings to surface" rather than rendering
+    // an empty subsection.
+    const wiki = freshWiki();
+    const dir = join(wiki.config.rawDir, "parsed", "cobol");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "field-lineage.json"),
+      JSON.stringify({
+        summary: {
+          diagnosticsByKind: { "parsed-zero-data-items": 0 },
+        },
+      }),
+    );
+    const report = buildEvidenceReport(wiki);
+    expect(report.lineage.fieldLineage).toBeUndefined();
+  });
+
   it("tolerates malformed field-lineage.json without throwing", () => {
     const wiki = freshWiki();
     const dir = join(wiki.config.rawDir, "parsed", "cobol");

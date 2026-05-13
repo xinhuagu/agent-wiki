@@ -474,6 +474,85 @@ describe("COBOL field lineage", () => {
     expect(page.content).not.toContain("### Excluded by diagnostic");
   });
 
+  it("emits parsed-zero-data-items diagnostic for a copybook with no data items (#30)", () => {
+    // Empty-body copybook simulates the listing-extracted header case where
+    // pre-#28, the parser produced 0 data items. The lineage builder used to
+    // drop these silently — verify the diagnostic now surfaces.
+    const emptyCopybook = "      *> placeholder, no level items\n";
+    const lineage = buildFieldLineage([
+      model(sharedCopybook, "CUSTOMER-REC.cpy"),
+      model(emptyCopybook, "EMPTY.cpy"),
+      model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl"),
+      model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl"),
+    ]);
+    expect(lineage).not.toBeNull();
+    expect(lineage!.summary.diagnosticsByKind["parsed-zero-data-items"]).toBe(1);
+    expect(lineage!.diagnostics).toHaveLength(1);
+    expect(lineage!.diagnostics[0]).toMatchObject({
+      kind: "parsed-zero-data-items",
+      sourceFile: "EMPTY.cpy",
+      isCopybook: true,
+    });
+  });
+
+  it("does NOT emit parsed-zero-data-items for a .cbl program with empty WORKING-STORAGE (#30)", () => {
+    // Procedure-only programs are legitimate; the diagnostic must gate on
+    // isCopybook(sourceFile) so they don't trigger false positives.
+    const procOnlyProgram = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. NODATA.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+    const lineage = buildFieldLineage([
+      model(sharedCopybook, "CUSTOMER-REC.cpy"),
+      model(procOnlyProgram, "NODATA.cbl"),
+      model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl"),
+      model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl"),
+    ]);
+    expect(lineage).not.toBeNull();
+    expect(lineage!.summary.diagnosticsByKind["parsed-zero-data-items"]).toBe(0);
+    expect(lineage!.diagnostics).toHaveLength(0);
+  });
+
+  it("returns a non-null lineage with diagnostics when every copybook is zero-item (#30)", () => {
+    // Pre-#30 this corpus would return null (rawCopybookUsage filtered to
+    // empty), erasing every signal. Post-#30 the artifact is preserved so the
+    // operator can see WHY lineage is empty.
+    const emptyCopybook = "      *> placeholder\n";
+    const lineage = buildFieldLineage([
+      model(emptyCopybook, "EMPTY-A.cpy"),
+      model(emptyCopybook, "EMPTY-B.cpy"),
+      model(program("ORDERA", "EMPTY-A"), "ORDERA.cbl"),
+    ]);
+    expect(lineage).not.toBeNull();
+    expect(lineage!.copybookUsage).toEqual([]);
+    expect(lineage!.deterministic).toEqual([]);
+    expect(lineage!.diagnostics).toHaveLength(2);
+    expect(lineage!.diagnostics.map((d) => d.sourceFile).sort()).toEqual([
+      "EMPTY-A.cpy",
+      "EMPTY-B.cpy",
+    ]);
+  });
+
+  it("renders Excluded Inputs and zero-data-items count in the wiki page (#30)", () => {
+    const emptyCopybook = "      *> placeholder\n";
+    const lineage = buildFieldLineage([
+      model(sharedCopybook, "CUSTOMER-REC.cpy"),
+      model(emptyCopybook, "EMPTY.cpy"),
+      model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl"),
+      model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl"),
+    ]);
+    expect(lineage).not.toBeNull();
+    const page = generateFieldLineagePage(lineage!);
+    expect(page.content).toContain("| Copybooks with zero parsed data items | 1 |");
+    expect(page.content).toContain("## Excluded Inputs");
+    expect(page.content).toContain("`raw/EMPTY.cpy`");
+    expect(page.content).toContain("`parsed-zero-data-items`");
+  });
+
   it("generates a lineage wiki summary page", () => {
     const lineage = buildFieldLineage([
       model(sharedCopybook, "CUSTOMER-REC.cpy"),

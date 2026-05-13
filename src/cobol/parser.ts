@@ -94,6 +94,13 @@ class Parser {
     const hasDivisions = this.tokens.some((t) => t.type === "DIVISION");
 
     if (!hasDivisions) {
+      // Listing-extracted copybooks (compile-listing fragments) often carry
+      // a header where text begins at columns other than 7 (e.g. col 15),
+      // so the lexer's col-7 `*` comment filter doesn't strip it and those
+      // lines tokenise as IDENTIFIER. parseDataItems() only loops while
+      // peek() is LEVEL_NUMBER, so without skipping the leading non-level
+      // tokens it would exit immediately and yield zero data items (#28).
+      this.skipUntil("LEVEL_NUMBER");
       // Treat entire token stream as data items in a synthetic DATA DIVISION
       const dataItems = this.parseDataItems();
       if (dataItems.length > 0) {

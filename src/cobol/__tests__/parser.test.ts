@@ -168,6 +168,41 @@ describe("COBOL parser", () => {
     });
   });
 
+  describe("listing-extracted copybook with leading header (issue #28)", () => {
+    // Compile-listing fragments often carry an 8-ish-line header where text
+    // begins at columns other than 7 (here col 15), so the lexer's col-7
+    // `*` comment filter doesn't strip it. Pre-fix, parseDataItems() saw a
+    // leading IDENTIFIER on peek() and exited immediately — zero data items
+    // for an otherwise valid copybook.
+    const src = [
+      "              Source Listing of SAMPLEREC",
+      "              Compiled 2024-01-01",
+      "              Library  SAMPLELIB",
+      "              Author   EXAMPLE",
+      "              =================================",
+      "       01  SAMPLE-REC.",
+      "           05  SAMPLE-ID    PIC X(8).",
+      "           05  SAMPLE-DATA  PIC X(80).",
+    ].join("\n");
+    const ast = parse(src, "SAMPLEREC.cpy");
+
+    it("creates a synthetic DATA division", () => {
+      expect(ast.divisions.length).toBe(1);
+      expect(ast.divisions[0].name).toBe("DATA");
+    });
+
+    it("parses data items despite the leading non-level header", () => {
+      const items = ast.divisions[0].sections[0].dataItems;
+      expect(items.length).toBe(1);
+      expect(items[0].name).toBe("SAMPLE-REC");
+      expect(items[0].level).toBe(1);
+      expect(items[0].children.length).toBe(2);
+      expect(items[0].children[0].name).toBe("SAMPLE-ID");
+      expect(items[0].children[0].picture).toMatch(/X\(8\)/i);
+      expect(items[0].children[1].name).toBe("SAMPLE-DATA");
+    });
+  });
+
   describe("PROGRAM-ID quoted-literal handling", () => {
     it("strips single quotes around the program name", () => {
       const src = `

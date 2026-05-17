@@ -898,9 +898,9 @@ ${lines}
       ]);
       const entry = lineage!.entries[0]!;
       const byName = new Map(entry.writer.hostVars.map((hv) => [hv.name, hv]));
-      expect(byName.get("WS-ID")?.column).toBe("ID");
-      expect(byName.get("WS-NAME")?.column).toBe("NAME");
-      expect(byName.get("WS-EMAIL")?.column).toBe("EMAIL");
+      expect(byName.get("WS-ID")?.columns).toEqual(["ID"]);
+      expect(byName.get("WS-NAME")?.columns).toEqual(["NAME"]);
+      expect(byName.get("WS-EMAIL")?.columns).toEqual(["EMAIL"]);
     });
 
     it("attaches column to reader host vars from SELECT col-list INTO host-list", () => {
@@ -913,8 +913,8 @@ ${lines}
         model(reader, "READER.cbl"),
       ]);
       const readerVars = lineage!.entries[0]!.reader.hostVars;
-      expect(readerVars.find((hv) => hv.name === "WS-ID")?.column).toBe("ID");
-      expect(readerVars.find((hv) => hv.name === "WS-NAME")?.column).toBe("NAME");
+      expect(readerVars.find((hv) => hv.name === "WS-ID")?.columns).toEqual(["ID"]);
+      expect(readerVars.find((hv) => hv.name === "WS-NAME")?.columns).toEqual(["NAME"]);
     });
 
     it("attaches column on UPDATE SET pairs; WHERE-clause host vars stay unbound", () => {
@@ -929,9 +929,10 @@ ${lines}
       ]);
       const writerVars = lineage!.entries[0]!.writer.hostVars;
       const byName = new Map(writerVars.map((hv) => [hv.name, hv]));
-      expect(byName.get("WS-NAME")?.column).toBe("NAME");
-      expect(byName.get("WS-EMAIL")?.column).toBe("EMAIL");
+      expect(byName.get("WS-NAME")?.columns).toEqual(["NAME"]);
+      expect(byName.get("WS-EMAIL")?.columns).toEqual(["EMAIL"]);
       // WHERE clause filter — no column binding.
+      expect(byName.get("WS-ID")?.columns).toEqual([]);
       expect(byName.get("WS-ID")?.column).toBeUndefined();
       // But the host var itself is still resolved (has a dataItem).
       expect(byName.get("WS-ID")?.dataItem?.picture).toBe("X(10)");
@@ -949,7 +950,7 @@ ${lines}
       const writerVars = lineage!.entries[0]!.writer.hostVars;
       // Host vars still listed; just no column attached.
       expect(writerVars.find((hv) => hv.name === "WS-ID")?.dataItem?.picture).toBe("X(10)");
-      expect(writerVars.every((hv) => hv.column === undefined)).toBe(true);
+      expect(writerVars.every((hv) => hv.columns.length === 0)).toBe(true);
     });
 
     it("a later SQL ref can attach a column to a host var first seen unbound", () => {
@@ -968,8 +969,8 @@ ${lines}
         model(reader, "READER.cbl"),
       ]);
       const writerVars = lineage!.entries[0]!.writer.hostVars;
-      expect(writerVars.find((hv) => hv.name === "WS-ID")?.column).toBe("ID");
-      expect(writerVars.find((hv) => hv.name === "WS-NAME")?.column).toBe("NAME");
+      expect(writerVars.find((hv) => hv.name === "WS-ID")?.columns).toEqual(["ID"]);
+      expect(writerVars.find((hv) => hv.name === "WS-NAME")?.columns).toEqual(["NAME"]);
     });
 
     it("aborts column binding on arity mismatch (3 cols, 2 hosts) — host vars still listed without column", () => {
@@ -985,7 +986,7 @@ ${lines}
         model(reader, "READER.cbl"),
       ]);
       const writerVars = lineage!.entries[0]!.writer.hostVars;
-      expect(writerVars.every((hv) => hv.column === undefined)).toBe(true);
+      expect(writerVars.every((hv) => hv.columns.length === 0)).toBe(true);
     });
   });
 
@@ -1179,6 +1180,46 @@ ${lines}
       expect(lineage!.entries[0]!.columnPairs).toEqual([
         { column: "ID", writerHostVar: "WR-ID", readerHostVar: "RD-ID" },
         { column: "NAME", writerHostVar: "WR-NAME", readerHostVar: "RD-NAME" },
+      ]);
+    });
+
+    it("multi-column binding on a single host var: each column produces its own pair (Codex review fix)", () => {
+      // The Codex review on #43 caught that the pre-fix code stored only
+      // the first column per host var, silently dropping later bindings
+      // and the Phase B intersection along with them. Concrete case:
+      // INSERT binds :WR-ID to BOTH ID and ALT_ID; a reader selecting
+      // ALT_ID INTO :RD-ALT-ID must still pair through the second
+      // column.
+      const writer = makeWriter("WRITER", [
+        "EXEC SQL INSERT INTO CUSTOMERS (ID, ALT_ID)",
+        "         VALUES (:WR-ID, :WR-ID) END-EXEC.",
+      ]);
+      const reader = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. READER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  RD-ID              PIC X(10).
+       01  RD-ALT-ID          PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL SELECT ALT_ID INTO :RD-ALT-ID
+                    FROM CUSTOMERS END-EXEC.
+           STOP RUN.
+`;
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      // Writer's :WR-ID carries both columns.
+      const wrId = lineage!.entries[0]!.writer.hostVars.find((hv) => hv.name === "WR-ID");
+      expect(wrId?.columns).toEqual(["ALT_ID", "ID"]);
+      expect(wrId?.column).toBe("ALT_ID"); // alphabetically first → primary alias
+      // The Phase B intersection now produces the ALT_ID flow that the
+      // pre-fix code silently dropped.
+      expect(lineage!.entries[0]!.columnPairs).toEqual([
+        { column: "ALT_ID", writerHostVar: "WR-ID", readerHostVar: "RD-ALT-ID" },
       ]);
     });
 

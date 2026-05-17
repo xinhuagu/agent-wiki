@@ -96,14 +96,23 @@ export interface HostVarRef {
   /** In-program declaration; undefined if lookup failed. */
   dataItem?: HostVarDataItemRef;
   /**
-   * The SQL column the host var binds to, when `parseSqlColumnBindings`
-   * could resolve it (#41 Phase A). Present for three patterns:
-   *   - INSERT INTO T (col-list) VALUES (host-list) — positional pair
-   *   - SELECT col-list INTO host-list FROM ... — positional pair
-   *   - UPDATE T SET col = :host pairs — explicit
-   * Absent for INSERT without column list, arity mismatch, predicate
-   * (WHERE) host vars, FETCH (column list lives on the DECLARE CURSOR),
-   * and any SQL the Phase A regexes can't structure.
+   * Canonical column-binding list (#41 Phase B). The full set of SQL
+   * columns this host var binds to, across every SQL ref in the
+   * program. Empty when the SQL shape carried no parseable column
+   * info (INSERT without column list, FETCH, etc.).
+   *
+   * Multi-binding is uncommon-but-real: `INSERT INTO T (ID, ALT_ID)
+   * VALUES (:WR-ID, :WR-ID)` binds `:WR-ID` to both `ID` and `ALT_ID`,
+   * and a later SELECT reading `ALT_ID INTO :RD-ALT-ID` should still
+   * pair the WR-ID write through `ALT_ID`. Storing only the first
+   * column (the pre-Phase-B shape) silently dropped that flow.
+   * Sorted ascending for byte-stable artifact output.
+   */
+  columns: string[];
+  /**
+   * Convenience alias for `columns[0]` — preserved as the public
+   * single-binding handle from #41 Phase A so external consumers
+   * reading `column` keep working. Absent when `columns` is empty.
    */
   column?: string;
 }
@@ -459,9 +468,15 @@ function resolveHostVar(
 function toHostVarRef(
   name: string,
   resolved: ResolvedHostVar | undefined,
-  column?: string,
+  columns: string[],
 ): HostVarRef {
-  const columnFields = column ? { column } : {};
+  // `column` is a convenience alias for `columns[0]` — present whenever
+  // any column is bound, so external consumers from #41 Phase A keep
+  // working with the singular handle.
+  const sortedColumns = [...columns].sort((a, b) => a.localeCompare(b));
+  const columnFields = sortedColumns.length > 0
+    ? { columns: sortedColumns, column: sortedColumns[0]! }
+    : { columns: sortedColumns };
   if (!resolved) return { name, ...columnFields };
   const { dataItem, originCopybook, replacingSubstitution } = resolved;
   return {
@@ -546,18 +561,19 @@ function bump(
       continue;
     }
     // Field-by-field merge so a later SQL block can fill in info the
-    // first one didn't have, without ever clobbering info we already
-    // collected. Typical cases:
-    //   - First ref unresolved, second resolved → upgrade `dataItem`.
-    //   - First ref had no column binding (SELECT-without-INTO), second
-    //     had one (INSERT col-list, #41 Phase A) → attach `column`.
-    // Pre-#41 this was a whole-entry replace gated on the dataItem
-    // upgrade; that pattern silently dropped a later `column` when the
-    // first ref was already resolved.
+    // first one didn't have. `dataItem` keeps first-resolved (refs
+    // typically agree); `columns` UNIONS across refs so a host var
+    // bound to ID in one SQL and ALT_ID in another carries both
+    // (#41 Phase B fix — pre-merge versions only kept the first
+    // column, silently dropping later bindings and the Phase B
+    // intersection along with them).
+    const mergedColumns = [...new Set([...existing.columns, ...hv.columns])]
+      .sort((a, b) => a.localeCompare(b));
     const merged: HostVarRef = {
       name: hv.name,
       dataItem: existing.dataItem ?? hv.dataItem,
-      column: existing.column ?? hv.column,
+      columns: mergedColumns,
+      ...(mergedColumns.length > 0 ? { column: mergedColumns[0]! } : {}),
     };
     usage.hostVars.set(hv.name, merged);
   }
@@ -596,24 +612,32 @@ function computeColumnPairs(
   writer: Db2LineageParticipant,
   reader: Db2LineageParticipant,
 ): Db2ColumnPair[] {
+  // Index readers by every column they bind, not just `column` — a single
+  // SELECT INTO might land the same host var into multiple columns of a
+  // joined result. The Codex review on #43 caught the symmetric writer-
+  // side case (`INSERT INTO T (ID, ALT_ID) VALUES (:WR-ID, :WR-ID)`);
+  // honoring multi-binding on the reader side too keeps the data model
+  // symmetric.
   const readersByColumn = new Map<string, HostVarRef[]>();
   for (const rhv of reader.hostVars) {
-    if (!rhv.column) continue;
-    const list = readersByColumn.get(rhv.column) ?? [];
-    list.push(rhv);
-    readersByColumn.set(rhv.column, list);
+    for (const col of rhv.columns) {
+      const list = readersByColumn.get(col) ?? [];
+      list.push(rhv);
+      readersByColumn.set(col, list);
+    }
   }
   const pairs: Db2ColumnPair[] = [];
   for (const whv of writer.hostVars) {
-    if (!whv.column) continue;
-    const readers = readersByColumn.get(whv.column);
-    if (!readers) continue;
-    for (const rhv of readers) {
-      pairs.push({
-        column: whv.column,
-        writerHostVar: whv.name,
-        readerHostVar: rhv.name,
-      });
+    for (const col of whv.columns) {
+      const readers = readersByColumn.get(col);
+      if (!readers) continue;
+      for (const rhv of readers) {
+        pairs.push({
+          column: col,
+          writerHostVar: whv.name,
+          readerHostVar: rhv.name,
+        });
+      }
     }
   }
   return pairs.sort((a, b) =>
@@ -679,17 +703,18 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
         continue;
       }
       const hostVarNames = extractHostVars(ref.rawText);
-      // #41 Phase A — parse column bindings once per SQL ref. Empty when the
-      // ref's shape isn't one of the three handled patterns; per-name lookup
-      // below silently leaves `column` unset on those host vars.
+      // #41 Phase A/B — parse column bindings once per SQL ref. Empty when
+      // the ref's shape isn't one of the three handled patterns. Multi-
+      // binding (one host var bound to multiple columns in the same SQL,
+      // e.g. `INSERT INTO T (ID, ALT_ID) VALUES (:WR-ID, :WR-ID)`) is
+      // captured as a list per host var — the bump-merge below unions
+      // these across all of the program's refs.
       const bindings = parseSqlColumnBindings(ref.rawText, op);
-      const columnByHostVar = new Map<string, string>();
+      const columnsByHostVar = new Map<string, string[]>();
       for (const b of bindings) {
-        // First binding wins — if the same host var appears in both the
-        // SET clause and the WHERE clause of an UPDATE, the SET-clause
-        // column was extracted first by parseSqlColumnBindings, so this
-        // map preserves the column-write association.
-        if (!columnByHostVar.has(b.hostVar)) columnByHostVar.set(b.hostVar, b.column);
+        const list = columnsByHostVar.get(b.hostVar) ?? [];
+        if (!list.includes(b.column)) list.push(b.column);
+        columnsByHostVar.set(b.hostVar, list);
       }
       const hostVars: HostVarRef[] = hostVarNames.map((name) => {
         const resolved = resolveHostVar(program, name, copybooksByLogicalName);
@@ -727,7 +752,7 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
             });
           }
         }
-        return toHostVarRef(name, resolved, columnByHostVar.get(name));
+        return toHostVarRef(name, resolved, columnsByHostVar.get(name) ?? []);
       });
       for (const table of ref.tables) {
         bump(tableState, table, kind, programId, sourceFile, op, hostVars, ref.loc);

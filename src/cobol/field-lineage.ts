@@ -597,10 +597,16 @@ function formatColumnPairs(pairs: Db2ColumnPair[]): string {
 function formatHostVars(hostVars: HostVarRef[]): string {
   if (hostVars.length === 0) return "—";
   return hostVars.map((hv) => {
-    // `HV → COLUMN` prefix when we parsed a column binding (#41 Phase A);
-    // bare `HV` otherwise. Keeps backwards-compatible rendering for SQL
-    // shapes parseSqlColumnBindings can't structure.
-    const head = hv.column ? `\`${hv.name}\` → \`${hv.column}\`` : `\`${hv.name}\``;
+    // `HV → COLUMN[, COL2...]` prefix when we parsed column binding(s)
+    // (#41 Phase A/B). Multi-column binding renders comma-separated so
+    // the cell stays single-line even when one host var feeds several
+    // columns (`INSERT INTO T (ID, ALT_ID) VALUES (:WR-ID, :WR-ID)`).
+    // Bare `HV` when columns is empty — keeps backwards-compatible
+    // rendering for SQL shapes parseSqlColumnBindings can't structure.
+    const cols = hv.columns ?? (hv.column ? [hv.column] : []);
+    const head = cols.length > 0
+      ? `\`${hv.name}\` → ${cols.map((c) => `\`${c}\``).join(", ")}`
+      : `\`${hv.name}\``;
     if (!hv.dataItem) return `${head} (?)`;
     const shape = hv.dataItem.picture ?? "group";
     // Substitution wins over plain origin: the user needs to see the rename

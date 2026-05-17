@@ -1,7 +1,44 @@
 import { describe, it, expect } from "vitest";
 import { parse } from "../parser.js";
 import { extractModel } from "../extractors.js";
-import { buildDb2TableLineage } from "../db2-table-lineage.js";
+import { buildDb2TableLineage, parseReplacingPairs } from "../db2-table-lineage.js";
+
+describe("parseReplacingPairs (#37 Phase A)", () => {
+  it("parses single-token form X BY Y", () => {
+    expect(parseReplacingPairs(["X", "BY", "Y"])).toEqual([{ from: "X", to: "Y" }]);
+  });
+
+  it("parses pseudo-text form ==X== BY ==Y== as the COBOL lexer shatters it", () => {
+    // The actual parser output for `REPLACING ==X== BY ==Y==` because `=`
+    // lexes as a single-character operator and shatters the `==` markers.
+    const shattered = ["=", "=", "X", "=", "=", "BY", "=", "=", "Y", "=", "="];
+    expect(parseReplacingPairs(shattered)).toEqual([{ from: "X", to: "Y" }]);
+  });
+
+  it("also accepts pre-joined ==X== tokens (defensive — in case upstream doesn't shatter)", () => {
+    expect(parseReplacingPairs(["==X==", "BY", "==Y=="])).toEqual([{ from: "X", to: "Y" }]);
+  });
+
+  it("parses multi-pair form X BY Y Z BY W", () => {
+    expect(parseReplacingPairs(["X", "BY", "Y", "Z", "BY", "W"])).toEqual([
+      { from: "X", to: "Y" },
+      { from: "Z", to: "W" },
+    ]);
+  });
+
+  it("drops pairs whose tokens aren't valid identifiers (shattered pseudo-text)", () => {
+    // Lexer-shattered tokens that aren't legal COBOL identifiers must not
+    // produce substitutions — Phase A treats them as unrecognized and falls
+    // through to host-var-unresolved.
+    expect(parseReplacingPairs(["=", "BY", "="])).toEqual([]);
+    expect(parseReplacingPairs([":T", "BY", "WS"])).toEqual([]); // fragment prefix
+  });
+
+  it("returns empty array when REPLACING token list lacks BY entirely", () => {
+    expect(parseReplacingPairs(["X", "Y"])).toEqual([]);
+    expect(parseReplacingPairs([])).toEqual([]);
+  });
+});
 
 function model(source: string, filename: string) {
   return extractModel(parse(source, filename));
@@ -699,6 +736,185 @@ describe("buildDb2TableLineage", () => {
     expect(unresolved?.rationale).not.toContain("REPLACING");
     // … but the typo and missing-copybook breadcrumbs should still be there.
     expect(unresolved?.rationale).toContain("typos");
+  });
+
+  describe("REPLACING-aware host-var resolution (#37 Phase A)", () => {
+    const customerCopybook = `
+       01  CUSTOMER-REC.
+           05  CUSTOMER-ID       PIC X(10).
+           05  CUSTOMER-NAME     PIC X(30).
+`;
+
+    function writerWithCopy(copyDirective: string, hostVar: string): string {
+      return `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           ${copyDirective}
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (ID) VALUES (:${hostVar}) END-EXEC.
+           STOP RUN.
+`;
+    }
+
+    const reader = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. READER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-ID              PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL SELECT ID INTO :WS-ID FROM CUSTOMERS END-EXEC.
+           STOP RUN.
+`;
+
+    it("resolves single-token REPLACING (CUSTOMER-ID BY CLIENT-ID)", () => {
+      const writer = writerWithCopy(
+        "COPY CUSTOMER-REC REPLACING CUSTOMER-ID BY CLIENT-ID.",
+        "CLIENT-ID",
+      );
+      const lineage = buildDb2TableLineage([
+        model(customerCopybook, "CUSTOMER-REC.cpy"),
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      expect(lineage).not.toBeNull();
+      const entry = lineage!.entries[0]!;
+      const clientId = entry.writer.hostVars.find((hv) => hv.name === "CLIENT-ID");
+      expect(clientId?.dataItem).toBeDefined();
+      expect(clientId?.dataItem?.name).toBe("CUSTOMER-ID");
+      expect(clientId?.dataItem?.picture).toBe("X(10)");
+      expect(clientId?.dataItem?.originCopybook).toBe("CUSTOMER-REC");
+      expect(clientId?.dataItem?.replacingSubstitution).toEqual({
+        fromName: "CUSTOMER-ID",
+        toName: "CLIENT-ID",
+      });
+      // No host-var-unresolved diagnostic for CLIENT-ID after Phase A.
+      expect(
+        lineage!.diagnostics.some(
+          (d) => d.kind === "host-var-unresolved" && d.hostVar === "CLIENT-ID",
+        ),
+      ).toBe(false);
+    });
+
+    it("resolves pseudo-text REPLACING (==CUSTOMER-ID== BY ==CLIENT-ID==)", () => {
+      const writer = writerWithCopy(
+        "COPY CUSTOMER-REC REPLACING ==CUSTOMER-ID== BY ==CLIENT-ID==.",
+        "CLIENT-ID",
+      );
+      const lineage = buildDb2TableLineage([
+        model(customerCopybook, "CUSTOMER-REC.cpy"),
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const entry = lineage!.entries[0]!;
+      const clientId = entry.writer.hostVars.find((hv) => hv.name === "CLIENT-ID");
+      expect(clientId?.dataItem?.name).toBe("CUSTOMER-ID");
+      expect(clientId?.dataItem?.replacingSubstitution?.fromName).toBe("CUSTOMER-ID");
+    });
+
+    it("resolves multi-pair REPLACING (two pairs in one COPY)", () => {
+      const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY CUSTOMER-REC REPLACING CUSTOMER-ID BY CLIENT-ID
+                                       CUSTOMER-NAME BY CLIENT-NAME.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (ID, NAME)
+              VALUES (:CLIENT-ID, :CLIENT-NAME) END-EXEC.
+           STOP RUN.
+`;
+      const lineage = buildDb2TableLineage([
+        model(customerCopybook, "CUSTOMER-REC.cpy"),
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const writerVars = lineage!.entries[0]!.writer.hostVars;
+      const clientId = writerVars.find((hv) => hv.name === "CLIENT-ID");
+      const clientName = writerVars.find((hv) => hv.name === "CLIENT-NAME");
+      expect(clientId?.dataItem?.name).toBe("CUSTOMER-ID");
+      expect(clientName?.dataItem?.name).toBe("CUSTOMER-NAME");
+      expect(clientId?.dataItem?.replacingSubstitution?.fromName).toBe("CUSTOMER-ID");
+      expect(clientName?.dataItem?.replacingSubstitution?.fromName).toBe("CUSTOMER-NAME");
+    });
+
+    it("falls through to host-var-unresolved when the SQL name doesn't match any REPLACING target", () => {
+      // REPLACING is present (CUSTOMER-ID BY CLIENT-ID) but the SQL
+      // references a third name — neither a copybook field nor a `to`
+      // value. Phase A must not promote this to "resolved".
+      const writer = writerWithCopy(
+        "COPY CUSTOMER-REC REPLACING CUSTOMER-ID BY CLIENT-ID.",
+        "STRAY-NAME",
+      );
+      const lineage = buildDb2TableLineage([
+        model(customerCopybook, "CUSTOMER-REC.cpy"),
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const entry = lineage!.entries[0]!;
+      const stray = entry.writer.hostVars.find((hv) => hv.name === "STRAY-NAME");
+      expect(stray?.dataItem).toBeUndefined();
+      expect(
+        lineage!.diagnostics.some(
+          (d) => d.kind === "host-var-unresolved" && d.hostVar === "STRAY-NAME",
+        ),
+      ).toBe(true);
+    });
+
+    it("does not attach replacingSubstitution when resolution succeeded via direct copybook lookup", () => {
+      // SQL references a name that's actually in the copybook — Phase A
+      // fallback must not run. replacingSubstitution stays undefined.
+      const writer = writerWithCopy(
+        "COPY CUSTOMER-REC REPLACING CUSTOMER-ID BY CLIENT-ID.",
+        "CUSTOMER-NAME",
+      );
+      const lineage = buildDb2TableLineage([
+        model(customerCopybook, "CUSTOMER-REC.cpy"),
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const entry = lineage!.entries[0]!;
+      const custName = entry.writer.hostVars.find((hv) => hv.name === "CUSTOMER-NAME");
+      expect(custName?.dataItem?.name).toBe("CUSTOMER-NAME");
+      expect(custName?.dataItem?.replacingSubstitution).toBeUndefined();
+    });
+
+    it("inline WS declaration shadows REPLACING substitution (precedence preserved)", () => {
+      // Program has BOTH a REPLACING that would resolve CLIENT-ID and
+      // an inline WS declaration of CLIENT-ID. Inline must win — same
+      // precedence rule the rest of the resolver uses.
+      const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  CLIENT-ID            PIC X(99).
+           COPY CUSTOMER-REC REPLACING CUSTOMER-ID BY CLIENT-ID.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (ID) VALUES (:CLIENT-ID) END-EXEC.
+           STOP RUN.
+`;
+      const lineage = buildDb2TableLineage([
+        model(customerCopybook, "CUSTOMER-REC.cpy"),
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const clientId = lineage!.entries[0]!.writer.hostVars.find((hv) => hv.name === "CLIENT-ID");
+      expect(clientId?.dataItem?.picture).toBe("X(99)"); // inline WS, not the copybook
+      expect(clientId?.dataItem?.replacingSubstitution).toBeUndefined();
+      expect(clientId?.dataItem?.originCopybook).toBeUndefined();
+    });
   });
 
   it("originCopybook is deterministic across input orders when copybooks share a logical name", () => {

@@ -460,18 +460,27 @@ function formatInferredStructure(
  * copybook, the origin is appended as `from CUSTID` so the user can trace
  * it without grepping. Unresolved vars are tagged with `(?)` — a paired
  * `host-var-unresolved` diagnostic in the exclusions table tells the
- * user why. `<br>` separates entries so a many-host-var cell stays
- * readable in the markdown table.
+ * user why. When the field was reached via REPLACING substitution (#37
+ * Phase A), the rename trail (`from CUSTOMER-ID via REPLACING`) appears so
+ * a reviewer sees why the SQL name and copybook name disagree. `<br>`
+ * separates entries so a many-host-var cell stays readable.
  */
 function formatHostVars(hostVars: HostVarRef[]): string {
   if (hostVars.length === 0) return "—";
   return hostVars.map((hv) => {
     if (!hv.dataItem) return `\`${hv.name}\` (?)`;
     const shape = hv.dataItem.picture ?? "group";
-    const origin = hv.dataItem.originCopybook
-      ? ` from \`${hv.dataItem.originCopybook}\``
-      : "";
-    return `\`${hv.name}\` (${shape}${origin})`;
+    // Substitution wins over plain origin: the user needs to see the rename
+    // pair first, then the copybook. A field reached via REPLACING always
+    // has originCopybook set (the substitution is per-COPY), so we read both
+    // out of the same HostVarRef.
+    let trail = "";
+    if (hv.dataItem.replacingSubstitution) {
+      trail = ` from \`${hv.dataItem.replacingSubstitution.fromName}\` via REPLACING in \`${hv.dataItem.originCopybook}\``;
+    } else if (hv.dataItem.originCopybook) {
+      trail = ` from \`${hv.dataItem.originCopybook}\``;
+    }
+    return `\`${hv.name}\` (${shape}${trail})`;
   }).join("<br>");
 }
 

@@ -72,6 +72,16 @@ export interface HostVarDataItemRef {
    * unresolved, absence = "this field doesn't trace back to a copybook".
    */
   originCopybook?: string;
+  /**
+   * Present when the field was reached only after applying a
+   * `COPY ... REPLACING` substitution (#37 Phase A): the SQL block
+   * referenced `toName`, but no data item by that name existed; we
+   * matched `toName` against a `BY` target in the program's REPLACING
+   * pair list, looked up `fromName` in the copybook, and that succeeded.
+   * Lets the renderer surface the rename trail so a reviewer can see
+   * why a host var maps to an unexpected field name.
+   */
+  replacingSubstitution?: { fromName: string; toName: string };
 }
 
 /**
@@ -170,6 +180,53 @@ interface ResolvedHostVar {
   dataItem: DataItemNode;
   /** Set when the field was found in a copybook the program COPYs. */
   originCopybook?: string;
+  /** Set when the lookup succeeded only via REPLACING fallback (#37 Phase A). */
+  replacingSubstitution?: { fromName: string; toName: string };
+}
+
+/**
+ * Parse the parser's raw `replacing` token array into structured `{ from, to }`
+ * substitution pairs (#37 Phase A).
+ *
+ * The parser records `replacing` as the whitespace-tokenized slice of rawText
+ * that follows `REPLACING`. The COBOL lexer treats `=` as a single-character
+ * operator, so pseudo-text `==X==` arrives **shattered** as individual `=`
+ * tokens around the identifier. Three surface forms this function handles:
+ *
+ *   - Single-token:    `["X", "BY", "Y"]`                                 → 1 pair
+ *   - Pseudo-text:     `["=","=","X","=","=","BY","=","=","Y","=","="]`   → 1 pair
+ *   - Multi-pair:      `["X","BY","Y","Z","BY","W"]`                      → 2 pairs
+ *
+ * Algorithm: drop standalone `=` tokens (the shattered pseudo-text markers),
+ * then walk the remainder for `ID BY ID` triplets. Identifier tokens that
+ * don't match `[A-Z][A-Z0-9-]*` (fragment substitution, partial-token
+ * substring patterns, anything we can't trust as a COBOL identifier) are
+ * dropped from the trigger set so they fall through to `host-var-unresolved`.
+ */
+export function parseReplacingPairs(tokens: readonly string[]): Array<{ from: string; to: string }> {
+  const IDENT = /^[A-Z][A-Z0-9-]*$/;
+  // Strip the lexer's shattered `=` markers; keep BY and identifier candidates.
+  // Also strip pre-shattered `==X==` if it ever arrives as one token (defensive
+  // — the COBOL lexer normally shatters, but a different upstream might not).
+  const cleaned: string[] = [];
+  for (const tok of tokens) {
+    if (tok === "=" || tok === "==") continue;
+    if (tok.startsWith("==") && tok.endsWith("==") && tok.length >= 4) {
+      cleaned.push(tok.slice(2, -2));
+    } else {
+      cleaned.push(tok);
+    }
+  }
+  const pairs: Array<{ from: string; to: string }> = [];
+  for (let i = 0; i < cleaned.length; i++) {
+    if (cleaned[i] !== "BY") continue;
+    const from = cleaned[i - 1];
+    const to = cleaned[i + 1];
+    if (!from || !to) continue;
+    if (!IDENT.test(from) || !IDENT.test(to)) continue;
+    pairs.push({ from, to });
+  }
+  return pairs;
 }
 
 /**
@@ -180,12 +237,18 @@ interface ResolvedHostVar {
  *   3. Any copybook the program COPYs (the parser does NOT inline-expand
  *      COPY, so copybook fields aren't in `program.dataItems` even though
  *      they're visible to SQL)
+ *   4. (#37 Phase A) REPLACING-aware fallback: for each copy carrying a
+ *      `REPLACING` pair list, look up `from` in the copybook for any pair
+ *      whose `to` equals the requested name. Catches the common case where
+ *      the SQL references the substituted name but the copybook still
+ *      contains the original.
  *
  * Inline (#1) takes precedence over a copybook field of the same name —
  * the program's own declaration shadows what's COPY'd in. Returns the
- * matching data item plus, when found via #3, the canonical (uppercased)
- * copybook name as the lexer captured it. COPY REPLACING-aware lookup is
- * not yet implemented: a renamed field still surfaces as unresolved.
+ * matching data item plus, when found via #3 or #4, the canonical
+ * (uppercased) copybook name as the lexer captured it. Step #4 also
+ * attaches `replacingSubstitution` so the renderer can show the rename
+ * trail.
  */
 function resolveHostVar(
   program: CobolCodeModel,
@@ -204,12 +267,36 @@ function resolveHostVar(
       if (item) return { dataItem: item, originCopybook: copy.copybook };
     }
   }
+  // #37 Phase A — REPLACING-aware fallback. Only entered when every direct
+  // lookup above failed; programs without REPLACING never run this loop
+  // (`replacing` is undefined and skipped). For each pair whose `to` matches
+  // the host-var name we couldn't find, look up `from` in the corresponding
+  // copybook. First match wins — the same ordering as the direct path.
+  const upperName = name.toUpperCase();
+  for (const copy of program.copies) {
+    if (!copy.replacing || copy.replacing.length === 0) continue;
+    const pairs = parseReplacingPairs(copy.replacing);
+    const match = pairs.find((p) => p.to === upperName);
+    if (!match) continue;
+    const copybooks = copybooksByLogicalName.get(normalizeCopybookName(copy.copybook));
+    if (!copybooks) continue;
+    for (const cpy of copybooks) {
+      const item = findDataItemByName(cpy.dataItems, match.from);
+      if (item) {
+        return {
+          dataItem: item,
+          originCopybook: copy.copybook,
+          replacingSubstitution: { fromName: match.from, toName: upperName },
+        };
+      }
+    }
+  }
   return undefined;
 }
 
 function toHostVarRef(name: string, resolved: ResolvedHostVar | undefined): HostVarRef {
   if (!resolved) return { name };
-  const { dataItem, originCopybook } = resolved;
+  const { dataItem, originCopybook, replacingSubstitution } = resolved;
   return {
     name,
     dataItem: {
@@ -218,6 +305,7 @@ function toHostVarRef(name: string, resolved: ResolvedHostVar | undefined): Host
       picture: dataItem.picture,
       usage: dataItem.usage,
       originCopybook,
+      ...(replacingSubstitution ? { replacingSubstitution } : {}),
     },
   };
 }
@@ -367,17 +455,20 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
           const dedupeKey = `${programId}|${name}`;
           if (!seenUnresolved.has(dedupeKey)) {
             seenUnresolved.add(dedupeKey);
-            // Mention REPLACING only when the program actually uses
-            // `COPY ... REPLACING` somewhere — the resolver doesn't apply
-            // the substitution, so a renamed field surfaces as unresolved
-            // and the user needs the breadcrumb. Now that the parser
-            // populates `c.replacing` correctly (#21), this gate is
-            // accurate per-program (was: heuristic on `copies.length > 0`).
+            // Surface REPLACING as a possible cause only when the program
+            // uses it AND the resolver couldn't apply its Phase A fallback.
+            // After #37 Phase A, single-token and pseudo-text REPLACING
+            // pairs ARE applied — what falls through to this diagnostic
+            // are shapes Phase A can't structure (fragment substitution
+            // like `==:T== BY ==WS==`, or pseudo-text shattered across
+            // whitespace by the lexer). Wording reflects the narrower
+            // remaining gap so the hint stays useful instead of vestigial.
             const replacingClause = program.copies.some(
               (c) => c.replacing && c.replacing.length > 0,
             )
-              ? ` \`COPY ... REPLACING\` renames are not yet applied during `
-                + `resolution and may also surface here.`
+              ? ` Single-token and pseudo-text \`COPY ... REPLACING\` pairs `
+                + `are applied during resolution; partial-token or fragment `
+                + `substitutions are not, and may also surface here.`
               : "";
             diagnostics.push({
               kind: "host-var-unresolved",

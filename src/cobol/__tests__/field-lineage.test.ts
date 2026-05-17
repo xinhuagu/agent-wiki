@@ -820,6 +820,228 @@ describe("COBOL field lineage", () => {
     });
   });
 
+  describe("Semantic-Inferred tier (#35)", () => {
+    // Renamed scalar at depth 3 with matching parent path + 2 shared siblings.
+    // The depth is important: at depth ≤ 2, parentContextMatch collapses to
+    // "top-level" and gate 3 rejects the pair.
+    const customerNested = `
+       01  CUSTOMER-REC.
+           05  ADDRESS.
+               10  CUSTOMER-ID  PIC X(10) USAGE DISPLAY.
+               10  STREET       PIC X(30) USAGE DISPLAY.
+               10  ZIP          PIC X(5)  USAGE DISPLAY.
+`;
+    const clientNested = `
+       01  CLIENT-REC.
+           05  ADDRESS.
+               10  CUST-ID      PIC X(10) USAGE DISPLAY.
+               10  STREET       PIC X(30) USAGE DISPLAY.
+               10  ZIP          PIC X(5)  USAGE DISPLAY.
+`;
+
+    it("emits a semantic entry for a renamed scalar under matching parent + ≥2 siblings", () => {
+      const lineage = buildFieldLineage([
+        model(customerNested, "CUSTOMER-REC.cpy"),
+        model(clientNested, "CLIENT-REC.cpy"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
+      ]);
+      expect(lineage).not.toBeNull();
+      expect(lineage!.inferredSemantic).toHaveLength(1);
+      const entry = lineage!.inferredSemantic[0]!;
+      expect(entry.confidence).toBe("semantic");
+      const leftLeaf = entry.left.qualifiedName.split(".").pop();
+      const rightLeaf = entry.right.qualifiedName.split(".").pop();
+      expect([leftLeaf, rightLeaf].sort()).toEqual(["CUST-ID", "CUSTOMER-ID"]);
+      expect(entry.evidence.qualifiedNameMatch).toBe("renamed");
+      expect(entry.evidence.parentContextMatch).toBe("exact");
+      expect(entry.evidence.siblingOverlap.length).toBeGreaterThanOrEqual(2);
+      expect(entry.rationale).toContain("Renamed field");
+      expect(lineage!.summary.inferred.semantic).toBe(1);
+    });
+
+    it("Gate 4: drops the pair when shared siblings < 2", () => {
+      const customerThin = `
+       01  CUSTOMER-REC.
+           05  ADDRESS.
+               10  CUSTOMER-ID  PIC X(10) USAGE DISPLAY.
+               10  STREET       PIC X(30) USAGE DISPLAY.
+`;
+      const clientThin = `
+       01  CLIENT-REC.
+           05  ADDRESS.
+               10  CUST-ID      PIC X(10) USAGE DISPLAY.
+               10  STREET       PIC X(30) USAGE DISPLAY.
+`;
+      const lineage = buildFieldLineage([
+        model(customerThin, "CUSTOMER-REC.cpy"),
+        model(clientThin, "CLIENT-REC.cpy"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
+      ]);
+      // STREET name-matches and emits as high-confidence inferred, so the
+      // lineage is non-null; the *semantic* tier specifically must be empty.
+      expect(lineage).not.toBeNull();
+      expect(lineage!.inferredSemantic).toHaveLength(0);
+      expect(lineage!.summary.inferred.semantic).toBe(0);
+    });
+
+    it("Gate 2: drops the pair when USAGE is missing on either side", () => {
+      const customerNoUsage = `
+       01  CUSTOMER-REC.
+           05  ADDRESS.
+               10  CUSTOMER-ID  PIC X(10).
+               10  STREET       PIC X(30).
+               10  ZIP          PIC X(5).
+`;
+      const clientNoUsage = `
+       01  CLIENT-REC.
+           05  ADDRESS.
+               10  CUST-ID      PIC X(10).
+               10  STREET       PIC X(30).
+               10  ZIP          PIC X(5).
+`;
+      const lineage = buildFieldLineage([
+        model(customerNoUsage, "CUSTOMER-REC.cpy"),
+        model(clientNoUsage, "CLIENT-REC.cpy"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
+      ]);
+      expect(lineage).not.toBeNull();
+      expect(lineage!.inferredSemantic).toHaveLength(0);
+    });
+
+    it("Gate 3: drops the pair when parent context collapses to top-level", () => {
+      // Depth 2 fields → parent suffix is empty on both sides → "top-level".
+      const customerTopLevel = `
+       01  CUSTOMER-REC.
+           05  CUSTOMER-ID  PIC X(10) USAGE DISPLAY.
+           05  STREET       PIC X(30) USAGE DISPLAY.
+           05  ZIP          PIC X(5)  USAGE DISPLAY.
+`;
+      const clientTopLevel = `
+       01  CLIENT-REC.
+           05  CUST-ID      PIC X(10) USAGE DISPLAY.
+           05  STREET       PIC X(30) USAGE DISPLAY.
+           05  ZIP          PIC X(5)  USAGE DISPLAY.
+`;
+      const lineage = buildFieldLineage([
+        model(customerTopLevel, "CUSTOMER-REC.cpy"),
+        model(clientTopLevel, "CLIENT-REC.cpy"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
+      ]);
+      expect(lineage).not.toBeNull();
+      expect(lineage!.inferredSemantic).toHaveLength(0);
+    });
+
+    it("Gate 5: drops the pair when a competing semantic match exists", () => {
+      // Three rec types with three differently-named ID fields. Each ID has
+      // two semantic candidates → every pair has competingMatches > 0 → all
+      // drop. The semantic tier never emits an ambiguous companion.
+      const partyRec = `
+       01  PARTY-REC.
+           05  ADDRESS.
+               10  CLIENT-ID    PIC X(10) USAGE DISPLAY.
+               10  STREET       PIC X(30) USAGE DISPLAY.
+               10  ZIP          PIC X(5)  USAGE DISPLAY.
+`;
+      const lineage = buildFieldLineage([
+        model(customerNested, "CUSTOMER-REC.cpy"),
+        model(clientNested, "CLIENT-REC.cpy"),
+        model(partyRec, "PARTY-REC.cpy"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
+        model(program("PROGC", "PARTY-REC"), "PROGC.cbl"),
+      ]);
+      expect(lineage).not.toBeNull();
+      expect(lineage!.inferredSemantic).toHaveLength(0);
+    });
+
+    it("regression lock: rename-free corpus produces byte-identical name-keyed output", () => {
+      // Snapshot inferredHighConfidence / inferredAmbiguous / summary.inferred
+      // for a fixture that doesn't carry any rename pair. The new tier must
+      // be purely additive — these arrays should not shift.
+      const lineage = buildFieldLineage([
+        model(customerA, "CUSTOMER-A.cpy"),
+        model(customerB, "CUSTOMER-B.cpy"),
+        model(program("BILLINGA", "CUSTOMER-A"), "BILLINGA.cbl"),
+        model(program("BILLINGB", "CUSTOMER-B"), "BILLINGB.cbl"),
+      ]);
+      expect(lineage).not.toBeNull();
+      expect(lineage!.inferredSemantic).toEqual([]);
+      expect(lineage!.summary.inferred.semantic).toBe(0);
+      // Spot-check name-matched output hasn't shifted: CUSTOMER-ID is the
+      // canonical inferred-high case for this fixture and must still emit.
+      expect(lineage!.inferredHighConfidence.some((e) => e.fieldName === "CUSTOMER-ID")).toBe(true);
+    });
+
+    it("renderer: shows the ### Semantic-Inferred subsection only when entries exist", () => {
+      const empty = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl"),
+        model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl"),
+      ]);
+      expect(generateFieldLineagePage(empty!).content).not.toContain("### Semantic-Inferred");
+
+      const withRename = buildFieldLineage([
+        model(customerNested, "CUSTOMER-REC.cpy"),
+        model(clientNested, "CLIENT-REC.cpy"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
+      ]);
+      const page = generateFieldLineagePage(withRename!);
+      expect(page.content).toContain("### Semantic-Inferred");
+      expect(page.content).toContain("CUSTOMER-ID");
+      expect(page.content).toContain("CUST-ID");
+    });
+
+    it("renderer: Coverage Yielding cell adds the semantic suffix only when count > 0", () => {
+      const empty = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl"),
+        model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl"),
+      ]);
+      const emptyPage = generateFieldLineagePage(empty!);
+      const emptyCoverage = emptyPage.content.slice(
+        emptyPage.content.indexOf("## Coverage"),
+        emptyPage.content.indexOf("## Overview"),
+      );
+      expect(emptyCoverage).not.toContain("semantic");
+
+      const withRename = buildFieldLineage([
+        model(customerNested, "CUSTOMER-REC.cpy"),
+        model(clientNested, "CLIENT-REC.cpy"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
+      ]);
+      const renamePage = generateFieldLineagePage(withRename!);
+      const renameCoverage = renamePage.content.slice(
+        renamePage.content.indexOf("## Coverage"),
+        renamePage.content.indexOf("## Overview"),
+      );
+      expect(renameCoverage).toMatch(/\d+ deterministic, \d+ inferred, 1 semantic/);
+    });
+
+    it("normalizeLoadedFieldLineage backfills inferredSemantic + summary.inferred.semantic for pre-#35 JSON", () => {
+      const pre35 = {
+        summary: {
+          deterministic: { copybooks: 1, programs: 2, fields: 3 },
+          inferred: { copybooks: 0, programs: 0, highConfidence: 0, ambiguous: 0 },
+          diagnosticsByKind: { "parsed-zero-data-items": 0 },
+        },
+        copybookUsage: [],
+        deterministic: [],
+        inferredHighConfidence: [],
+        inferredAmbiguous: [],
+        diagnostics: [],
+      } as unknown as SerializedFieldLineage;
+      const normalized = normalizeLoadedFieldLineage(pre35);
+      expect(normalized.inferredSemantic).toEqual([]);
+      expect(normalized.summary.inferred.semantic).toBe(0);
+    });
+  });
+
   it("generates a lineage wiki summary page", () => {
     const lineage = buildFieldLineage([
       model(sharedCopybook, "CUSTOMER-REC.cpy"),

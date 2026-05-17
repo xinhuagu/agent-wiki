@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { tmpdir } from "os";
 import { Wiki } from "../../wiki.js";
@@ -591,6 +591,126 @@ describe("COBOL MCP tools integration", () => {
       writerHostVar: "CLIENT-ID",
       readerHostVar: "RD-ID",
     });
+  });
+
+  it("code_query field_lineage DB2 same-host-var constraint (#44 Codex review #3)", async () => {
+    // CUSTOMERS entry has separate host vars WR-ID (writer) and RD-NAME
+    // (reader). Pre-fix: field_name=WR-ID + qualified_name=ANY.RD-NAME
+    // matched because field_name hit one host var and qualified_name's
+    // leaf hit a different one — neither host var satisfied both filters.
+    // Fix walks host vars one at a time, requires each filter satisfy on
+    // the *same* host var.
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WR-ID              PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (ID)
+                    VALUES (:WR-ID) END-EXEC.
+           STOP RUN.
+`;
+    const reader = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. READER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  RD-NAME            PIC X(30).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL SELECT NAME INTO :RD-NAME FROM CUSTOMERS END-EXEC.
+           STOP RUN.
+`;
+    wiki.rawAdd("WRITER.cbl", { content: writer });
+    wiki.rawAdd("READER.cbl", { content: reader });
+    await handleTool(wiki, "code_parse", { path: "WRITER.cbl" });
+    await handleTool(wiki, "code_parse", { path: "READER.cbl" });
+
+    // Cross-host-var query: name from writer, qualified-leaf from reader.
+    const crossResult = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      field_name: "WR-ID",
+      qualified_name: "ANY.RD-NAME",
+    });
+    const cross = JSON.parse(crossResult as string);
+    // Pre-fix: db2Matches=1 (false positive). Post-fix: 0.
+    expect(cross.summary.db2Matches).toBe(0);
+
+    // Sanity: single-filter query still matches.
+    const singleResult = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      field_name: "WR-ID",
+    });
+    const single = JSON.parse(singleResult as string);
+    expect(single.summary.db2Matches).toBe(1);
+  });
+
+  it("code_query field_lineage tolerates DB2 entries without columnPairs field (#44 Codex review #4)", async () => {
+    // Pre-Phase-B `field-lineage.json` artifacts on disk don't have
+    // `entry.columnPairs`. The renderer already guards with `?? []`;
+    // the query path now does too. We can't easily fabricate an older
+    // on-disk artifact through code_parse (the builder always emits
+    // columnPairs now), so simulate by deleting the field on the
+    // serialized entry before re-querying through the raw artifact path.
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WR-ID              PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (ID) VALUES (:WR-ID) END-EXEC.
+           STOP RUN.
+`;
+    const reader = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. READER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  RD-ID              PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL SELECT ID INTO :RD-ID FROM CUSTOMERS END-EXEC.
+           STOP RUN.
+`;
+    wiki.rawAdd("WRITER.cbl", { content: writer });
+    wiki.rawAdd("READER.cbl", { content: reader });
+    await handleTool(wiki, "code_parse", { path: "WRITER.cbl" });
+    await handleTool(wiki, "code_parse", { path: "READER.cbl" });
+
+    // Rewrite the persisted artifact: remove `columnPairs` from each db2
+    // entry to emulate a pre-Phase-B artifact on disk. Wiki has no
+    // overwrite helper for raw files, so write through the raw dir
+    // directly.
+    const artifactPath = "parsed/cobol/field-lineage.json";
+    const rawResult = await wiki.rawRead(artifactPath);
+    expect(rawResult).not.toBeNull();
+    expect(rawResult!.content).not.toBeNull();
+    const artifact = JSON.parse(rawResult!.content!);
+    for (const entry of artifact.db2Lineage?.entries ?? []) {
+      delete entry.columnPairs;
+    }
+    writeFileSync(
+      join(wiki.config.rawDir, artifactPath),
+      JSON.stringify(artifact, null, 2),
+    );
+
+    // Should not throw. db2 entries still surface; column pairs default to empty.
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      field_name: "WR-ID",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.summary.db2Matches).toBe(1);
+    expect(parsed.summary.db2ColumnPairMatches).toBe(0);
+    expect(parsed.db2.columnPairs).toEqual([]);
   });
 
   it("code_query field_lineage with qualified_name + DB2 surfaces the leaf-fallback note (#44)", async () => {

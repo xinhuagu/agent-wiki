@@ -1150,20 +1150,26 @@ function db2EntryMatches(
   requestedFieldName?: string,
   requestedQualifiedName?: string,
 ): boolean {
+  if (!requestedFieldName && !requestedQualifiedName) return true;
+  // Same-host-var constraint (Codex review #3 on #45): both filters must
+  // satisfy on the *same* host var, not on different ones across writer
+  // and reader. The pre-fix split-check let `field_name=WR-ID +
+  // qualified_name=ANY.RD-NAME` match a CUSTOMERS entry where WR-ID
+  // and RD-NAME lived on separate host vars — a false positive
+  // mirroring the earlier semantic-side bug.
   const allHostVars = [...entry.writer.hostVars, ...entry.reader.hostVars];
-  if (requestedFieldName) {
-    const upper = requestedFieldName.toUpperCase();
-    const hit = allHostVars.some((hv) =>
-      hv.name.toUpperCase() === upper
-      || (hv.dataItem?.name.toUpperCase() === upper));
-    if (!hit) return false;
-  }
-  if (requestedQualifiedName) {
-    const leaf = leafFieldName(requestedQualifiedName).toUpperCase();
-    const hit = allHostVars.some((hv) => hv.dataItem?.name.toUpperCase() === leaf);
-    if (!hit) return false;
-  }
-  return true;
+  const fnUpper = requestedFieldName?.toUpperCase();
+  const qnLeaf = requestedQualifiedName
+    ? leafFieldName(requestedQualifiedName).toUpperCase()
+    : undefined;
+  return allHostVars.some((hv) => {
+    const dataItemName = hv.dataItem?.name.toUpperCase();
+    if (fnUpper !== undefined
+      && hv.name.toUpperCase() !== fnUpper
+      && dataItemName !== fnUpper) return false;
+    if (qnLeaf !== undefined && dataItemName !== qnLeaf) return false;
+    return true;
+  });
 }
 
 /**
@@ -1187,6 +1193,10 @@ function matchingDb2HostVarNames(
   if (!requestedFieldName && !requestedQualifiedName) {
     return new Set(allHostVars.map((hv) => hv.name));
   }
+  // Same-host-var constraint mirrors db2EntryMatches: each filter must
+  // satisfy on the same host var, otherwise the column-pair filter
+  // surface drifts wider than the entry surface and lets pairs through
+  // for host vars no one actually queried.
   const fnUpper = requestedFieldName?.toUpperCase();
   const qnLeaf = requestedQualifiedName
     ? leafFieldName(requestedQualifiedName).toUpperCase()
@@ -1194,10 +1204,11 @@ function matchingDb2HostVarNames(
   const matched = new Set<string>();
   for (const hv of allHostVars) {
     const dataItemName = hv.dataItem?.name.toUpperCase();
-    const nameMatches = fnUpper !== undefined
-      && (hv.name.toUpperCase() === fnUpper || dataItemName === fnUpper);
-    const qualMatches = qnLeaf !== undefined && dataItemName === qnLeaf;
-    if (nameMatches || qualMatches) matched.add(hv.name);
+    if (fnUpper !== undefined
+      && hv.name.toUpperCase() !== fnUpper
+      && dataItemName !== fnUpper) continue;
+    if (qnLeaf !== undefined && dataItemName !== qnLeaf) continue;
+    matched.add(hv.name);
   }
   return matched;
 }
@@ -1263,7 +1274,11 @@ function buildFieldLineageResponse(
   // the entry-level match.
   const db2ColumnPairs = db2.flatMap((entry) => {
     const matchingNames = matchingDb2HostVarNames(entry, fieldName, qualifiedName);
-    return entry.columnPairs
+    // `?? []` guards pre-Phase-B artifacts on disk (Codex review #4 on
+    // #45): older `field-lineage.json` files have DB2 entries without a
+    // `columnPairs` field. The renderer already defaults it; the query
+    // path must too, otherwise `.filter(...)` throws a TypeError.
+    return (entry.columnPairs ?? [])
       .filter((pair) =>
         matchingNames.has(pair.writerHostVar) || matchingNames.has(pair.readerHostVar))
       .map((pair) => ({

@@ -843,8 +843,8 @@ describe("COBOL field lineage", () => {
       const lineage = buildFieldLineage([
         model(customerNested, "CUSTOMER-REC.cpy"),
         model(clientNested, "CLIENT-REC.cpy"),
-        model(program("PROG_A", "CUSTOMER-REC"), "PROG_A.cbl"),
-        model(program("PROG_B", "CLIENT-REC"), "PROG_B.cbl"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
       ]);
       expect(lineage).not.toBeNull();
       expect(lineage!.inferredSemantic).toHaveLength(1);
@@ -876,8 +876,8 @@ describe("COBOL field lineage", () => {
       const lineage = buildFieldLineage([
         model(customerThin, "CUSTOMER-REC.cpy"),
         model(clientThin, "CLIENT-REC.cpy"),
-        model(program("PROG_A", "CUSTOMER-REC"), "PROG_A.cbl"),
-        model(program("PROG_B", "CLIENT-REC"), "PROG_B.cbl"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
       ]);
       // STREET name-matches and emits as high-confidence inferred, so the
       // lineage is non-null; the *semantic* tier specifically must be empty.
@@ -904,8 +904,8 @@ describe("COBOL field lineage", () => {
       const lineage = buildFieldLineage([
         model(customerNoUsage, "CUSTOMER-REC.cpy"),
         model(clientNoUsage, "CLIENT-REC.cpy"),
-        model(program("PROG_A", "CUSTOMER-REC"), "PROG_A.cbl"),
-        model(program("PROG_B", "CLIENT-REC"), "PROG_B.cbl"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
       ]);
       expect(lineage).not.toBeNull();
       expect(lineage!.inferredSemantic).toHaveLength(0);
@@ -928,8 +928,8 @@ describe("COBOL field lineage", () => {
       const lineage = buildFieldLineage([
         model(customerTopLevel, "CUSTOMER-REC.cpy"),
         model(clientTopLevel, "CLIENT-REC.cpy"),
-        model(program("PROG_A", "CUSTOMER-REC"), "PROG_A.cbl"),
-        model(program("PROG_B", "CLIENT-REC"), "PROG_B.cbl"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
       ]);
       expect(lineage).not.toBeNull();
       expect(lineage!.inferredSemantic).toHaveLength(0);
@@ -950,9 +950,9 @@ describe("COBOL field lineage", () => {
         model(customerNested, "CUSTOMER-REC.cpy"),
         model(clientNested, "CLIENT-REC.cpy"),
         model(partyRec, "PARTY-REC.cpy"),
-        model(program("PROG_A", "CUSTOMER-REC"), "PROG_A.cbl"),
-        model(program("PROG_B", "CLIENT-REC"), "PROG_B.cbl"),
-        model(program("PROG_C", "PARTY-REC"), "PROG_C.cbl"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
+        model(program("PROGC", "PARTY-REC"), "PROGC.cbl"),
       ]);
       expect(lineage).not.toBeNull();
       expect(lineage!.inferredSemantic).toHaveLength(0);
@@ -987,8 +987,8 @@ describe("COBOL field lineage", () => {
       const withRename = buildFieldLineage([
         model(customerNested, "CUSTOMER-REC.cpy"),
         model(clientNested, "CLIENT-REC.cpy"),
-        model(program("PROG_A", "CUSTOMER-REC"), "PROG_A.cbl"),
-        model(program("PROG_B", "CLIENT-REC"), "PROG_B.cbl"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
       ]);
       const page = generateFieldLineagePage(withRename!);
       expect(page.content).toContain("### Semantic-Inferred");
@@ -1012,8 +1012,8 @@ describe("COBOL field lineage", () => {
       const withRename = buildFieldLineage([
         model(customerNested, "CUSTOMER-REC.cpy"),
         model(clientNested, "CLIENT-REC.cpy"),
-        model(program("PROG_A", "CUSTOMER-REC"), "PROG_A.cbl"),
-        model(program("PROG_B", "CLIENT-REC"), "PROG_B.cbl"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CLIENT-REC"), "PROGB.cbl"),
       ]);
       const renamePage = generateFieldLineagePage(withRename!);
       const renameCoverage = renamePage.content.slice(

@@ -776,6 +776,8 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
   lines.push("---");
   lines.push("");
 
+  renderCoverageSection(lines, lineage, callBound, db2);
+
   const overviewHasCopybook = lineage.copybookUsage.length > 0
     || lineage.deterministic.length > 0
     || lineage.inferredHighConfidence.length > 0
@@ -1095,6 +1097,95 @@ function renderDb2Exclusions(
     if (known.has(kind)) continue;
     renderRow(kind, count, sample);
   }
+  lines.push("");
+}
+
+/**
+ * Compact "top N excluded reasons" for a coverage-row cell. Kinds with
+ * zero counts are dropped first so the cell never renders a noise entry
+ * like `0 system-call`. Sort is count desc, kind asc on tie — pinning the
+ * tie-break gives byte-stable output across rebuilds when two kinds have
+ * the same count.
+ */
+function topExclusionReasons(byKind: Record<string, number>, limit = 2): string {
+  const ranked = Object.entries(byKind)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (ranked.length === 0) return "—";
+  return ranked.slice(0, limit).map(([kind, count]) => `${count} ${kind}`).join(", ");
+}
+
+/**
+ * Coverage gauge rendered at the top of `field-lineage.md`. Three rows —
+ * Copybook / Call boundary / DB2 — each showing what was indexed, what
+ * yielded lineage, and the top excluded reasons. Empty families omit their
+ * row. All counts derive from existing summary fields on the artifact; no
+ * new aggregation logic.
+ */
+function renderCoverageSection(
+  lines: string[],
+  lineage: SerializedFieldLineage,
+  callBound: CallBoundLineage | null,
+  db2: Db2Lineage | null,
+): void {
+  // Pre-#30 in-memory shapes may lack diagnosticsByKind; declaring as
+  // Record<string, number> means the `?? 0` reads on known keys are
+  // defensible even if the field is absent.
+  const copybookDiagByKind: Record<string, number> = lineage.summary.diagnosticsByKind ?? {};
+  const zeroDataItemsCount = copybookDiagByKind["parsed-zero-data-items"] ?? 0;
+  const copybookHasContent = lineage.copybookUsage.length > 0
+    || lineage.deterministic.length > 0
+    || lineage.inferredHighConfidence.length > 0
+    || lineage.inferredAmbiguous.length > 0
+    || zeroDataItemsCount > 0;
+
+  const rows: string[] = [];
+  if (copybookHasContent) {
+    // Indexed = universe of copybooks observed = participating (yielded
+    // lineage) + zero-data-items drops. Single-consumer / REPLACING-only
+    // copybooks aren't currently tracked as diagnostics so they don't
+    // appear; once added, sum their counter in here.
+    const indexed = lineage.copybookUsage.length + zeroDataItemsCount;
+    const yielding = `${lineage.summary.deterministic.copybooks} deterministic, ${lineage.summary.inferred.copybooks} inferred`;
+    rows.push(
+      `| Copybook | ${indexed} | ${yielding} | ${topExclusionReasons(copybookDiagByKind)} |`,
+    );
+  }
+  if (callBound) {
+    // Indexed = total CALL ... USING sites attempted = resolved sites
+    // (`summary.callSites`) + per-site drops. shape-mismatch and
+    // caller-arg-not-top-level are per-arg drops *within* a resolved
+    // site, so they don't add to the site total.
+    const cbd = callBound.summary.diagnosticsByKind;
+    const siteDropped =
+      cbd["unresolved-callee"]
+      + cbd["dynamic-call"]
+      + cbd["arity-mismatch"]
+      + cbd["system-call"];
+    const totalSites = callBound.summary.callSites + siteDropped;
+    rows.push(
+      `| Call boundary | ${totalSites} call site(s) | ${callBound.summary.pairs} pair(s) | ${topExclusionReasons(callBound.summary.diagnosticsByKind)} |`,
+    );
+  }
+  if (db2) {
+    // Indexed = all distinct DB2 tables touched by ≥1 program =
+    // sharedTables (had both writer and reader) + writer-only +
+    // reader-only. non-classifiable-op is per-reference, not per-table,
+    // and self-loop is per-pair within a shared table — neither adds to
+    // the table total.
+    const dbd = db2.summary.diagnosticsByKind;
+    const totalTables = db2.summary.sharedTables + dbd["writer-only"] + dbd["reader-only"];
+    rows.push(
+      `| DB2 | ${totalTables} table(s) | ${db2.summary.pairs} writer→reader pair(s) | ${topExclusionReasons(db2.summary.diagnosticsByKind)} |`,
+    );
+  }
+  if (rows.length === 0) return;
+
+  lines.push("## Coverage");
+  lines.push("");
+  lines.push("| Family | Indexed | Yielding lineage | Excluded (top reasons) |");
+  lines.push("|--------|---------|------------------|------------------------|");
+  lines.push(...rows);
   lines.push("");
 }
 

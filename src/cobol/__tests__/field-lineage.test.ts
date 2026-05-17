@@ -10,6 +10,7 @@ import {
   type SerializedFieldLineage,
 } from "../field-lineage.js";
 import { buildCallBoundLineage } from "../call-boundary-lineage.js";
+import { buildDb2TableLineage } from "../db2-table-lineage.js";
 
 function model(source: string, filename: string) {
   return extractModel(parse(source, filename));
@@ -627,6 +628,196 @@ describe("COBOL field lineage", () => {
     expect(normalized.diagnostics).toEqual([]);
     expect(normalized.summary.diagnosticsByKind).toEqual({ "parsed-zero-data-items": 0 });
     expect(normalized.summary.deterministic.fields).toBe(3);
+  });
+
+  describe("Coverage section (#31)", () => {
+    it("renders ## Coverage as the first section after the frontmatter", () => {
+      const lineage = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl"),
+        model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl"),
+      ]);
+      const page = generateFieldLineagePage(lineage!);
+      const frontmatterEnd = page.content.indexOf("---", page.content.indexOf("---") + 3) + 3;
+      const coverageAt = page.content.indexOf("## Coverage");
+      const overviewAt = page.content.indexOf("## Overview");
+      expect(coverageAt).toBeGreaterThan(frontmatterEnd);
+      expect(coverageAt).toBeLessThan(overviewAt);
+      expect(page.content).toContain("| Family | Indexed | Yielding lineage | Excluded (top reasons) |");
+    });
+
+    it("renders only the Copybook row when callBound and db2 are absent", () => {
+      const lineage = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl"),
+        model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl"),
+      ]);
+      const page = generateFieldLineagePage(lineage!);
+      expect(page.content).toContain("| Copybook |");
+      expect(page.content).not.toContain("| Call boundary |");
+      expect(page.content).not.toContain("| DB2 |");
+    });
+
+    it("renders Call boundary and DB2 rows when those sections are present", () => {
+      const callerSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-REC.
+           05  WS-FIELD-A      PIC X(5).
+           05  WS-OTHER        PIC X(5).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "CALLEE" USING WS-REC.
+           STOP RUN.
+`;
+      const calleeSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-REC.
+           05  LK-FIELD-A      PIC X(5).
+           05  LK-OTHER        PIC X(5).
+       PROCEDURE DIVISION USING LK-REC.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+      const writerSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-ID              PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (ID) VALUES (:WS-ID) END-EXEC.
+           STOP RUN.
+`;
+      const readerSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. READER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-ID              PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL SELECT ID INTO :WS-ID FROM CUSTOMERS END-EXEC.
+           STOP RUN.
+`;
+      const models = [
+        model(callerSrc, "CALLER.cbl"),
+        model(calleeSrc, "CALLEE.cbl"),
+        model(writerSrc, "WRITER.cbl"),
+        model(readerSrc, "READER.cbl"),
+      ];
+      const callBound = buildCallBoundLineage(models);
+      const db2 = buildDb2TableLineage(models);
+      const lineage = combineFieldLineage(null, { callBound, db2 });
+      expect(lineage).not.toBeNull();
+      const page = generateFieldLineagePage(lineage!);
+      expect(page.content).toContain("## Coverage");
+      expect(page.content).not.toContain("| Copybook |");
+      expect(page.content).toMatch(/\| Call boundary \| \d+ call site\(s\) \| \d+ pair\(s\) \|/);
+      expect(page.content).toMatch(/\| DB2 \| \d+ table\(s\) \| \d+ writer→reader pair\(s\) \|/);
+    });
+
+    it("Excluded column lists top-2 reasons (count desc, kind asc tiebreak) and — when none", () => {
+      // Call boundary with three diagnostic kinds at known counts.
+      // Construct two unresolved-callee, two dynamic-call, one arity-mismatch.
+      // Expected order in cell: 2 dynamic-call (kind asc on tie), 2 unresolved-callee.
+      const callerSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-A              PIC X(5).
+       01  WS-B              PIC X(5).
+       01  WS-CALLEE         PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "MISSING1" USING WS-A.
+           CALL "MISSING2" USING WS-A.
+           CALL WS-CALLEE USING WS-A.
+           CALL WS-CALLEE USING WS-A.
+           CALL "CALLEE" USING WS-A WS-B.
+           STOP RUN.
+`;
+      const calleeSrc = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-A              PIC X(5).
+       PROCEDURE DIVISION USING LK-A.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+      const callBound = buildCallBoundLineage([
+        model(callerSrc, "CALLER.cbl"),
+        model(calleeSrc, "CALLEE.cbl"),
+      ]);
+      expect(callBound).not.toBeNull();
+      expect(callBound!.summary.diagnosticsByKind["unresolved-callee"]).toBe(2);
+      expect(callBound!.summary.diagnosticsByKind["dynamic-call"]).toBe(2);
+      expect(callBound!.summary.diagnosticsByKind["arity-mismatch"]).toBe(1);
+
+      const lineage = combineFieldLineage(null, { callBound });
+      const page = generateFieldLineagePage(lineage!);
+
+      // Find the Call boundary row inside the Coverage table.
+      const coverageStart = page.content.indexOf("## Coverage");
+      const overviewStart = page.content.indexOf("## Overview");
+      const coverageBlock = page.content.slice(
+        coverageStart,
+        overviewStart > 0 ? overviewStart : page.content.length,
+      );
+      // dynamic-call sorts before unresolved-callee alphabetically; both have
+      // count 2 so tiebreak is alphabetical asc. arity-mismatch (count 1) drops.
+      expect(coverageBlock).toContain("2 dynamic-call, 2 unresolved-callee");
+      expect(coverageBlock).not.toContain("arity-mismatch");
+      // All 5 CALLs failed at the site gate, so callSites=0, pairs=0,
+      // siteDropped=5 → Indexed = 5 call sites.
+      expect(coverageBlock).toMatch(/\| Call boundary \| 5 call site\(s\) \| 0 pair\(s\) \|/);
+    });
+
+    it("renders — in the Excluded column when a family has no diagnostics", () => {
+      // Clean copybook lineage, no parsed-zero-data-items diagnostics.
+      const lineage = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl"),
+        model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl"),
+      ]);
+      const page = generateFieldLineagePage(lineage!);
+      const coverageStart = page.content.indexOf("## Coverage");
+      const overviewStart = page.content.indexOf("## Overview");
+      const coverageBlock = page.content.slice(coverageStart, overviewStart);
+      expect(coverageBlock).toMatch(/\| Copybook \|[^|]+\|[^|]+\| — \|/);
+    });
+
+    it("reflects parsed-zero-data-items in the Copybook row's Excluded cell (#30 + #31)", () => {
+      const emptyCopybook = "      *> placeholder\n";
+      const lineage = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(emptyCopybook, "EMPTY.cpy"),
+        model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl"),
+        model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl"),
+      ]);
+      const page = generateFieldLineagePage(lineage!);
+      const coverageStart = page.content.indexOf("## Coverage");
+      const overviewStart = page.content.indexOf("## Overview");
+      const coverageBlock = page.content.slice(coverageStart, overviewStart);
+      expect(coverageBlock).toContain("1 parsed-zero-data-items");
+      // Indexed math: 1 participating copybook + 1 zero-data = 2 total.
+      expect(coverageBlock).toMatch(/\| Copybook \| 2 \| 1 deterministic, 0 inferred \|/);
+    });
   });
 
   it("generates a lineage wiki summary page", () => {

@@ -5,7 +5,18 @@ import type { CallBoundLineage, SerializedCallBoundLineageEntry } from "./call-b
 import type { Db2Lineage, HostVarRef } from "./db2-table-lineage.js";
 
 export type LineageLinkage = "deterministic";
-export type InferredLineageConfidence = "high" | "ambiguous";
+/**
+ * Confidence tier for cross-copybook inferred lineage.
+ *
+ *   - `high` / `ambiguous`: emitted by the name-keyed matcher. Pairs share
+ *     a field name (after stripping a short prefix) plus PIC, USAGE, level,
+ *     and parent context.
+ *   - `semantic` (#35): emitted by the shape-keyed matcher with no name
+ *     alignment at all. Pairs share `(PIC, USAGE, level)` plus an exact
+ *     parent path plus ≥2 sibling overlap. Always the weakest inferred
+ *     surface — review one-by-one before trusting.
+ */
+export type InferredLineageConfidence = "high" | "ambiguous" | "semantic";
 
 /**
  * Reasons a parsed COBOL model was flagged at lineage-build time. Distinct from
@@ -48,7 +59,12 @@ export interface SerializedInferredFieldEvidence {
   pictureMatch: boolean;
   usageEvidence: "explicit-match" | "both-missing";
   levelMatch: boolean;
-  qualifiedNameMatch: "exact";
+  /**
+   * `"exact"` for name-keyed matcher entries (high / ambiguous), `"renamed"`
+   * for the shape-keyed semantic tier where the two fields have different
+   * names but identical shape + context (#35).
+   */
+  qualifiedNameMatch: "exact" | "renamed";
   parentContextMatch: "exact" | "suffix" | "top-level";
   siblingOverlap: string[];
   competingMatches: number;
@@ -75,6 +91,13 @@ export interface SerializedFieldLineage {
       programs: number;
       highConfidence: number;
       ambiguous: number;
+      /**
+       * #35 — count of shape-keyed semantic pairs. Reported separately from
+       * `copybooks` / `programs` (which still tally name-keyed entries only)
+       * so the per-tier breakdown is byte-stable on corpora that don't carry
+       * rename pairs.
+       */
+      semantic: number;
     };
     diagnosticsByKind: Record<FieldLineageDiagnosticKind, number>;
   };
@@ -87,6 +110,13 @@ export interface SerializedFieldLineage {
   deterministic: SerializedFieldLineageEntry[];
   inferredHighConfidence: SerializedInferredFieldLineageEntry[];
   inferredAmbiguous: SerializedInferredFieldLineageEntry[];
+  /**
+   * #35 — semantic-inferred entries (shape-keyed, renamed fields). Empty
+   * array when no pairs survive the five gates. Always present on freshly
+   * built artifacts; backfilled by `normalizeLoadedFieldLineage` for
+   * pre-#35 JSON loaded from disk.
+   */
+  inferredSemantic: SerializedInferredFieldLineageEntry[];
   diagnostics: FieldLineageDiagnostic[];
   callBoundLineage?: CallBoundLineage | null;
   db2Lineage?: Db2Lineage | null;
@@ -121,9 +151,15 @@ export function normalizeLoadedFieldLineage(raw: SerializedFieldLineage): Serial
     ...raw,
     summary: {
       ...summary,
+      inferred: {
+        ...summary.inferred,
+        // #35 — pre-#35 artifacts predate the semantic tier; backfill to 0.
+        semantic: summary.inferred?.semantic ?? 0,
+      },
       diagnosticsByKind: summary.diagnosticsByKind ?? emptyDiagnosticsByKind(),
     },
     diagnostics: raw.diagnostics ?? [],
+    inferredSemantic: raw.inferredSemantic ?? [],
   };
 }
 
@@ -131,13 +167,14 @@ function emptyCopybookLineage(): SerializedFieldLineage {
   return {
     summary: {
       deterministic: { copybooks: 0, programs: 0, fields: 0 },
-      inferred: { copybooks: 0, programs: 0, highConfidence: 0, ambiguous: 0 },
+      inferred: { copybooks: 0, programs: 0, highConfidence: 0, ambiguous: 0, semantic: 0 },
       diagnosticsByKind: emptyDiagnosticsByKind(),
     },
     copybookUsage: [],
     deterministic: [],
     inferredHighConfidence: [],
     inferredAmbiguous: [],
+    inferredSemantic: [],
     diagnostics: [],
   };
 }
@@ -355,8 +392,18 @@ function buildInferredEntry(
     competingMatches,
   };
 
+  // For semantic entries the two fields have intentionally different names —
+  // start the rationale with the rename pair so a human reviewer sees the gap
+  // up front, instead of the misleading "Same field name" prefix that's
+  // accurate for the name-keyed tiers. Participant carries the qualified
+  // path; the leaf segment is the field name.
+  const leftLeaf = ordered.left.qualifiedName.split(".").pop() ?? "";
+  const rightLeaf = ordered.right.qualifiedName.split(".").pop() ?? "";
+  const namePart = confidence === "semantic"
+    ? `Renamed field (${leftLeaf} ↔ ${rightLeaf})`
+    : "Same field name";
   const rationaleParts = [
-    "Same field name",
+    namePart,
     evidence.pictureMatch ? "matching PIC" : undefined,
     evidence.usageEvidence === "explicit-match" ? "matching USAGE" : undefined,
     evidence.levelMatch ? `same level ${ordered.left.level}` : undefined,
@@ -671,12 +718,116 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
       || a.right.qualifiedName.localeCompare(b.right.qualifiedName)
     );
 
+  // #35 — second pass: shape-keyed matcher for renamed-field detection.
+  // Groups candidates by `(PIC, USAGE, level)` instead of field name and
+  // emits a pair only when *all five* gates hold:
+  //   1. picture match — implicit in the shape-key grouping
+  //   2. usage explicit on both sides — `both-missing` doesn't qualify;
+  //      losing the name signal AND missing USAGE leaves too little
+  //   3. parent context exact — top-level / suffix don't qualify
+  //   4. ≥ 2 shared siblings — one is too weak without name alignment
+  //   5. zero competing matches inside the semantic pool — no
+  //      `semantic-ambiguous` companion tier in this iteration
+  //
+  // Pairs whose field names match would already have been emitted by the
+  // name-keyed pass; drop them here to avoid double-reporting.
+  const semanticCandidateFields = rawCopybookUsage.flatMap((usage) =>
+    (flattenedByCopybook.get(usage.copybookId) ?? [])
+      .filter((field) => usage.exactPrograms.length > 0)
+      .filter((field) => Boolean(field.picture) && Boolean(field.usage))
+      .map((field) => ({ field, programs: usage.exactPrograms })),
+  );
+  const shapeGroups = new Map<string, Array<{ field: FlattenedField; programs: FieldConsumer[] }>>();
+  for (const candidate of semanticCandidateFields) {
+    const shapeKey = `${normalizePicture(candidate.field.picture)}|${normalizeUsage(candidate.field.usage)}|${candidate.field.level}`;
+    const list = shapeGroups.get(shapeKey) ?? [];
+    list.push(candidate);
+    shapeGroups.set(shapeKey, list);
+  }
+
+  const semanticCandidatesRaw: InferredCandidate[] = [];
+  for (const [, fields] of shapeGroups.entries()) {
+    for (let i = 0; i < fields.length; i++) {
+      for (let j = i + 1; j < fields.length; j++) {
+        const left = fields[i]!;
+        const right = fields[j]!;
+        if (left.field.copybookId === right.field.copybookId) continue;
+        if (compareField(left.field, right.field) > 0) continue;
+        // Name-matched pairs belong to the high / ambiguous tier — exclude
+        // them here so they don't double up.
+        if (left.field.fieldName.toUpperCase() === right.field.fieldName.toUpperCase()) continue;
+
+        const parentContextMatch = determineParentContextMatch(left.field, right.field);
+        if (parentContextMatch !== "exact") continue; // Gate 3
+
+        const siblingOverlap = sortUnique(
+          left.field.siblings.filter((sibling) => right.field.siblings.includes(sibling)),
+        );
+        if (siblingOverlap.length < 2) continue; // Gate 4
+
+        // Gates 1, 2, and level match are guaranteed by the shape-key grouping.
+        semanticCandidatesRaw.push({
+          fieldName: left.field.fieldName, // display value; left/right names actually differ
+          left: left.field,
+          right: right.field,
+          leftPrograms: left.programs,
+          rightPrograms: right.programs,
+          evidence: {
+            pictureMatch: true,
+            usageEvidence: "explicit-match",
+            levelMatch: true,
+            qualifiedNameMatch: "renamed",
+            parentContextMatch,
+            siblingOverlap,
+          },
+        });
+      }
+    }
+  }
+
+  // Competing-match count is local to the semantic pool — a field that's
+  // also in a name-keyed pair doesn't count as "competing" with its
+  // semantic peers, and vice-versa.
+  const semanticCounts = new Map<string, number>();
+  for (const candidate of semanticCandidatesRaw) {
+    semanticCounts.set(
+      inferredCandidateKey(candidate.left),
+      (semanticCounts.get(inferredCandidateKey(candidate.left)) ?? 0) + 1,
+    );
+    semanticCounts.set(
+      inferredCandidateKey(candidate.right),
+      (semanticCounts.get(inferredCandidateKey(candidate.right)) ?? 0) + 1,
+    );
+  }
+
+  const inferredSemantic = semanticCandidatesRaw
+    .map((candidate) => {
+      const competingMatches = Math.max(
+        (semanticCounts.get(inferredCandidateKey(candidate.left)) ?? 1) - 1,
+        (semanticCounts.get(inferredCandidateKey(candidate.right)) ?? 1) - 1,
+      );
+      return { candidate, competingMatches };
+    })
+    .filter(({ competingMatches }) => competingMatches === 0) // Gate 5
+    .map(({ candidate, competingMatches }) => buildInferredEntry(candidate, "semantic", competingMatches))
+    .sort((a, b) =>
+      compareCopybook(a.left.copybook, b.left.copybook)
+      || a.left.qualifiedName.localeCompare(b.left.qualifiedName)
+      || compareCopybook(a.right.copybook, b.right.copybook)
+      || a.right.qualifiedName.localeCompare(b.right.qualifiedName)
+    );
+
   const sortedDeterministic = deterministic.sort((a, b) =>
     a.copybooks[0]!.id.localeCompare(b.copybooks[0]!.id) ||
     a.qualifiedNames[0]!.localeCompare(b.qualifiedNames[0]!)
   );
 
-  if (sortedDeterministic.length === 0 && inferredHighConfidence.length === 0 && inferredAmbiguous.length === 0) {
+  if (
+    sortedDeterministic.length === 0
+    && inferredHighConfidence.length === 0
+    && inferredAmbiguous.length === 0
+    && inferredSemantic.length === 0
+  ) {
     return diagnostics.length > 0 ? withDiagnostics(emptyCopybookLineage()) : null;
   }
 
@@ -724,10 +875,15 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
         fields: sortedDeterministic.length,
       },
       inferred: {
+        // `copybooks` / `programs` deliberately count name-keyed entries only
+        // (high + ambiguous). Excluding semantic keeps this counter byte-
+        // stable on corpora without rename pairs — the regression-lock
+        // contract from #35.
         copybooks: inferredCopybookIds.size,
         programs: inferredProgramIds.size,
         highConfidence: inferredHighConfidence.length,
         ambiguous: inferredAmbiguous.length,
+        semantic: inferredSemantic.length,
       },
       diagnosticsByKind: countDiagnosticsByKind(diagnostics),
     },
@@ -735,6 +891,7 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
     deterministic: sortedDeterministic,
     inferredHighConfidence,
     inferredAmbiguous,
+    inferredSemantic,
     diagnostics,
   };
 }
@@ -753,6 +910,12 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
       ...entry.right.programs.map((program) => `"raw/${program.sourceFile}"`),
     ]),
     ...lineage.inferredAmbiguous.flatMap((entry) => [
+      `"raw/${entry.left.copybook.sourceFile}"`,
+      `"raw/${entry.right.copybook.sourceFile}"`,
+      ...entry.left.programs.map((program) => `"raw/${program.sourceFile}"`),
+      ...entry.right.programs.map((program) => `"raw/${program.sourceFile}"`),
+    ]),
+    ...(lineage.inferredSemantic ?? []).flatMap((entry) => [
       `"raw/${entry.left.copybook.sourceFile}"`,
       `"raw/${entry.right.copybook.sourceFile}"`,
       ...entry.left.programs.map((program) => `"raw/${program.sourceFile}"`),
@@ -778,10 +941,12 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
 
   renderCoverageSection(lines, lineage, callBound, db2);
 
+  const semanticCount = lineage.summary.inferred?.semantic ?? 0;
   const overviewHasCopybook = lineage.copybookUsage.length > 0
     || lineage.deterministic.length > 0
     || lineage.inferredHighConfidence.length > 0
-    || lineage.inferredAmbiguous.length > 0;
+    || lineage.inferredAmbiguous.length > 0
+    || semanticCount > 0;
   lines.push("## Overview");
   lines.push("");
   lines.push("| Metric | Count |");
@@ -794,6 +959,11 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
     lines.push(`| Inferred programs | ${lineage.summary.inferred.programs} |`);
     lines.push(`| Inferred high-confidence candidates | ${lineage.summary.inferred.highConfidence} |`);
     lines.push(`| Inferred ambiguous candidates | ${lineage.summary.inferred.ambiguous} |`);
+    // Only surface the semantic row when there's content — keeps Overview
+    // byte-identical for rename-free corpora (#35 regression-lock contract).
+    if (semanticCount > 0) {
+      lines.push(`| Semantic-inferred candidates | ${semanticCount} |`);
+    }
   }
   if (callBound) {
     lines.push(`| Call sites with USING args | ${callBound.summary.callSites} |`);
@@ -835,7 +1005,8 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
   const hasCopybookContent = lineage.copybookUsage.length > 0
     || lineage.deterministic.length > 0
     || lineage.inferredHighConfidence.length > 0
-    || lineage.inferredAmbiguous.length > 0;
+    || lineage.inferredAmbiguous.length > 0
+    || (lineage.inferredSemantic ?? []).length > 0;
 
   if (hasCopybookContent) {
     lines.push("## Copybook Usage");
@@ -907,6 +1078,34 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
       }
     }
     lines.push("");
+
+    // Semantic-inferred (#35) — only render when present. Keeping the
+    // subsection conditional preserves byte-identical output on rename-free
+    // corpora (regression lock from the issue).
+    const semanticEntries = lineage.inferredSemantic ?? [];
+    if (semanticEntries.length > 0) {
+      lines.push("### Semantic-Inferred");
+      lines.push("");
+      lines.push("Pairs matched on shape `(PIC, USAGE, level)` plus exact parent path plus ≥2 sibling overlap. **No name alignment** — the two fields have different names. Lower trust than high-confidence; review one-by-one before relying on these.");
+      lines.push("");
+      lines.push("| Left field | Right field | Left | Right | Programs | Evidence |");
+      lines.push("|------------|-------------|------|-------|----------|----------|");
+      for (const entry of semanticEntries) {
+        const leftLeaf = entry.left.qualifiedName.split(".").pop() ?? entry.fieldName;
+        const rightLeaf = entry.right.qualifiedName.split(".").pop() ?? entry.fieldName;
+        const evidence = [
+          `PIC ${entry.left.picture ?? "—"}`,
+          `USAGE ${entry.left.usage ?? "—"}`,
+          entry.evidence.siblingOverlap.length > 0
+            ? `siblings: ${entry.evidence.siblingOverlap.join(", ")}`
+            : undefined,
+        ].filter((v): v is string => Boolean(v)).join("; ");
+        lines.push(
+          `| ${leftLeaf} | ${rightLeaf} | ${displayLabel(entry.left.copybook.id)}<br>${formatInferredStructure(entry.left)} | ${displayLabel(entry.right.copybook.id)}<br>${formatInferredStructure(entry.right)} | ${formatInferredPrograms(entry.left, entry.right)} | ${evidence} |`,
+        );
+      }
+      lines.push("");
+    }
   }
 
   if (callBound && (callBound.entries.length > 0 || callBound.diagnostics.length > 0)) {
@@ -1133,10 +1332,12 @@ function renderCoverageSection(
   // defensible even if the field is absent.
   const copybookDiagByKind: Record<string, number> = lineage.summary.diagnosticsByKind ?? {};
   const zeroDataItemsCount = copybookDiagByKind["parsed-zero-data-items"] ?? 0;
+  const semanticCount = lineage.summary.inferred?.semantic ?? 0;
   const copybookHasContent = lineage.copybookUsage.length > 0
     || lineage.deterministic.length > 0
     || lineage.inferredHighConfidence.length > 0
     || lineage.inferredAmbiguous.length > 0
+    || semanticCount > 0
     || zeroDataItemsCount > 0;
 
   const rows: string[] = [];
@@ -1146,7 +1347,12 @@ function renderCoverageSection(
     // copybooks aren't currently tracked as diagnostics so they don't
     // appear; once added, sum their counter in here.
     const indexed = lineage.copybookUsage.length + zeroDataItemsCount;
-    const yielding = `${lineage.summary.deterministic.copybooks} deterministic, ${lineage.summary.inferred.copybooks} inferred`;
+    // Yielding splits inferred into the name-keyed and shape-keyed halves
+    // (#35). The semantic suffix is conditional so the cell stays byte-
+    // identical on rename-free corpora — regression lock contract.
+    const yielding = semanticCount > 0
+      ? `${lineage.summary.deterministic.copybooks} deterministic, ${lineage.summary.inferred.copybooks} inferred, ${semanticCount} semantic`
+      : `${lineage.summary.deterministic.copybooks} deterministic, ${lineage.summary.inferred.copybooks} inferred`;
     rows.push(
       `| Copybook | ${indexed} | ${yielding} | ${topExclusionReasons(copybookDiagByKind)} |`,
     );

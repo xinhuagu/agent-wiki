@@ -30,7 +30,12 @@ export type CobolLineageTier =
   | "high"
   | "ambiguous"
   | "inferredHighConfidence"
-  | "inferredAmbiguous";
+  | "inferredAmbiguous"
+  // #35 — shape-keyed match across renamed fields. Confidence collapses to
+  // `weak` like `high`, but the domain-level tier label is what distinguishes
+  // the two: a `semantic` entry has no name-alignment evidence at all, so
+  // human reviewers should treat it as the lowest-trust inferred surface.
+  | "semantic";
 
 export function cobolTierToEvidence(
   tier: CobolLineageTier,
@@ -40,6 +45,7 @@ export function cobolTierToEvidence(
       return { confidence: "strong", basis: "deterministic" };
     case "high":
     case "inferredHighConfidence":
+    case "semantic":
       return { confidence: "weak", basis: "inferred" };
     case "ambiguous":
     case "inferredAmbiguous":

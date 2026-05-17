@@ -134,6 +134,25 @@ export interface Db2LineageEvidence {
   readerOps: string[];
 }
 
+/**
+ * Cross-program column-level pairing (#41 Phase B). When both the writer
+ * and the reader carry a column binding (from Phase A) for the *same*
+ * SQL column, this triple asserts that the value flows
+ * `writerHostVar → column → readerHostVar` across the program pair.
+ *
+ * Asymmetric host-var directionality is implicit in the operations on
+ * each side: the writer's `column = :HV` in INSERT/UPDATE writes the
+ * host var into the column; the reader's `column INTO :HV` in
+ * SELECT/FETCH reads the column into the host var. The structural
+ * intersection of the two `column` fields proves the through-flow
+ * without needing a SQL parser to argue about it.
+ */
+export interface Db2ColumnPair {
+  column: string;
+  writerHostVar: string;
+  readerHostVar: string;
+}
+
 export interface SerializedDb2LineageEntry {
   confidence: Db2LineageConfidence;
   table: string;
@@ -143,6 +162,15 @@ export interface SerializedDb2LineageEntry {
   evidence: Db2LineageEvidence;
   /** Language-agnostic envelope; consumers branch on `confidence` / `abstain`. */
   envelope: EvidenceEnvelope;
+  /**
+   * Cross-program column-level pairings (#41 Phase B). Computed by
+   * intersecting writer and reader host vars on their `column` field
+   * (both sides have to carry a Phase-A column binding for a pair to
+   * emit). Empty when one or both sides have no column bindings —
+   * common for INSERT-without-column-list, cursor-based FETCH, and any
+   * SQL the Phase A regexes can't structure.
+   */
+  columnPairs: Db2ColumnPair[];
   rationale: string;
 }
 
@@ -150,6 +178,13 @@ export interface Db2Lineage {
   summary: {
     sharedTables: number;
     pairs: number;
+    /**
+     * Total cross-program column pairings across all entries (#41 Phase B).
+     * Sum of `entries[i].columnPairs.length`. Surfaced separately so the
+     * Coverage block / evidence dashboard can show write-read column depth
+     * without walking entries.
+     */
+    columnPairs: number;
     diagnosticsByKind: Record<Db2LineageDiagnosticKind, number>;
   };
   entries: SerializedDb2LineageEntry[];
@@ -539,6 +574,55 @@ function toParticipant(usage: ProgramTableUsage): Db2LineageParticipant {
   };
 }
 
+/**
+ * Intersect writer and reader host vars on their `column` field to emit
+ * cross-program column-level pairings (#41 Phase B). Only host vars that
+ * carry a Phase-A `column` binding participate; bare host vars (unbound)
+ * never produce a pair.
+ *
+ * Output is deterministically sorted by column, then writer host var,
+ * then reader host var — keeps the artifact byte-stable across rebuilds
+ * regardless of the order writer/reader hostVars were merged into the
+ * usage map.
+ *
+ * The Cartesian intersection per column captures the (rare-but-real)
+ * case where one side binds the same column from multiple host vars —
+ * e.g., an UPDATE that writes the column then re-reads it via a
+ * SELECT...INTO in the same program. We emit every legitimate pair so
+ * the reviewer sees the full graph; downstream dedup is the consumer's
+ * call.
+ */
+function computeColumnPairs(
+  writer: Db2LineageParticipant,
+  reader: Db2LineageParticipant,
+): Db2ColumnPair[] {
+  const readersByColumn = new Map<string, HostVarRef[]>();
+  for (const rhv of reader.hostVars) {
+    if (!rhv.column) continue;
+    const list = readersByColumn.get(rhv.column) ?? [];
+    list.push(rhv);
+    readersByColumn.set(rhv.column, list);
+  }
+  const pairs: Db2ColumnPair[] = [];
+  for (const whv of writer.hostVars) {
+    if (!whv.column) continue;
+    const readers = readersByColumn.get(whv.column);
+    if (!readers) continue;
+    for (const rhv of readers) {
+      pairs.push({
+        column: whv.column,
+        writerHostVar: whv.name,
+        readerHostVar: rhv.name,
+      });
+    }
+  }
+  return pairs.sort((a, b) =>
+    a.column.localeCompare(b.column)
+    || a.writerHostVar.localeCompare(b.writerHostVar)
+    || a.readerHostVar.localeCompare(b.readerHostVar),
+  );
+}
+
 export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | null {
   const programs = models.filter((m) => !isCopybook(m.sourceFile));
   if (programs.length < 2) return null;
@@ -694,6 +778,7 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
         }
         const writerParticipant = toParticipant(writer);
         const readerParticipant = toParticipant(reader);
+        const columnPairs = computeColumnPairs(writerParticipant, readerParticipant);
         const rationale =
           `${writerParticipant.programId.replace("program:", "")} writes to ${table} via ${writerParticipant.operations.join(",")}; `
           + `${readerParticipant.programId.replace("program:", "")} reads from ${table} via ${readerParticipant.operations.join(",")}.`;
@@ -718,6 +803,7 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
               { raw: readerParticipant.sourceFile },
             ],
           },
+          columnPairs,
           rationale,
         });
       }
@@ -742,7 +828,12 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
   for (const d of diagnostics) diagnosticsByKind[d.kind]++;
 
   return {
-    summary: { sharedTables, pairs: entries.length, diagnosticsByKind },
+    summary: {
+      sharedTables,
+      pairs: entries.length,
+      columnPairs: entries.reduce((sum, e) => sum + e.columnPairs.length, 0),
+      diagnosticsByKind,
+    },
     entries,
     diagnostics,
   };

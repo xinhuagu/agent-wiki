@@ -989,6 +989,226 @@ ${lines}
     });
   });
 
+  describe("DB2 cross-program column-level pairing (#41 Phase B)", () => {
+    // Reuses the column-binding writer / reader shapes from Phase A.
+    // The new assertion target is `entry.columnPairs` — each pair
+    // asserts `writerHostVar → column → readerHostVar` cross-program
+    // flow when both sides bind the same column.
+    function makeWriter(programId: string, sql: string[]): string {
+      const lines = sql.map((l) => `           ${l}`).join("\n");
+      return `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ${programId}.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WR-ID              PIC X(10).
+       01  WR-NAME            PIC X(30).
+       01  WR-EMAIL           PIC X(50).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+${lines}
+           STOP RUN.
+`;
+    }
+    function makeReader(programId: string, sql: string[]): string {
+      const lines = sql.map((l) => `           ${l}`).join("\n");
+      return `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ${programId}.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  RD-ID              PIC X(10).
+       01  RD-NAME            PIC X(30).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+${lines}
+           STOP RUN.
+`;
+    }
+
+    it("emits a column pair per shared (writer-bound, reader-bound) column", () => {
+      const writer = makeWriter("WRITER", [
+        "EXEC SQL INSERT INTO CUSTOMERS (ID, NAME, EMAIL)",
+        "         VALUES (:WR-ID, :WR-NAME, :WR-EMAIL) END-EXEC.",
+      ]);
+      const reader = makeReader("READER", [
+        "EXEC SQL SELECT ID, NAME INTO :RD-ID, :RD-NAME",
+        "         FROM CUSTOMERS END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const entry = lineage!.entries[0]!;
+      // EMAIL drops because the reader doesn't bind it; ID and NAME pair.
+      expect(entry.columnPairs).toEqual([
+        { column: "ID", writerHostVar: "WR-ID", readerHostVar: "RD-ID" },
+        { column: "NAME", writerHostVar: "WR-NAME", readerHostVar: "RD-NAME" },
+      ]);
+      expect(lineage!.summary.columnPairs).toBe(2);
+    });
+
+    it("emits no column pairs when one side has no column bindings", () => {
+      // Writer uses INSERT-without-column-list → no bindings on writer side.
+      // Reader's INTO bindings exist but can't intersect.
+      const writer = makeWriter("WRITER", [
+        "EXEC SQL INSERT INTO CUSTOMERS",
+        "         VALUES (:WR-ID, :WR-NAME, :WR-EMAIL) END-EXEC.",
+      ]);
+      const reader = makeReader("READER", [
+        "EXEC SQL SELECT ID, NAME INTO :RD-ID, :RD-NAME",
+        "         FROM CUSTOMERS END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      expect(lineage!.entries[0]!.columnPairs).toEqual([]);
+      expect(lineage!.summary.columnPairs).toBe(0);
+    });
+
+    it("emits no column pairs when both sides bind but on disjoint columns", () => {
+      const writer = makeWriter("WRITER", [
+        "EXEC SQL INSERT INTO CUSTOMERS (ID)",
+        "         VALUES (:WR-ID) END-EXEC.",
+      ]);
+      const reader = makeReader("READER", [
+        "EXEC SQL SELECT NAME INTO :RD-NAME",
+        "         FROM CUSTOMERS END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      expect(lineage!.entries[0]!.columnPairs).toEqual([]);
+    });
+
+    it("handles UPDATE writer + SELECT INTO reader (SET-clause columns only)", () => {
+      // The writer's WHERE clause binds :WR-ID against ID for filtering,
+      // not column-writing, so :WR-ID has no column. The SET pairs do
+      // bind. The reader's SELECT INTO binds both columns.
+      const writer = makeWriter("WRITER", [
+        "EXEC SQL UPDATE CUSTOMERS",
+        "         SET NAME = :WR-NAME, EMAIL = :WR-EMAIL",
+        "         WHERE ID = :WR-ID END-EXEC.",
+      ]);
+      const reader = makeReader("READER", [
+        "EXEC SQL SELECT NAME, EMAIL INTO :RD-NAME, :RD-EMAIL",
+        "         FROM CUSTOMERS END-EXEC.",
+      ]);
+      // RD-EMAIL needs a declaration matching the reader fixture.
+      const reader2 = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. READER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  RD-NAME            PIC X(30).
+       01  RD-EMAIL           PIC X(50).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL SELECT NAME, EMAIL INTO :RD-NAME, :RD-EMAIL
+                    FROM CUSTOMERS END-EXEC.
+           STOP RUN.
+`;
+      // Ignore reader from the helper (didn't have RD-EMAIL), use reader2.
+      void reader;
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader2, "READER.cbl"),
+      ]);
+      const entry = lineage!.entries[0]!;
+      // WR-ID drops (no column, WHERE filter); NAME and EMAIL pair.
+      expect(entry.columnPairs).toEqual([
+        { column: "EMAIL", writerHostVar: "WR-EMAIL", readerHostVar: "RD-EMAIL" },
+        { column: "NAME", writerHostVar: "WR-NAME", readerHostVar: "RD-NAME" },
+      ]);
+    });
+
+    it("Cartesian intersection emits one pair per (writer-side, reader-side) host var when both bind the same column", () => {
+      // Writer has two host vars binding NAME via different SQL refs:
+      // INSERT NAME = :WR-NAME and UPDATE SET NAME = :WR-EMAIL. The bump
+      // merge dedupes per-host-var-name (not per-column), so both
+      // bindings survive. The reader has one host var on NAME. The
+      // Cartesian intersection therefore emits two pairs — both writer
+      // host vars feed the same column that the reader receives from.
+      // This is the documented behavior; downstream dedup is the
+      // consumer's call.
+      const writer = makeWriter("WRITER", [
+        "EXEC SQL INSERT INTO CUSTOMERS (NAME)",
+        "         VALUES (:WR-NAME) END-EXEC.",
+        "EXEC SQL UPDATE CUSTOMERS SET NAME = :WR-EMAIL",
+        "         WHERE ID = '1' END-EXEC.",
+      ]);
+      const reader = makeReader("READER", [
+        "EXEC SQL SELECT NAME INTO :RD-NAME",
+        "         FROM CUSTOMERS END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const pairs = lineage!.entries[0]!.columnPairs;
+      // Two writer host vars × one reader host var on the same column → 2 pairs.
+      // Sorted by writerHostVar.
+      expect(pairs).toEqual([
+        { column: "NAME", writerHostVar: "WR-EMAIL", readerHostVar: "RD-NAME" },
+        { column: "NAME", writerHostVar: "WR-NAME", readerHostVar: "RD-NAME" },
+      ]);
+    });
+
+    it("regression: column pairs are deterministically sorted", () => {
+      // Two columns bound on both sides; the sort must be stable regardless
+      // of host-var iteration order. Lock against future Map / Set order
+      // changes by asserting full equality.
+      const writer = makeWriter("WRITER", [
+        "EXEC SQL INSERT INTO CUSTOMERS (NAME, ID)",
+        "         VALUES (:WR-NAME, :WR-ID) END-EXEC.",
+      ]);
+      const reader = makeReader("READER", [
+        "EXEC SQL SELECT NAME, ID INTO :RD-NAME, :RD-ID",
+        "         FROM CUSTOMERS END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      // Sort key: column → writerHostVar → readerHostVar (alphabetical).
+      expect(lineage!.entries[0]!.columnPairs).toEqual([
+        { column: "ID", writerHostVar: "WR-ID", readerHostVar: "RD-ID" },
+        { column: "NAME", writerHostVar: "WR-NAME", readerHostVar: "RD-NAME" },
+      ]);
+    });
+
+    it("summary.columnPairs sums across multiple writer-reader entries", () => {
+      // One writer, two readers — produces two entries (one per writer-
+      // reader pair). Each entry contributes its own columnPairs; the
+      // summary counter is the sum.
+      const writer = makeWriter("WRITER", [
+        "EXEC SQL INSERT INTO CUSTOMERS (ID, NAME)",
+        "         VALUES (:WR-ID, :WR-NAME) END-EXEC.",
+      ]);
+      const reader1 = makeReader("READER1", [
+        "EXEC SQL SELECT ID, NAME INTO :RD-ID, :RD-NAME",
+        "         FROM CUSTOMERS END-EXEC.",
+      ]);
+      const reader2 = makeReader("READER2", [
+        "EXEC SQL SELECT NAME INTO :RD-NAME",
+        "         FROM CUSTOMERS END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader1, "READER1.cbl"),
+        model(reader2, "READER2.cbl"),
+      ]);
+      // Two entries: (WRITER, READER1) → 2 pairs, (WRITER, READER2) → 1 pair.
+      expect(lineage!.entries.length).toBe(2);
+      expect(lineage!.summary.columnPairs).toBe(3);
+    });
+  });
+
   describe("REPLACING-aware host-var resolution (#37 Phase A)", () => {
     const customerCopybook = `
        01  CUSTOMER-REC.

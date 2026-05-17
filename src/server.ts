@@ -34,7 +34,7 @@ import { canonicalNodeId, deserializeGraph, displayLabel, graphEdgesFrom, graphI
 import type { CodeProcedure, CodeRelation, NormalizedCodeModel } from "./code-analysis.js";
 import type { SerializedFieldLineage, SerializedInferredFieldLineageEntry } from "./cobol/field-lineage.js";
 import type { SerializedCallBoundLineageEntry } from "./cobol/call-boundary-lineage.js";
-import type { SerializedDb2LineageEntry, Db2ColumnPair } from "./cobol/db2-table-lineage.js";
+import type { SerializedDb2LineageEntry } from "./cobol/db2-table-lineage.js";
 import { normalizeLoadedFieldLineage } from "./cobol/field-lineage.js";
 import type { GraphEdge, GraphNode, KnowledgeGraph, NodeKind, SerializedGraph } from "./cobol/graph.js";
 
@@ -1092,26 +1092,22 @@ function inferredEntryMatches(
   requestedQualifiedName?: string,
   requestedCopybook?: string,
 ): boolean {
-  if (requestedFieldName) {
-    // High / ambiguous (name-keyed) tiers always have `entry.fieldName ===
-    // both sides' leaf`. Semantic-inferred (shape-keyed, #35) renames across
-    // sides — `entry.fieldName` is one side only, so we widen the match to
-    // either qualified-path leaf. Behavior is byte-identical for the
-    // name-keyed tiers (leaves equal entry.fieldName) and correctly widens
-    // for semantic (#44).
-    const upper = requestedFieldName.toUpperCase();
-    if (
-      entry.fieldName.toUpperCase() !== upper
-      && leafFieldName(entry.left.qualifiedName).toUpperCase() !== upper
-      && leafFieldName(entry.right.qualifiedName).toUpperCase() !== upper
-    ) return false;
-  }
-  if (!requestedQualifiedName && !requestedCopybook) return true;
-  const leftMatches = copybookMatches(entry.left.copybook, requestedCopybook)
-    && qualifiedNameMatches(entry.left.qualifiedName, requestedQualifiedName);
-  const rightMatches = copybookMatches(entry.right.copybook, requestedCopybook)
-    && qualifiedNameMatches(entry.right.qualifiedName, requestedQualifiedName);
-  return leftMatches || rightMatches;
+  // Each side of the pair must satisfy ALL filters together. A pre-#44
+  // Codex review caught that the prior implementation checked field_name
+  // and qualified_name independently — that lets a `field_name=CUST-ID +
+  // qualified_name=CUSTOMER-REC.ADDRESS.CUSTOMER-ID` query match a
+  // semantic rename pair `CUSTOMER-ID ↔ CUST-ID` because field_name
+  // hits the right side's leaf while qualified_name hits the left side's
+  // qualified path. Neither endpoint actually satisfies both filters.
+  // Closing that gap means walking sides explicitly.
+  const fnUpper = requestedFieldName?.toUpperCase();
+  const matchesSide = (side: { qualifiedName: string; copybook: { id: string } }): boolean => {
+    if (fnUpper && leafFieldName(side.qualifiedName).toUpperCase() !== fnUpper) return false;
+    if (!copybookMatches(side.copybook, requestedCopybook)) return false;
+    if (!qualifiedNameMatches(side.qualifiedName, requestedQualifiedName)) return false;
+    return true;
+  };
+  return matchesSide(entry.left) || matchesSide(entry.right);
 }
 
 /**
@@ -1171,20 +1167,39 @@ function db2EntryMatches(
 }
 
 /**
- * Match a DB2 column-pair against the query. A pair matches when the
- * requested fieldName is one of the two host-var names participating
- * in the flow. Qualified-name filtering doesn't apply at the column-
- * pair level (the pair shape is host-var ↔ column ↔ host-var, no
- * qualified path).
+ * Compute the set of host-var **names** in a DB2 entry that satisfied the
+ * query — by direct name match, by resolved `dataItem.name` (so REPLACING
+ * aliases like `:CLIENT-ID` carrying `dataItem.name = CUSTOMER-ID` still
+ * count), or by `qualified_name` leaf fallback against `dataItem.name`.
+ *
+ * Returned set is keyed on the host-var's serialized `name` so the column-
+ * pair filter (whose payload only carries `writerHostVar` / `readerHostVar`
+ * names) can decide membership by set lookup. Codex caught that the prior
+ * pair filter only compared against raw host-var names and silently
+ * dropped pairs the parent entry matched via `dataItem.name`.
  */
-function db2ColumnPairMatchesQuery(
-  pair: Db2ColumnPair,
+function matchingDb2HostVarNames(
+  entry: SerializedDb2LineageEntry,
   requestedFieldName?: string,
-): boolean {
-  if (!requestedFieldName) return true;
-  const upper = requestedFieldName.toUpperCase();
-  return pair.writerHostVar.toUpperCase() === upper
-    || pair.readerHostVar.toUpperCase() === upper;
+  requestedQualifiedName?: string,
+): Set<string> {
+  const allHostVars = [...entry.writer.hostVars, ...entry.reader.hostVars];
+  if (!requestedFieldName && !requestedQualifiedName) {
+    return new Set(allHostVars.map((hv) => hv.name));
+  }
+  const fnUpper = requestedFieldName?.toUpperCase();
+  const qnLeaf = requestedQualifiedName
+    ? leafFieldName(requestedQualifiedName).toUpperCase()
+    : undefined;
+  const matched = new Set<string>();
+  for (const hv of allHostVars) {
+    const dataItemName = hv.dataItem?.name.toUpperCase();
+    const nameMatches = fnUpper !== undefined
+      && (hv.name.toUpperCase() === fnUpper || dataItemName === fnUpper);
+    const qualMatches = qnLeaf !== undefined && dataItemName === qnLeaf;
+    if (nameMatches || qualMatches) matched.add(hv.name);
+  }
+  return matched;
 }
 
 function buildFieldLineageResponse(
@@ -1242,16 +1257,22 @@ function buildFieldLineageResponse(
     : db2All.filter((entry) => db2EntryMatches(entry, fieldName, qualifiedName));
   // Column-pair matches are a flat list across all matching DB2 entries.
   // Each pair carries enough context (table + programs) to be standalone.
-  const db2ColumnPairs = db2.flatMap((entry) =>
-    entry.columnPairs
-      .filter((pair) => db2ColumnPairMatchesQuery(pair, fieldName))
+  // Pair-filter set covers both raw host-var names AND dataItem aliases
+  // (e.g., a `:CLIENT-ID` host var whose `dataItem.name` is `CUSTOMER-ID`
+  // qualifies via the alias), so the pair surface stays consistent with
+  // the entry-level match.
+  const db2ColumnPairs = db2.flatMap((entry) => {
+    const matchingNames = matchingDb2HostVarNames(entry, fieldName, qualifiedName);
+    return entry.columnPairs
+      .filter((pair) =>
+        matchingNames.has(pair.writerHostVar) || matchingNames.has(pair.readerHostVar))
       .map((pair) => ({
         table: entry.table,
         writerProgramId: entry.writer.programId,
         readerProgramId: entry.reader.programId,
         ...pair,
-      })),
-  );
+      }));
+  });
 
   // ── Cross-family evidence envelope (#44) ───────────────────────────
   // Strongest evidence across ALL families wins. Pre-#44 this only

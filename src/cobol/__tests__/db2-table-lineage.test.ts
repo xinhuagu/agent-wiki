@@ -1267,6 +1267,46 @@ ${lines}
       expect(ordersEntry!.columnPairs).toEqual([]);
     });
 
+    it("unresolved host vars do not produce column-flow pairs (Codex review #3 fix)", () => {
+      // Writer references :WS-MISSING (not declared anywhere) but the
+      // SQL DOES bind it to NAME. Reader's :RD-NAME is fully resolved.
+      // Pre-fix Phase B emitted `WS-MISSING → NAME → RD-NAME` despite
+      // WS-MISSING already being diagnosed as host-var-unresolved.
+      // Now: unresolved host vars are gated out of `computeColumnPairs`
+      // (no dataItem → skipped), so the pair drops cleanly. The
+      // host-var-unresolved diagnostic still fires separately.
+      const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WR-OTHER           PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (NAME)
+                    VALUES (:WS-MISSING) END-EXEC.
+           STOP RUN.
+`;
+      const reader = makeReader("READER", [
+        "EXEC SQL SELECT NAME INTO :RD-NAME",
+        "         FROM CUSTOMERS END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const entry = lineage!.entries[0]!;
+      // The unresolved host var is still in the writer's hostVars list
+      // (with empty dataItem) so the cell can render `(?)`, but the
+      // column-flow intersection skips it.
+      expect(entry.columnPairs).toEqual([]);
+      // And the host-var-unresolved diagnostic is intact.
+      expect(lineage!.diagnostics.some(
+        (d) => d.kind === "host-var-unresolved" && d.hostVar === "WS-MISSING",
+      )).toBe(true);
+    });
+
     it("summary.columnPairs sums across multiple writer-reader entries", () => {
       // One writer, two readers — produces two entries (one per writer-
       // reader pair). Each entry contributes its own columnPairs; the

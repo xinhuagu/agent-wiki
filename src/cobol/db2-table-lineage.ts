@@ -626,8 +626,16 @@ function computeColumnPairs(
   // side case (`INSERT INTO T (ID, ALT_ID) VALUES (:WR-ID, :WR-ID)`);
   // honoring multi-binding on the reader side too keeps the data model
   // symmetric.
+  //
+  // Skip host vars whose program-side `dataItem` lookup failed — they're
+  // already in the `host-var-unresolved` diagnostic stream and emitting
+  // a confident-looking column flow alongside contradicts the signal
+  // (Codex review #3 on #43). A reviewer seeing `WS-MISSING → NAME →
+  // WS-NAME` would assume the trace is solid; the matching `(?)` in the
+  // host-var cell is a weaker contradiction than dropping the pair.
   const readersByColumn = new Map<string, HostVarRef[]>();
   for (const rhv of reader.hostVars) {
+    if (!rhv.dataItem) continue;
     for (const col of rhv.columns) {
       const list = readersByColumn.get(col) ?? [];
       list.push(rhv);
@@ -636,6 +644,7 @@ function computeColumnPairs(
   }
   const pairs: Db2ColumnPair[] = [];
   for (const whv of writer.hostVars) {
+    if (!whv.dataItem) continue;
     for (const col of whv.columns) {
       const readers = readersByColumn.get(col);
       if (!readers) continue;

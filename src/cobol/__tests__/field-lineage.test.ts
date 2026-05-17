@@ -723,8 +723,8 @@ describe("COBOL field lineage", () => {
       const page = generateFieldLineagePage(lineage!);
       expect(page.content).toContain("## Coverage");
       expect(page.content).not.toContain("| Copybook |");
-      expect(page.content).toMatch(/\| Call boundary \| \d+ call sites \| \d+ pairs \|/);
-      expect(page.content).toMatch(/\| DB2 \| \d+ tables \| \d+ writer→reader \|/);
+      expect(page.content).toMatch(/\| Call boundary \| \d+ call site\(s\) \| \d+ pair\(s\) \|/);
+      expect(page.content).toMatch(/\| DB2 \| \d+ table\(s\) \| \d+ writer→reader pair\(s\) \|/);
     });
 
     it("Excluded column lists top-2 reasons (count desc, kind asc tiebreak) and — when none", () => {
@@ -783,6 +783,9 @@ describe("COBOL field lineage", () => {
       // count 2 so tiebreak is alphabetical asc. arity-mismatch (count 1) drops.
       expect(coverageBlock).toContain("2 dynamic-call, 2 unresolved-callee");
       expect(coverageBlock).not.toContain("arity-mismatch");
+      // All 5 CALLs failed at the site gate, so callSites=0, pairs=0,
+      // siteDropped=5 → Indexed = 5 call sites.
+      expect(coverageBlock).toMatch(/\| Call boundary \| 5 call site\(s\) \| 0 pair\(s\) \|/);
     });
 
     it("renders — in the Excluded column when a family has no diagnostics", () => {
@@ -812,6 +815,8 @@ describe("COBOL field lineage", () => {
       const overviewStart = page.content.indexOf("## Overview");
       const coverageBlock = page.content.slice(coverageStart, overviewStart);
       expect(coverageBlock).toContain("1 parsed-zero-data-items");
+      // Indexed math: 1 participating copybook + 1 zero-data = 2 total.
+      expect(coverageBlock).toMatch(/\| Copybook \| 2 \| 1 deterministic, 0 inferred \|/);
     });
   });
 

@@ -1128,11 +1128,11 @@ function renderCoverageSection(
   callBound: CallBoundLineage | null,
   db2: Db2Lineage | null,
 ): void {
-  // Pre-#30 in-memory shapes may lack diagnosticsByKind; mirror the
-  // defensive `?.` already used at the Overview row for the zero-data-items
-  // counter. `lineage.diagnostics ?? []` covers the same pre-#30 gap.
-  const copybookDiagByKind = lineage.summary.diagnosticsByKind ?? {} as Record<string, number>;
-  const zeroDataItemsCount = (copybookDiagByKind as Record<string, number>)["parsed-zero-data-items"] ?? 0;
+  // Pre-#30 in-memory shapes may lack diagnosticsByKind; declaring as
+  // Record<string, number> means the `?? 0` reads on known keys are
+  // defensible even if the field is absent.
+  const copybookDiagByKind: Record<string, number> = lineage.summary.diagnosticsByKind ?? {};
+  const zeroDataItemsCount = copybookDiagByKind["parsed-zero-data-items"] ?? 0;
   const copybookHasContent = lineage.copybookUsage.length > 0
     || lineage.deterministic.length > 0
     || lineage.inferredHighConfidence.length > 0
@@ -1141,19 +1141,42 @@ function renderCoverageSection(
 
   const rows: string[] = [];
   if (copybookHasContent) {
+    // Indexed = universe of copybooks observed = participating (yielded
+    // lineage) + zero-data-items drops. Single-consumer / REPLACING-only
+    // copybooks aren't currently tracked as diagnostics so they don't
+    // appear; once added, sum their counter in here.
+    const indexed = lineage.copybookUsage.length + zeroDataItemsCount;
     const yielding = `${lineage.summary.deterministic.copybooks} deterministic, ${lineage.summary.inferred.copybooks} inferred`;
     rows.push(
-      `| Copybook | ${lineage.copybookUsage.length} | ${yielding} | ${topExclusionReasons(copybookDiagByKind)} |`,
+      `| Copybook | ${indexed} | ${yielding} | ${topExclusionReasons(copybookDiagByKind)} |`,
     );
   }
   if (callBound) {
+    // Indexed = total CALL ... USING sites attempted = resolved sites
+    // (`summary.callSites`) + per-site drops. shape-mismatch and
+    // caller-arg-not-top-level are per-arg drops *within* a resolved
+    // site, so they don't add to the site total.
+    const cbd = callBound.summary.diagnosticsByKind;
+    const siteDropped =
+      cbd["unresolved-callee"]
+      + cbd["dynamic-call"]
+      + cbd["arity-mismatch"]
+      + cbd["system-call"];
+    const totalSites = callBound.summary.callSites + siteDropped;
     rows.push(
-      `| Call boundary | ${callBound.summary.callSites} call sites | ${callBound.summary.pairs} pairs | ${topExclusionReasons(callBound.summary.diagnosticsByKind)} |`,
+      `| Call boundary | ${totalSites} call site(s) | ${callBound.summary.pairs} pair(s) | ${topExclusionReasons(callBound.summary.diagnosticsByKind)} |`,
     );
   }
   if (db2) {
+    // Indexed = all distinct DB2 tables touched by ≥1 program =
+    // sharedTables (had both writer and reader) + writer-only +
+    // reader-only. non-classifiable-op is per-reference, not per-table,
+    // and self-loop is per-pair within a shared table — neither adds to
+    // the table total.
+    const dbd = db2.summary.diagnosticsByKind;
+    const totalTables = db2.summary.sharedTables + dbd["writer-only"] + dbd["reader-only"];
     rows.push(
-      `| DB2 | ${db2.summary.sharedTables} tables | ${db2.summary.pairs} writer→reader | ${topExclusionReasons(db2.summary.diagnosticsByKind)} |`,
+      `| DB2 | ${totalTables} table(s) | ${db2.summary.pairs} writer→reader pair(s) | ${topExclusionReasons(db2.summary.diagnosticsByKind)} |`,
     );
   }
   if (rows.length === 0) return;

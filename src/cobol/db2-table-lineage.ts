@@ -95,6 +95,17 @@ export interface HostVarRef {
   name: string;
   /** In-program declaration; undefined if lookup failed. */
   dataItem?: HostVarDataItemRef;
+  /**
+   * The SQL column the host var binds to, when `parseSqlColumnBindings`
+   * could resolve it (#41 Phase A). Present for three patterns:
+   *   - INSERT INTO T (col-list) VALUES (host-list) — positional pair
+   *   - SELECT col-list INTO host-list FROM ... — positional pair
+   *   - UPDATE T SET col = :host pairs — explicit
+   * Absent for INSERT without column list, arity mismatch, predicate
+   * (WHERE) host vars, FETCH (column list lives on the DECLARE CURSOR),
+   * and any SQL the Phase A regexes can't structure.
+   */
+  column?: string;
 }
 
 const DB2_WRITE_OPS = new Set(["INSERT", "UPDATE", "DELETE", "MERGE"]);
@@ -150,6 +161,119 @@ const HOST_VAR_RE = /:\s*([A-Z][A-Z0-9-]*)/g;
 function extractHostVars(rawText: string): string[] {
   const upper = rawText.toUpperCase();
   return [...new Set([...upper.matchAll(HOST_VAR_RE)].map((m) => m[1]))];
+}
+
+/**
+ * Parse host-var ↔ column bindings out of a SQL block's raw text (#41
+ * Phase A). Three patterns are recognized:
+ *
+ *   - `INSERT INTO T (col1, col2) VALUES (:h1, :h2)` — column list and
+ *     VALUES list paired by position.
+ *   - `SELECT col1, col2 INTO :h1, :h2 FROM ...` — SELECT column list and
+ *     INTO host-var list paired by position.
+ *   - `UPDATE T SET col1 = :h1, col2 = :h2 WHERE ...` — each `col = :host`
+ *     pair read explicitly; WHERE-clause host vars are filter predicates
+ *     and intentionally not bound.
+ *
+ * Returns an empty array when the pattern doesn't match cleanly: INSERT
+ * with no column list, arity mismatch between column count and value
+ * count, FETCH (no column list in this statement — lives on the DECLARE
+ * CURSOR), subqueries / INSERT…SELECT, functions inside the column list,
+ * or anything else outside the three handled shapes. Falling through to
+ * empty is intentional — Phase A trades coverage for precision; a wrong
+ * binding is worse than a missing one.
+ */
+export function parseSqlColumnBindings(
+  rawText: string,
+  operation: string | undefined,
+): Array<{ column: string; hostVar: string }> {
+  if (!operation) return [];
+  const op = operation.toUpperCase();
+  const upper = rawText.toUpperCase();
+
+  if (op === "INSERT") {
+    // Require both `(col-list)` and `VALUES (val-list)` to be present.
+    // INSERT…SELECT (no VALUES) and INSERT without column list both miss
+    // this regex and fall through to an empty result.
+    const m = upper.match(/INSERT\s+INTO\s+[A-Z0-9_.-]+\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/);
+    if (!m) return [];
+    return pairPositional(splitTopLevelCommas(m[1]!), splitTopLevelCommas(m[2]!));
+  }
+
+  if (op === "SELECT") {
+    // SELECT col-list INTO host-list FROM... The INTO clause anchors both
+    // ends — without it (e.g., SELECT cols FROM... in a subquery) there's
+    // no host-var list to bind, so we return empty.
+    const m = upper.match(/SELECT\s+([\s\S]+?)\s+INTO\s+([\s\S]+?)\s+FROM\b/);
+    if (!m) return [];
+    return pairPositional(splitTopLevelCommas(m[1]!), splitTopLevelCommas(m[2]!));
+  }
+
+  if (op === "UPDATE") {
+    // Extract everything between SET and WHERE (or end-of-statement).
+    // Anchoring on `WHERE` keeps the predicate's `:host` from binding.
+    const m = upper.match(/SET\s+([\s\S]+?)(?:\s+WHERE\b|\s*$)/);
+    if (!m) return [];
+    const bindings: Array<{ column: string; hostVar: string }> = [];
+    for (const assignment of splitTopLevelCommas(m[1]!)) {
+      // Strict `column = :host` shape only. Anything else (arithmetic,
+      // function, literal, NULL) drops — we won't pretend we know what
+      // gets written.
+      const eq = assignment.match(/^([A-Z][A-Z0-9_]*)\s*=\s*:\s*([A-Z][A-Z0-9-]*)\s*$/);
+      if (eq) bindings.push({ column: eq[1]!, hostVar: eq[2]! });
+    }
+    return bindings;
+  }
+
+  return [];
+}
+
+/**
+ * Split on commas at depth-0 paren nesting. Lets `SELECT FUNC(A, B), C`
+ * keep `FUNC(A, B)` as a single element instead of shattering on the
+ * inner comma. Phase A doesn't need to *understand* the function call;
+ * it just needs to not mis-pair it with the host-var list.
+ */
+function splitTopLevelCommas(s: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let buf = "";
+  for (const ch of s) {
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    if (ch === "," && depth === 0) {
+      out.push(buf.trim());
+      buf = "";
+    } else {
+      buf += ch;
+    }
+  }
+  if (buf.trim().length > 0) out.push(buf.trim());
+  return out;
+}
+
+/**
+ * Pair a column list with a value list positionally. The value must be a
+ * bare host-var reference (`:NAME`) — anything else (literal, NULL,
+ * default, function) drops that position entirely without aborting the
+ * whole pairing. Column names that aren't plain identifiers (qualified
+ * `schema.col`, quoted, with parens) also drop. Arity mismatch
+ * (`cols.length !== vals.length`) aborts the entire pairing — we'd rather
+ * miss bindings than emit wrong ones.
+ */
+function pairPositional(
+  cols: string[],
+  vals: string[],
+): Array<{ column: string; hostVar: string }> {
+  if (cols.length !== vals.length) return [];
+  const pairs: Array<{ column: string; hostVar: string }> = [];
+  for (let i = 0; i < cols.length; i++) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(cols[i]!)) continue;
+    const hostMatch = vals[i]!.match(/^:\s*([A-Z][A-Z0-9-]*)$/);
+    if (!hostMatch) continue;
+    pairs.push({ column: cols[i]!, hostVar: hostMatch[1]! });
+  }
+  return pairs;
 }
 
 /**
@@ -294,8 +418,13 @@ function resolveHostVar(
   return undefined;
 }
 
-function toHostVarRef(name: string, resolved: ResolvedHostVar | undefined): HostVarRef {
-  if (!resolved) return { name };
+function toHostVarRef(
+  name: string,
+  resolved: ResolvedHostVar | undefined,
+  column?: string,
+): HostVarRef {
+  const columnFields = column ? { column } : {};
+  if (!resolved) return { name, ...columnFields };
   const { dataItem, originCopybook, replacingSubstitution } = resolved;
   return {
     name,
@@ -307,6 +436,7 @@ function toHostVarRef(name: string, resolved: ResolvedHostVar | undefined): Host
       originCopybook,
       ...(replacingSubstitution ? { replacingSubstitution } : {}),
     },
+    ...columnFields,
   };
 }
 
@@ -373,12 +503,25 @@ function bump(
   usage.operations.add(op);
   for (const hv of hostVars) {
     const existing = usage.hostVars.get(hv.name);
-    // Keep the first resolved entry — don't let a later unresolved hit
-    // (e.g., from a different SQL block in the same program) clobber
-    // useful structural info we already collected.
-    if (!existing || (!existing.dataItem && hv.dataItem)) {
+    if (!existing) {
       usage.hostVars.set(hv.name, hv);
+      continue;
     }
+    // Field-by-field merge so a later SQL block can fill in info the
+    // first one didn't have, without ever clobbering info we already
+    // collected. Typical cases:
+    //   - First ref unresolved, second resolved → upgrade `dataItem`.
+    //   - First ref had no column binding (SELECT-without-INTO), second
+    //     had one (INSERT col-list, #41 Phase A) → attach `column`.
+    // Pre-#41 this was a whole-entry replace gated on the dataItem
+    // upgrade; that pattern silently dropped a later `column` when the
+    // first ref was already resolved.
+    const merged: HostVarRef = {
+      name: hv.name,
+      dataItem: existing.dataItem ?? hv.dataItem,
+      column: existing.column ?? hv.column,
+    };
+    usage.hostVars.set(hv.name, merged);
   }
   usage.callSites.push(loc);
 }
@@ -449,6 +592,18 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
         continue;
       }
       const hostVarNames = extractHostVars(ref.rawText);
+      // #41 Phase A — parse column bindings once per SQL ref. Empty when the
+      // ref's shape isn't one of the three handled patterns; per-name lookup
+      // below silently leaves `column` unset on those host vars.
+      const bindings = parseSqlColumnBindings(ref.rawText, op);
+      const columnByHostVar = new Map<string, string>();
+      for (const b of bindings) {
+        // First binding wins — if the same host var appears in both the
+        // SET clause and the WHERE clause of an UPDATE, the SET-clause
+        // column was extracted first by parseSqlColumnBindings, so this
+        // map preserves the column-write association.
+        if (!columnByHostVar.has(b.hostVar)) columnByHostVar.set(b.hostVar, b.column);
+      }
       const hostVars: HostVarRef[] = hostVarNames.map((name) => {
         const resolved = resolveHostVar(program, name, copybooksByLogicalName);
         if (!resolved) {
@@ -485,7 +640,7 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
             });
           }
         }
-        return toHostVarRef(name, resolved);
+        return toHostVarRef(name, resolved, columnByHostVar.get(name));
       });
       for (const table of ref.tables) {
         bump(tableState, table, kind, programId, sourceFile, op, hostVars, ref.loc);

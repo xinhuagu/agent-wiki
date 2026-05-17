@@ -1163,11 +1163,16 @@ function db2EntryMatches(
     ? leafFieldName(requestedQualifiedName).toUpperCase()
     : undefined;
   return allHostVars.some((hv) => {
+    const hvName = hv.name.toUpperCase();
     const dataItemName = hv.dataItem?.name.toUpperCase();
-    if (fnUpper !== undefined
-      && hv.name.toUpperCase() !== fnUpper
-      && dataItemName !== fnUpper) return false;
-    if (qnLeaf !== undefined && dataItemName !== qnLeaf) return false;
+    if (fnUpper !== undefined && hvName !== fnUpper && dataItemName !== fnUpper) return false;
+    // qualified_name leaf must match symmetrically with field_name — both
+    // hv.name (the SQL-visible name) and dataItem.name (the resolved
+    // copybook field) qualify. REPLACING-aliased host vars carry the SQL
+    // name in `hv.name` and the original in `dataItem.name`; a query
+    // for `qualified_name=ANY.CLIENT-ID` (the alias) was rejected when
+    // only dataItem.name was checked (Codex review #4 on #45).
+    if (qnLeaf !== undefined && hvName !== qnLeaf && dataItemName !== qnLeaf) return false;
     return true;
   });
 }
@@ -1203,11 +1208,12 @@ function matchingDb2HostVarNames(
     : undefined;
   const matched = new Set<string>();
   for (const hv of allHostVars) {
+    const hvName = hv.name.toUpperCase();
     const dataItemName = hv.dataItem?.name.toUpperCase();
-    if (fnUpper !== undefined
-      && hv.name.toUpperCase() !== fnUpper
-      && dataItemName !== fnUpper) continue;
-    if (qnLeaf !== undefined && dataItemName !== qnLeaf) continue;
+    if (fnUpper !== undefined && hvName !== fnUpper && dataItemName !== fnUpper) continue;
+    // Match qualified_name leaf against both hv.name and dataItem.name,
+    // symmetric with the field_name check above. See db2EntryMatches.
+    if (qnLeaf !== undefined && hvName !== qnLeaf && dataItemName !== qnLeaf) continue;
     matched.add(hv.name);
   }
   return matched;

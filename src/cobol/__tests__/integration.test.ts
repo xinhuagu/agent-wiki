@@ -705,6 +705,65 @@ describe("COBOL MCP tools integration", () => {
     expect(single.summary.db2Matches).toBe(1);
   });
 
+  it("code_query field_lineage DB2 qualified_name matches REPLACING-aliased host-var names (#44 Codex review #6)", async () => {
+    // REPLACING aliases the host var: SQL sees :CLIENT-ID, the resolved
+    // dataItem still has name=CUSTOMER-ID. qualified_name=ANY.CLIENT-ID
+    // must match the alias (hv.name) just like field_name does — pre-fix
+    // qualified_name leaf only checked dataItem.name and dropped the
+    // entry.
+    const copybook = `
+       01  CUSTOMER-REC.
+           05  CUSTOMER-ID       PIC X(10).
+`;
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+           COPY CUSTOMER-REC REPLACING CUSTOMER-ID BY CLIENT-ID.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (ID)
+                    VALUES (:CLIENT-ID) END-EXEC.
+           STOP RUN.
+`;
+    const reader = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. READER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  RD-ID              PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL SELECT ID INTO :RD-ID FROM CUSTOMERS END-EXEC.
+           STOP RUN.
+`;
+    wiki.rawAdd("WRITER.cbl", { content: writer });
+    wiki.rawAdd("READER.cbl", { content: reader });
+    wiki.rawAdd("CUSTOMER-REC.cpy", { content: copybook });
+    await handleTool(wiki, "code_parse", { path: "WRITER.cbl" });
+    await handleTool(wiki, "code_parse", { path: "READER.cbl" });
+    await handleTool(wiki, "code_parse", { path: "CUSTOMER-REC.cpy" });
+
+    // Query by the SQL-visible alias.
+    const aliasResult = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      qualified_name: "ANY.CLIENT-ID",
+    });
+    const alias = JSON.parse(aliasResult as string);
+    expect(alias.summary.db2Matches).toBe(1);
+
+    // And by the resolved copybook name — still works (was already covered).
+    const resolvedResult = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      qualified_name: "ANY.CUSTOMER-ID",
+    });
+    const resolved = JSON.parse(resolvedResult as string);
+    expect(resolved.summary.db2Matches).toBe(1);
+  });
+
   it("code_query field_lineage tolerates DB2 entries without columnPairs field (#44 Codex review #4)", async () => {
     // Pre-Phase-B `field-lineage.json` artifacts on disk don't have
     // `entry.columnPairs`. The renderer already guards with `?? []`;

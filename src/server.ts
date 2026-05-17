@@ -33,6 +33,8 @@ import { cobolPlugin } from "./cobol/plugin.js";
 import { canonicalNodeId, deserializeGraph, displayLabel, graphEdgesFrom, graphImpactOf } from "./cobol/graph.js";
 import type { CodeProcedure, CodeRelation, NormalizedCodeModel } from "./code-analysis.js";
 import type { SerializedFieldLineage, SerializedInferredFieldLineageEntry } from "./cobol/field-lineage.js";
+import type { SerializedCallBoundLineageEntry } from "./cobol/call-boundary-lineage.js";
+import type { SerializedDb2LineageEntry } from "./cobol/db2-table-lineage.js";
 import { normalizeLoadedFieldLineage } from "./cobol/field-lineage.js";
 import type { GraphEdge, GraphNode, KnowledgeGraph, NodeKind, SerializedGraph } from "./cobol/graph.js";
 
@@ -1078,19 +1080,143 @@ function qualifiedNameMatches(candidate: string | undefined, requested?: string)
   return candidate.trim().toUpperCase() === requested.trim().toUpperCase();
 }
 
+function leafFieldName(qualified: string | undefined): string {
+  if (!qualified) return "";
+  const parts = qualified.split(".");
+  return parts[parts.length - 1] ?? "";
+}
+
 function inferredEntryMatches(
   entry: SerializedInferredFieldLineageEntry,
   requestedFieldName?: string,
   requestedQualifiedName?: string,
   requestedCopybook?: string,
 ): boolean {
-  if (requestedFieldName && entry.fieldName.toUpperCase() !== requestedFieldName.toUpperCase()) return false;
-  if (!requestedQualifiedName && !requestedCopybook) return true;
-  const leftMatches = copybookMatches(entry.left.copybook, requestedCopybook)
-    && qualifiedNameMatches(entry.left.qualifiedName, requestedQualifiedName);
-  const rightMatches = copybookMatches(entry.right.copybook, requestedCopybook)
-    && qualifiedNameMatches(entry.right.qualifiedName, requestedQualifiedName);
-  return leftMatches || rightMatches;
+  // Each side of the pair must satisfy ALL filters together. A pre-#44
+  // Codex review caught that the prior implementation checked field_name
+  // and qualified_name independently — that lets a `field_name=CUST-ID +
+  // qualified_name=CUSTOMER-REC.ADDRESS.CUSTOMER-ID` query match a
+  // semantic rename pair `CUSTOMER-ID ↔ CUST-ID` because field_name
+  // hits the right side's leaf while qualified_name hits the left side's
+  // qualified path. Neither endpoint actually satisfies both filters.
+  // Closing that gap means walking sides explicitly.
+  const fnUpper = requestedFieldName?.toUpperCase();
+  const matchesSide = (side: { qualifiedName: string; copybook: { id: string } }): boolean => {
+    if (fnUpper && leafFieldName(side.qualifiedName).toUpperCase() !== fnUpper) return false;
+    if (!copybookMatches(side.copybook, requestedCopybook)) return false;
+    if (!qualifiedNameMatches(side.qualifiedName, requestedQualifiedName)) return false;
+    return true;
+  };
+  return matchesSide(entry.left) || matchesSide(entry.right);
+}
+
+/**
+ * Match a CALL boundary entry against the query. The copybook filter
+ * doesn't apply — CALL boundary pairs are caller/callee program data
+ * items, not copybook-anchored.
+ *
+ * Walks caller and callee as complete endpoints: each must satisfy ALL
+ * filters together (Codex review #3 on #45). The pre-fix split-check
+ * let `field_name=WS-REC + qualified_name=LK-REC` match a `WS-REC ↔
+ * LK-REC` pair because field_name hit the caller and qualified_name
+ * hit the callee, even though neither endpoint individually satisfied
+ * both — the same cross-side bug already fixed for inferred and DB2.
+ */
+function callBoundEntryMatches(
+  entry: SerializedCallBoundLineageEntry,
+  requestedFieldName?: string,
+  requestedQualifiedName?: string,
+): boolean {
+  const fnUpper = requestedFieldName?.toUpperCase();
+  const matchesEndpoint = (endpoint: { fieldName: string; qualifiedName: string }): boolean => {
+    if (fnUpper !== undefined && endpoint.fieldName.toUpperCase() !== fnUpper) return false;
+    if (!qualifiedNameMatches(endpoint.qualifiedName, requestedQualifiedName)) return false;
+    return true;
+  };
+  return matchesEndpoint(entry.caller) || matchesEndpoint(entry.callee);
+}
+
+/**
+ * Match a DB2 entry against the query. DB2 host vars don't carry full
+ * qualified paths, so qualified_name matching falls back to comparing
+ * the leaf segment against the resolved `dataItem.name` on any of the
+ * writer / reader host vars. The response surfaces this fallback as a
+ * `notes` entry so the consumer knows precision is reduced here.
+ * Copybook filter doesn't apply directly (DB2 host vars are program-
+ * declared) — left out by design.
+ */
+function db2EntryMatches(
+  entry: SerializedDb2LineageEntry,
+  requestedFieldName?: string,
+  requestedQualifiedName?: string,
+): boolean {
+  if (!requestedFieldName && !requestedQualifiedName) return true;
+  // Same-host-var constraint (Codex review #3 on #45): both filters must
+  // satisfy on the *same* host var, not on different ones across writer
+  // and reader. The pre-fix split-check let `field_name=WR-ID +
+  // qualified_name=ANY.RD-NAME` match a CUSTOMERS entry where WR-ID
+  // and RD-NAME lived on separate host vars — a false positive
+  // mirroring the earlier semantic-side bug.
+  const allHostVars = [...entry.writer.hostVars, ...entry.reader.hostVars];
+  const fnUpper = requestedFieldName?.toUpperCase();
+  const qnLeaf = requestedQualifiedName
+    ? leafFieldName(requestedQualifiedName).toUpperCase()
+    : undefined;
+  return allHostVars.some((hv) => {
+    const hvName = hv.name.toUpperCase();
+    const dataItemName = hv.dataItem?.name.toUpperCase();
+    if (fnUpper !== undefined && hvName !== fnUpper && dataItemName !== fnUpper) return false;
+    // qualified_name leaf must match symmetrically with field_name — both
+    // hv.name (the SQL-visible name) and dataItem.name (the resolved
+    // copybook field) qualify. REPLACING-aliased host vars carry the SQL
+    // name in `hv.name` and the original in `dataItem.name`; a query
+    // for `qualified_name=ANY.CLIENT-ID` (the alias) was rejected when
+    // only dataItem.name was checked (Codex review #4 on #45).
+    if (qnLeaf !== undefined && hvName !== qnLeaf && dataItemName !== qnLeaf) return false;
+    return true;
+  });
+}
+
+/**
+ * Compute the set of host-var **names** in a DB2 entry that satisfied the
+ * query — by direct name match, by resolved `dataItem.name` (so REPLACING
+ * aliases like `:CLIENT-ID` carrying `dataItem.name = CUSTOMER-ID` still
+ * count), or by `qualified_name` leaf fallback against `dataItem.name`.
+ *
+ * Returned set is keyed on the host-var's serialized `name` so the column-
+ * pair filter (whose payload only carries `writerHostVar` / `readerHostVar`
+ * names) can decide membership by set lookup. Codex caught that the prior
+ * pair filter only compared against raw host-var names and silently
+ * dropped pairs the parent entry matched via `dataItem.name`.
+ */
+function matchingDb2HostVarNames(
+  entry: SerializedDb2LineageEntry,
+  requestedFieldName?: string,
+  requestedQualifiedName?: string,
+): Set<string> {
+  const allHostVars = [...entry.writer.hostVars, ...entry.reader.hostVars];
+  if (!requestedFieldName && !requestedQualifiedName) {
+    return new Set(allHostVars.map((hv) => hv.name));
+  }
+  // Same-host-var constraint mirrors db2EntryMatches: each filter must
+  // satisfy on the same host var, otherwise the column-pair filter
+  // surface drifts wider than the entry surface and lets pairs through
+  // for host vars no one actually queried.
+  const fnUpper = requestedFieldName?.toUpperCase();
+  const qnLeaf = requestedQualifiedName
+    ? leafFieldName(requestedQualifiedName).toUpperCase()
+    : undefined;
+  const matched = new Set<string>();
+  for (const hv of allHostVars) {
+    const hvName = hv.name.toUpperCase();
+    const dataItemName = hv.dataItem?.name.toUpperCase();
+    if (fnUpper !== undefined && hvName !== fnUpper && dataItemName !== fnUpper) continue;
+    // Match qualified_name leaf against both hv.name and dataItem.name,
+    // symmetric with the field_name check above. See db2EntryMatches.
+    if (qnLeaf !== undefined && hvName !== qnLeaf && dataItemName !== qnLeaf) continue;
+    matched.add(hv.name);
+  }
+  return matched;
 }
 
 function buildFieldLineageResponse(
@@ -1109,6 +1235,7 @@ function buildFieldLineageResponse(
     throw new Error("field_lineage requires field_name or qualified_name");
   }
 
+  // ── Copybook families ──────────────────────────────────────────────
   const deterministic = lineage.deterministic.filter((entry) => {
     if (fieldName && entry.fieldName.toUpperCase() !== fieldName.toUpperCase()) return false;
     if (qualifiedName && !entry.qualifiedNames.some((name) => qualifiedNameMatches(name, qualifiedName))) return false;
@@ -1121,42 +1248,90 @@ function buildFieldLineageResponse(
   const inferredAmbiguous = lineage.inferredAmbiguous.filter((entry) =>
     inferredEntryMatches(entry, fieldName, qualifiedName, copybook)
   );
+  // #35 semantic tier — shape-keyed; either side's leaf can match. The
+  // same `inferredEntryMatches` widening (#44 added leaf checks) handles
+  // it, so the filter call shape matches high/ambiguous.
+  const inferredSemantic = (lineage.inferredSemantic ?? []).filter((entry) =>
+    inferredEntryMatches(entry, fieldName, qualifiedName, copybook)
+  );
 
-  // Top-level envelope summarizes the strongest evidence in the response.
-  // Consumers (LLM agents, downstream tools) branch on `confidence` /
-  // `abstain` without inspecting per-entry tier detail.
-  const evidence: EvidenceEnvelope =
-    deterministic.length > 0
-      ? {
-          confidence: "strong",
-          basis: "deterministic",
-          abstain: false,
-          rationale: `${deterministic.length} deterministic match(es) via copybook lineage.`,
-          provenance: [],
-        }
-      : inferredHighConfidence.length > 0
-      ? {
-          confidence: "weak",
-          basis: "inferred",
-          abstain: false,
-          rationale: `${inferredHighConfidence.length} inferred high-confidence match(es); no deterministic matches.`,
-          provenance: [],
-        }
-      : inferredAmbiguous.length > 0
-      ? {
-          confidence: "absent",
-          basis: "inferred",
-          abstain: true,
-          rationale: `${inferredAmbiguous.length} ambiguous match(es) only; lineage cannot be determined with confidence.`,
-          provenance: [],
-        }
-      : {
-          confidence: "absent",
-          basis: "inferred",
-          abstain: true,
-          rationale: "No matches found for the requested field.",
-          provenance: [],
-        };
+  // ── CALL boundary (#44) ────────────────────────────────────────────
+  // Copybook filter intentionally not applied — CALL boundary entries
+  // pair caller and callee data items by position, not by copybook
+  // identity. A `copybook=...` query implicitly looks for copybook-
+  // family lineage and shouldn't produce false CALL-boundary results.
+  const callBoundAll = lineage.callBoundLineage?.entries ?? [];
+  const callBound = copybook
+    ? []
+    : callBoundAll.filter((entry) => callBoundEntryMatches(entry, fieldName, qualifiedName));
+
+  // ── DB2 (#44) ──────────────────────────────────────────────────────
+  // Same reasoning for copybook filter: DB2 host vars are program-
+  // declared, not copybook-anchored.
+  const db2All = lineage.db2Lineage?.entries ?? [];
+  const db2 = copybook
+    ? []
+    : db2All.filter((entry) => db2EntryMatches(entry, fieldName, qualifiedName));
+  // Column-pair matches are a flat list across all matching DB2 entries.
+  // Each pair carries enough context (table + programs) to be standalone.
+  // Pair-filter set covers both raw host-var names AND dataItem aliases
+  // (e.g., a `:CLIENT-ID` host var whose `dataItem.name` is `CUSTOMER-ID`
+  // qualifies via the alias), so the pair surface stays consistent with
+  // the entry-level match.
+  const db2ColumnPairs = db2.flatMap((entry) => {
+    const matchingNames = matchingDb2HostVarNames(entry, fieldName, qualifiedName);
+    // `?? []` guards pre-Phase-B artifacts on disk (Codex review #4 on
+    // #45): older `field-lineage.json` files have DB2 entries without a
+    // `columnPairs` field. The renderer already defaults it; the query
+    // path must too, otherwise `.filter(...)` throws a TypeError.
+    return (entry.columnPairs ?? [])
+      .filter((pair) =>
+        matchingNames.has(pair.writerHostVar) || matchingNames.has(pair.readerHostVar))
+      .map((pair) => ({
+        table: entry.table,
+        writerProgramId: entry.writer.programId,
+        readerProgramId: entry.reader.programId,
+        ...pair,
+      }));
+  });
+
+  // ── Cross-family evidence envelope (#44) ───────────────────────────
+  // Strongest evidence across ALL families wins. Pre-#44 this only
+  // considered the copybook tiers and silently abstained when only
+  // CALL boundary or DB2 matches existed.
+  const callBoundDeterministic = callBound.filter((e) => e.confidence === "deterministic").length;
+  const callBoundHigh = callBound.filter((e) => e.confidence === "high").length;
+  const evidence = buildLineageEnvelope({
+    deterministicCopybook: deterministic.length,
+    callBoundDeterministic,
+    db2: db2.length,
+    inferredHigh: inferredHighConfidence.length,
+    callBoundHigh,
+    semantic: inferredSemantic.length,
+    ambiguous: inferredAmbiguous.length,
+  });
+
+  // ── Family availability — distinguishes "no artifact for family"
+  // from "family exists but query didn't match it" so empty-result
+  // consumers can give actionable feedback to the user.
+  const familyAvailability = {
+    copybook: lineage.deterministic.length > 0
+      || lineage.inferredHighConfidence.length > 0
+      || lineage.inferredAmbiguous.length > 0
+      || (lineage.inferredSemantic ?? []).length > 0,
+    callBound: !!lineage.callBoundLineage && callBoundAll.length > 0,
+    db2: !!lineage.db2Lineage && db2All.length > 0,
+  };
+
+  // Notes surface limitations the consumer should know about — currently
+  // just the DB2 qualified_name fallback. Empty array (not omitted) so
+  // clients can rely on the field being present.
+  const notes: string[] = [];
+  if (qualifiedName && db2All.length > 0) {
+    notes.push(
+      "DB2 host vars do not carry a full qualified path — qualified_name matching falls back to comparing the leaf segment against host-var dataItem.name. DB2 matches may include refs where the parent qualified path differs but the leaf agrees.",
+    );
+  }
 
   return {
     query: {
@@ -1170,11 +1345,83 @@ function buildFieldLineageResponse(
       deterministicMatches: deterministic.length,
       inferredHighConfidenceMatches: inferredHighConfidence.length,
       inferredAmbiguousMatches: inferredAmbiguous.length,
+      inferredSemanticMatches: inferredSemantic.length,
+      callBoundMatches: callBound.length,
+      db2Matches: db2.length,
+      db2ColumnPairMatches: db2ColumnPairs.length,
+      familyAvailability,
     },
     evidence,
     deterministic,
     inferredHighConfidence,
     inferredAmbiguous,
+    inferredSemantic,
+    callBound: { entries: callBound },
+    db2: { entries: db2, columnPairs: db2ColumnPairs },
+    notes,
+  };
+}
+
+/**
+ * Compute the top-level evidence envelope from per-family match counts
+ * (#44). Strong wins when any deterministic-tier family hits; weak wins
+ * when only inferred families hit; absent + abstain when only ambiguous
+ * or no matches exist. The rationale text enumerates which families
+ * contributed so an LLM consumer can read off the source without
+ * walking the per-family arrays.
+ */
+function buildLineageEnvelope(counts: {
+  deterministicCopybook: number;
+  callBoundDeterministic: number;
+  db2: number;
+  inferredHigh: number;
+  callBoundHigh: number;
+  semantic: number;
+  ambiguous: number;
+}): EvidenceEnvelope {
+  const det = counts.deterministicCopybook + counts.callBoundDeterministic + counts.db2;
+  const weak = counts.inferredHigh + counts.callBoundHigh + counts.semantic;
+  if (det > 0) {
+    const parts: string[] = [];
+    if (counts.deterministicCopybook > 0) parts.push(`${counts.deterministicCopybook} deterministic copybook`);
+    if (counts.callBoundDeterministic > 0) parts.push(`${counts.callBoundDeterministic} CALL boundary`);
+    if (counts.db2 > 0) parts.push(`${counts.db2} DB2 table`);
+    return {
+      confidence: "strong",
+      basis: "deterministic",
+      abstain: false,
+      rationale: `${det} deterministic match(es): ${parts.join(", ")}.`,
+      provenance: [],
+    };
+  }
+  if (weak > 0) {
+    const parts: string[] = [];
+    if (counts.inferredHigh > 0) parts.push(`${counts.inferredHigh} inferred high-confidence`);
+    if (counts.callBoundHigh > 0) parts.push(`${counts.callBoundHigh} CALL boundary high`);
+    if (counts.semantic > 0) parts.push(`${counts.semantic} semantic-inferred`);
+    return {
+      confidence: "weak",
+      basis: "inferred",
+      abstain: false,
+      rationale: `${weak} inferred match(es): ${parts.join(", ")}; no deterministic matches.`,
+      provenance: [],
+    };
+  }
+  if (counts.ambiguous > 0) {
+    return {
+      confidence: "absent",
+      basis: "inferred",
+      abstain: true,
+      rationale: `${counts.ambiguous} ambiguous match(es) only; lineage cannot be determined with confidence.`,
+      provenance: [],
+    };
+  }
+  return {
+    confidence: "absent",
+    basis: "inferred",
+    abstain: true,
+    rationale: "No matches found for the requested field.",
+    provenance: [],
   };
 }
 

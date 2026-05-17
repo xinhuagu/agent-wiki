@@ -66,6 +66,19 @@ describe("parseSqlColumnBindings (#41 Phase A)", () => {
     ]);
   });
 
+  it("UPDATE without WHERE: last assignment still binds (END-EXEC anchor)", () => {
+    // Without an END-EXEC anchor in the regex, the trailing token would
+    // leak into the last assignment string and the strict
+    // `col = :host` match would drop it. Locks the END-EXEC behavior.
+    expect(parseSqlColumnBindings(
+      "EXEC SQL UPDATE T SET A = :WS-A, B = :WS-B END-EXEC",
+      "UPDATE",
+    )).toEqual([
+      { column: "A", hostVar: "WS-A" },
+      { column: "B", hostVar: "WS-B" },
+    ]);
+  });
+
   it("UPDATE: arithmetic / function on the right-hand side drops that assignment", () => {
     expect(parseSqlColumnBindings(
       "EXEC SQL UPDATE T SET COUNT = COUNT + 1, NAME = :WS-NAME WHERE ID = :WS-ID END-EXEC",

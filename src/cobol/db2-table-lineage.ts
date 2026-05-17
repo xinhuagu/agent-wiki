@@ -210,9 +210,12 @@ export function parseSqlColumnBindings(
   }
 
   if (op === "UPDATE") {
-    // Extract everything between SET and WHERE (or end-of-statement).
-    // Anchoring on `WHERE` keeps the predicate's `:host` from binding.
-    const m = upper.match(/SET\s+([\s\S]+?)(?:\s+WHERE\b|\s*$)/);
+    // Extract everything between SET and the first terminator: WHERE
+    // (predicate — its `:host` is a filter, not a binding), END-EXEC
+    // (rawText carries the END-EXEC token; without an anchor on it the
+    // last SET assignment would include `END-EXEC` and fail the strict
+    // `col = :host` regex below), or end of string.
+    const m = upper.match(/SET\s+([\s\S]+?)(?:\s+WHERE\b|\s+END-EXEC\b|\s*$)/);
     if (!m) return [];
     const bindings: Array<{ column: string; hostVar: string }> = [];
     for (const assignment of splitTopLevelCommas(m[1]!)) {

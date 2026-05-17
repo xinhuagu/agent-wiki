@@ -61,6 +61,28 @@ export interface JiraImportResult {
   importedCount: number;
 }
 
+/**
+ * Provenance metadata fetched from Confluence alongside the page body. Lets a
+ * downstream tool answer "who last changed this, when, and which revision is
+ * this?" without re-querying the source. Optional everywhere — older sidecars
+ * predate this block, and not every Cloud response carries `history.createdBy`
+ * cheaply (see Cloud `getPage` below for the /users follow-up cache).
+ */
+export interface ConfluenceMeta {
+  version: {
+    /** Last-modified timestamp of *this* revision, ISO 8601. */
+    when: string;
+    /** Page revision number (1-indexed). */
+    number: number;
+  };
+  history?: {
+    /** Page creation timestamp, ISO 8601. */
+    createdDate: string;
+    /** Original author. `displayName` may be absent on Cloud if the /users lookup failed. */
+    createdBy?: { displayName: string };
+  };
+}
+
 /** Metadata sidecar shape (matches RawDocument from wiki.ts). */
 interface RawMeta {
   path: string;
@@ -71,6 +93,12 @@ interface RawMeta {
   mimeType?: string;
   description?: string;
   tags?: string[];
+  /**
+   * Confluence-only provenance. Present on page sidecars when
+   * `raw_ingest --mode import_confluence` carried version / history through;
+   * absent on attachment sidecars and on legacy sidecars from pre-#27 imports.
+   */
+  confluence?: ConfluenceMeta;
 }
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -167,6 +195,14 @@ interface NormalizedConfluencePage {
   id: string;
   title: string;
   html: string;
+  /**
+   * Version / history block carried into the sidecar (#27). Optional because
+   * (a) older Server responses without expand= omit the data, and (b) Cloud
+   * v2's basic page response doesn't include `history.createdBy` — the Cloud
+   * client does a follow-up /users lookup for displayName but can fall back
+   * to omitting it on auth scope or transient failure.
+   */
+  meta?: ConfluenceMeta;
 }
 interface NormalizedConfluenceAttachment {
   title: string;
@@ -183,6 +219,69 @@ interface ConfluenceClient {
   getPage(pid: string): Promise<NormalizedConfluencePage>;
   getAttachments(pid: string): Promise<NormalizedConfluenceAttachment[]>;
   getChildren(pid: string): Promise<NormalizedConfluenceChild[]>;
+}
+
+/**
+ * Project a Confluence Cloud v2 `/pages/{id}` response into the shared
+ * `ConfluenceMeta` shape. Cloud v2 returns `version.createdAt` (timestamp of
+ * the current revision) and `data.createdAt` (page creation time, the v1
+ * equivalent of `history.createdDate`), but `history.createdBy.displayName`
+ * has to be resolved through a follow-up /users call by the caller.
+ *
+ * Returns `undefined` when neither `version` nor a `createdAt` block is
+ * present so the caller can omit the field entirely instead of emitting a
+ * half-empty object.
+ */
+async function projectCloudMeta(
+  data: any,
+  resolveDisplayName: (accountId?: string) => Promise<string | undefined>,
+): Promise<ConfluenceMeta | undefined> {
+  const versionWhen = data?.version?.createdAt;
+  const versionNumber = data?.version?.number;
+  if (typeof versionWhen !== "string" || typeof versionNumber !== "number") {
+    // version is non-optional in ConfluenceMeta — without both fields we
+    // can't construct a valid block, so skip the whole sidecar addition.
+    return undefined;
+  }
+  const meta: ConfluenceMeta = {
+    version: { when: versionWhen, number: versionNumber },
+  };
+  const createdDate = data?.createdAt;
+  if (typeof createdDate === "string") {
+    const displayName = await resolveDisplayName(data?.authorId);
+    meta.history = {
+      createdDate,
+      ...(displayName ? { createdBy: { displayName } } : {}),
+    };
+  }
+  return meta;
+}
+
+/**
+ * Project a Confluence Server / Data Center v1 `/content/{id}?expand=...`
+ * response. v1 carries the full history block inline (including
+ * `history.createdBy.displayName`), so no follow-up call is needed.
+ */
+function projectServerMeta(data: any): ConfluenceMeta | undefined {
+  const versionWhen = data?.version?.when;
+  const versionNumber = data?.version?.number;
+  if (typeof versionWhen !== "string" || typeof versionNumber !== "number") {
+    return undefined;
+  }
+  const meta: ConfluenceMeta = {
+    version: { when: versionWhen, number: versionNumber },
+  };
+  const createdDate = data?.history?.createdDate;
+  if (typeof createdDate === "string") {
+    const displayName = data?.history?.createdBy?.displayName;
+    meta.history = {
+      createdDate,
+      ...(typeof displayName === "string" && displayName.length > 0
+        ? { createdBy: { displayName } }
+        : {}),
+    };
+  }
+  return meta;
 }
 
 function buildConfluenceClient(
@@ -213,13 +312,38 @@ function buildConfluenceClient(
   }
 
   if (deployment === "cloud") {
+    // Per-import cache of accountId → displayName. Confluence Cloud v2's basic
+    // page response carries `authorId` but not `displayName`, so we resolve it
+    // via /users/{accountId}. A recursive import of 100 pages by the same
+    // handful of authors collapses to a few lookups instead of 100.
+    // Misses (network failure, permission scope) cache as `null` to avoid
+    // re-firing the call repeatedly.
+    const userCache = new Map<string, string | null>();
+    async function resolveDisplayName(accountId?: string): Promise<string | undefined> {
+      if (!accountId) return undefined;
+      const cached = userCache.get(accountId);
+      if (cached !== undefined) return cached ?? undefined;
+      try {
+        const u = await api(`/users/${accountId}`);
+        const name = typeof u?.displayName === "string" ? u.displayName : null;
+        userCache.set(accountId, name);
+        return name ?? undefined;
+      } catch {
+        // Don't block the import on a user lookup; just omit displayName.
+        userCache.set(accountId, null);
+        return undefined;
+      }
+    }
+
     return {
       async getPage(pid) {
         const data = await api(`/pages/${pid}?body-format=storage`);
+        const meta = await projectCloudMeta(data, resolveDisplayName);
         return {
           id: data.id,
           title: data.title,
           html: data.body?.storage?.value ?? "",
+          ...(meta ? { meta } : {}),
         };
       },
       async getAttachments(pid) {
@@ -266,11 +390,18 @@ function buildConfluenceClient(
   // body returned via ?expand=body.storage.
   return {
     async getPage(pid) {
-      const data = await api(`/content/${pid}?expand=body.storage`);
+      // Expand version + history + history.createdBy inline (#27). v1 returns
+      // displayName directly under history.createdBy.displayName so we don't
+      // need the follow-up /users call the Cloud client does.
+      const data = await api(
+        `/content/${pid}?expand=body.storage,version,history,history.createdBy`,
+      );
+      const meta = projectServerMeta(data);
       return {
         id: String(data.id),
         title: data.title ?? "",
         html: data.body?.storage?.value ?? "",
+        ...(meta ? { meta } : {}),
       };
     },
     async getAttachments(pid) {
@@ -400,6 +531,7 @@ export async function confluenceImport(
         mimeType: "text/html",
         description: `Confluence: ${page.title}`,
         tags: ["confluence", space],
+        ...(page.meta ? { confluence: page.meta } : {}),
       });
       files.push(relPath);
     }

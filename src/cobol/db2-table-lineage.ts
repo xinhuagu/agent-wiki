@@ -709,7 +709,18 @@ export function buildDb2TableLineage(models: CobolCodeModel[]): Db2Lineage | nul
       // e.g. `INSERT INTO T (ID, ALT_ID) VALUES (:WR-ID, :WR-ID)`) is
       // captured as a list per host var — the bump-merge below unions
       // these across all of the program's refs.
-      const bindings = parseSqlColumnBindings(ref.rawText, op);
+      //
+      // **Multi-table guard** (Codex review on #43): when the ref touches
+      // more than one table (subqueries, JOINs, UPDATE … WHERE EXISTS …),
+      // we can't safely attribute a parsed column to one specific table —
+      // attaching the same column to every table would let the Phase B
+      // intersection emit false pairs (e.g., a SELECT FROM T1 picking up
+      // T2 via a WHERE EXISTS subquery would also mark host vars as
+      // reading T2's column). Skip column binding entirely on those refs;
+      // table-scoping the bindings is bigger Phase C work.
+      const bindings = ref.tables.length === 1
+        ? parseSqlColumnBindings(ref.rawText, op)
+        : [];
       const columnsByHostVar = new Map<string, string[]>();
       for (const b of bindings) {
         const list = columnsByHostVar.get(b.hostVar) ?? [];

@@ -1223,6 +1223,47 @@ ${lines}
       ]);
     });
 
+    it("multi-table SQL refs skip column binding to avoid false cross-table pairs (Codex review fix)", () => {
+      // The Codex review on #43 caught that a SELECT touching multiple
+      // tables (via subqueries, joins, or WHERE EXISTS) had the same
+      // column bindings attached to every table — so a writer to T2
+      // would falsely pair through a reader that actually reads from
+      // T1. Fix: when ref.tables.length > 1, parseSqlColumnBindings is
+      // skipped and no host var carries a column. The Phase B
+      // intersection therefore emits no false pairs.
+      const writer = makeWriter("WRITER", [
+        "EXEC SQL INSERT INTO ORDERS (ID)",
+        "         VALUES (:WR-ID) END-EXEC.",
+      ]);
+      // Reader's SELECT mentions both ORDERS (FROM) and CUSTOMERS
+      // (in a subquery). extractSqlTableNames returns both tables.
+      const reader = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. READER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  RD-ID              PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL SELECT ID INTO :RD-ID FROM CUSTOMERS
+                    WHERE ID IN (SELECT CUST_ID FROM ORDERS) END-EXEC.
+           STOP RUN.
+`;
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      // ORDERS is the shared table → entry exists.
+      const ordersEntry = lineage!.entries.find((e) => e.table === "ORDERS");
+      expect(ordersEntry).toBeDefined();
+      // Reader's :RD-ID has NO column binding because the multi-table
+      // ref triggered the guard. So no false pair through ORDERS.ID.
+      const rdId = ordersEntry!.reader.hostVars.find((hv) => hv.name === "RD-ID");
+      expect(rdId?.columns).toEqual([]);
+      expect(ordersEntry!.columnPairs).toEqual([]);
+    });
+
     it("summary.columnPairs sums across multiple writer-reader entries", () => {
       // One writer, two readers — produces two entries (one per writer-
       // reader pair). Each entry contributes its own columnPairs; the

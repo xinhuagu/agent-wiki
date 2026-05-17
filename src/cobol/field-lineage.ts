@@ -724,6 +724,15 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
     const fields = flattenedByCopybook.get(usage.copybookId) ?? [];
     for (const cohort of usage.cohorts) {
       if (cohort.consumers.length < 2) continue;
+      // Skip cohorts whose REPLACING text we couldn't structure into pairs
+      // — fragment / partial-token substitution (same Phase A limit). The
+      // consumers HAVE substitution; we just don't know what gets renamed.
+      // Emitting `deterministic` under the original copybook names would
+      // be a false positive on any field the substitution actually
+      // touches, so preserve the pre-#39 behavior of treating unparseable-
+      // REPLACING consumers as singletons.
+      const isUnparseableReplacing = cohort.key !== "[]" && cohort.pairs.length === 0;
+      if (isUnparseableReplacing) continue;
       const isReplacingCohort = cohort.pairs.length > 0;
       for (const field of fields) {
         const projected = projectFieldThroughReplacing(field, cohort.pairs);

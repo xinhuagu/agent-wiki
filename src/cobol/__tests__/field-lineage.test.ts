@@ -1195,6 +1195,31 @@ describe("COBOL field lineage", () => {
       expect(page.content).toContain("deterministic-via-replacing");
     });
 
+    it("fragment-substitution cohorts (unparseable REPLACING) skip deterministic emission", () => {
+      // Two consumers with the same fragment-style REPLACING that
+      // parseReplacingPairs can't structure (e.g., `:T BY WS` — colon
+      // prefix isn't a valid COBOL identifier start). They land in the
+      // same cohort by raw-tuple identity, but we can't apply the
+      // substitution, so we don't know what fields are actually renamed.
+      // Pre-#39 behavior was "exclude from deterministic"; Phase B
+      // preserves it by skipping the cohort.
+      const orderA = model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl");
+      const orderB = model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl");
+      // Hand-construct the fragment shape — `parseReplacingPairs` rejects
+      // tokens that fail [A-Z][A-Z0-9-]*, so the cohort has empty pairs
+      // despite the raw-tuple being non-empty.
+      orderA.copies[0]!.replacing = [":T", "BY", "WS"];
+      orderB.copies[0]!.replacing = [":T", "BY", "WS"];
+      const lineage = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        orderA,
+        orderB,
+      ]);
+      // No deterministic emission from the fragment cohort. Singletons in
+      // every other cohort either — lineage is null.
+      expect(lineage).toBeNull();
+    });
+
     it("normalizeLoadedFieldLineage backfills summary.deterministic.viaReplacing for pre-#39 JSON", () => {
       const pre39 = {
         summary: {

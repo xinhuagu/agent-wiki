@@ -776,6 +776,8 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
   lines.push("---");
   lines.push("");
 
+  renderCoverageSection(lines, lineage, callBound, db2);
+
   const overviewHasCopybook = lineage.copybookUsage.length > 0
     || lineage.deterministic.length > 0
     || lineage.inferredHighConfidence.length > 0
@@ -1095,6 +1097,72 @@ function renderDb2Exclusions(
     if (known.has(kind)) continue;
     renderRow(kind, count, sample);
   }
+  lines.push("");
+}
+
+/**
+ * Compact "top N excluded reasons" for a coverage-row cell. Kinds with
+ * zero counts are dropped first so the cell never renders a noise entry
+ * like `0 system-call`. Sort is count desc, kind asc on tie — pinning the
+ * tie-break gives byte-stable output across rebuilds when two kinds have
+ * the same count.
+ */
+function topExclusionReasons(byKind: Record<string, number>, limit = 2): string {
+  const ranked = Object.entries(byKind)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (ranked.length === 0) return "—";
+  return ranked.slice(0, limit).map(([kind, count]) => `${count} ${kind}`).join(", ");
+}
+
+/**
+ * Coverage gauge rendered at the top of `field-lineage.md`. Three rows —
+ * Copybook / Call boundary / DB2 — each showing what was indexed, what
+ * yielded lineage, and the top excluded reasons. Empty families omit their
+ * row. All counts derive from existing summary fields on the artifact; no
+ * new aggregation logic.
+ */
+function renderCoverageSection(
+  lines: string[],
+  lineage: SerializedFieldLineage,
+  callBound: CallBoundLineage | null,
+  db2: Db2Lineage | null,
+): void {
+  // Pre-#30 in-memory shapes may lack diagnosticsByKind; mirror the
+  // defensive `?.` already used at the Overview row for the zero-data-items
+  // counter. `lineage.diagnostics ?? []` covers the same pre-#30 gap.
+  const copybookDiagByKind = lineage.summary.diagnosticsByKind ?? {} as Record<string, number>;
+  const zeroDataItemsCount = (copybookDiagByKind as Record<string, number>)["parsed-zero-data-items"] ?? 0;
+  const copybookHasContent = lineage.copybookUsage.length > 0
+    || lineage.deterministic.length > 0
+    || lineage.inferredHighConfidence.length > 0
+    || lineage.inferredAmbiguous.length > 0
+    || zeroDataItemsCount > 0;
+
+  const rows: string[] = [];
+  if (copybookHasContent) {
+    const yielding = `${lineage.summary.deterministic.copybooks} deterministic, ${lineage.summary.inferred.copybooks} inferred`;
+    rows.push(
+      `| Copybook | ${lineage.copybookUsage.length} | ${yielding} | ${topExclusionReasons(copybookDiagByKind)} |`,
+    );
+  }
+  if (callBound) {
+    rows.push(
+      `| Call boundary | ${callBound.summary.callSites} call sites | ${callBound.summary.pairs} pairs | ${topExclusionReasons(callBound.summary.diagnosticsByKind)} |`,
+    );
+  }
+  if (db2) {
+    rows.push(
+      `| DB2 | ${db2.summary.sharedTables} tables | ${db2.summary.pairs} writer→reader | ${topExclusionReasons(db2.summary.diagnosticsByKind)} |`,
+    );
+  }
+  if (rows.length === 0) return;
+
+  lines.push("## Coverage");
+  lines.push("");
+  lines.push("| Family | Indexed | Yielding lineage | Excluded (top reasons) |");
+  lines.push("|--------|---------|------------------|------------------------|");
+  lines.push(...rows);
   lines.push("");
 }
 

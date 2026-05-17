@@ -470,12 +470,17 @@ function toHostVarRef(
   resolved: ResolvedHostVar | undefined,
   columns: string[],
 ): HostVarRef {
-  // `column` is a convenience alias for `columns[0]` — present whenever
-  // any column is bound, so external consumers from #41 Phase A keep
-  // working with the singular handle.
+  // `columns` is sorted for byte-stable artifact output, but `column`
+  // (the #41 Phase A back-compat alias) MUST be the first-observed
+  // binding to match Phase A's "first column from the SQL" semantics.
+  // For `INSERT INTO T (ID, ALT_ID) VALUES (:H, :H)` Phase A read
+  // `column === "ID"`; sorting flipped that to `"ALT_ID"` and silently
+  // broke external consumers reading the singular handle. Decouple the
+  // two: insertion-order [0] for `column`, sorted for `columns`.
   const sortedColumns = [...columns].sort((a, b) => a.localeCompare(b));
-  const columnFields = sortedColumns.length > 0
-    ? { columns: sortedColumns, column: sortedColumns[0]! }
+  const firstObserved = columns[0];
+  const columnFields = columns.length > 0 && firstObserved
+    ? { columns: sortedColumns, column: firstObserved }
     : { columns: sortedColumns };
   if (!resolved) return { name, ...columnFields };
   const { dataItem, originCopybook, replacingSubstitution } = resolved;
@@ -566,14 +571,17 @@ function bump(
     // bound to ID in one SQL and ALT_ID in another carries both
     // (#41 Phase B fix — pre-merge versions only kept the first
     // column, silently dropping later bindings and the Phase B
-    // intersection along with them).
+    // intersection along with them). `column` follows first-observed
+    // (existing wins over hv) to preserve the #41 Phase A back-compat
+    // alias semantics across cross-ref merges.
     const mergedColumns = [...new Set([...existing.columns, ...hv.columns])]
       .sort((a, b) => a.localeCompare(b));
+    const firstObservedColumn = existing.column ?? hv.column;
     const merged: HostVarRef = {
       name: hv.name,
       dataItem: existing.dataItem ?? hv.dataItem,
       columns: mergedColumns,
-      ...(mergedColumns.length > 0 ? { column: mergedColumns[0]! } : {}),
+      ...(firstObservedColumn ? { column: firstObservedColumn } : {}),
     };
     usage.hostVars.set(hv.name, merged);
   }

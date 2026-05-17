@@ -1214,8 +1214,11 @@ ${lines}
       ]);
       // Writer's :WR-ID carries both columns.
       const wrId = lineage!.entries[0]!.writer.hostVars.find((hv) => hv.name === "WR-ID");
-      expect(wrId?.columns).toEqual(["ALT_ID", "ID"]);
-      expect(wrId?.column).toBe("ALT_ID"); // alphabetically first → primary alias
+      expect(wrId?.columns).toEqual(["ALT_ID", "ID"]); // sorted for byte-stable artifact
+      // `column` is the #41 Phase A back-compat alias — first-observed
+      // in the SQL, not alphabetically first. INSERT lists ID before
+      // ALT_ID, so column === "ID".
+      expect(wrId?.column).toBe("ID");
       // The Phase B intersection now produces the ALT_ID flow that the
       // pre-fix code silently dropped.
       expect(lineage!.entries[0]!.columnPairs).toEqual([

@@ -1,7 +1,130 @@
 import { describe, it, expect } from "vitest";
 import { parse } from "../parser.js";
 import { extractModel } from "../extractors.js";
-import { buildDb2TableLineage, parseReplacingPairs } from "../db2-table-lineage.js";
+import { buildDb2TableLineage, parseReplacingPairs, parseSqlColumnBindings } from "../db2-table-lineage.js";
+
+describe("parseSqlColumnBindings (#41 Phase A)", () => {
+  it("pairs INSERT INTO T (col-list) VALUES (host-list) positionally", () => {
+    expect(parseSqlColumnBindings(
+      "EXEC SQL INSERT INTO CUSTOMERS (ID, NAME, EMAIL) VALUES (:WS-ID, :WS-NAME, :WS-EMAIL) END-EXEC",
+      "INSERT",
+    )).toEqual([
+      { column: "ID", hostVar: "WS-ID" },
+      { column: "NAME", hostVar: "WS-NAME" },
+      { column: "EMAIL", hostVar: "WS-EMAIL" },
+    ]);
+  });
+
+  it("returns empty for INSERT without column list (positional binding impossible)", () => {
+    expect(parseSqlColumnBindings(
+      "EXEC SQL INSERT INTO CUSTOMERS VALUES (:WS-ID, :WS-NAME) END-EXEC",
+      "INSERT",
+    )).toEqual([]);
+  });
+
+  it("aborts INSERT binding when column count != value count (arity mismatch)", () => {
+    expect(parseSqlColumnBindings(
+      "EXEC SQL INSERT INTO CUSTOMERS (ID, NAME) VALUES (:WS-ID, :WS-NAME, :WS-EMAIL) END-EXEC",
+      "INSERT",
+    )).toEqual([]);
+  });
+
+  it("skips non-host-var INSERT values (literals, NULL, function calls) but keeps the rest", () => {
+    expect(parseSqlColumnBindings(
+      "EXEC SQL INSERT INTO T (A, B, C) VALUES (:WS-A, 'literal', :WS-C) END-EXEC",
+      "INSERT",
+    )).toEqual([
+      { column: "A", hostVar: "WS-A" },
+      { column: "C", hostVar: "WS-C" },
+    ]);
+  });
+
+  it("pairs SELECT col-list INTO host-list FROM... positionally", () => {
+    expect(parseSqlColumnBindings(
+      "EXEC SQL SELECT ID, NAME INTO :WS-ID, :WS-NAME FROM CUSTOMERS END-EXEC",
+      "SELECT",
+    )).toEqual([
+      { column: "ID", hostVar: "WS-ID" },
+      { column: "NAME", hostVar: "WS-NAME" },
+    ]);
+  });
+
+  it("returns empty for SELECT without INTO (subquery, no host-var landing)", () => {
+    expect(parseSqlColumnBindings(
+      "EXEC SQL SELECT ID FROM CUSTOMERS WHERE NAME = :WS-NAME END-EXEC",
+      "SELECT",
+    )).toEqual([]);
+  });
+
+  it("pairs UPDATE SET col = :host explicitly; WHERE host vars do NOT bind", () => {
+    expect(parseSqlColumnBindings(
+      "EXEC SQL UPDATE CUSTOMERS SET NAME = :WS-NAME, EMAIL = :WS-EMAIL WHERE ID = :WS-ID END-EXEC",
+      "UPDATE",
+    )).toEqual([
+      { column: "NAME", hostVar: "WS-NAME" },
+      { column: "EMAIL", hostVar: "WS-EMAIL" },
+    ]);
+  });
+
+  it("UPDATE without WHERE: last assignment still binds (END-EXEC anchor)", () => {
+    // Without an END-EXEC anchor in the regex, the trailing token would
+    // leak into the last assignment string and the strict
+    // `col = :host` match would drop it. Locks the END-EXEC behavior.
+    expect(parseSqlColumnBindings(
+      "EXEC SQL UPDATE T SET A = :WS-A, B = :WS-B END-EXEC",
+      "UPDATE",
+    )).toEqual([
+      { column: "A", hostVar: "WS-A" },
+      { column: "B", hostVar: "WS-B" },
+    ]);
+  });
+
+  it("UPDATE: arithmetic / function on the right-hand side drops that assignment", () => {
+    expect(parseSqlColumnBindings(
+      "EXEC SQL UPDATE T SET COUNT = COUNT + 1, NAME = :WS-NAME WHERE ID = :WS-ID END-EXEC",
+      "UPDATE",
+    )).toEqual([
+      { column: "NAME", hostVar: "WS-NAME" },
+    ]);
+  });
+
+  it("does not split commas inside nested parens (function calls in column list)", () => {
+    // `COALESCE(A, B)` shouldn't shatter the column list into 4 entries
+    // and produce a wrong pairing. Pattern doesn't match (function isn't
+    // a plain column name) → bindings drop cleanly for that position;
+    // the bare-column / host-var positions still bind.
+    expect(parseSqlColumnBindings(
+      "EXEC SQL SELECT COALESCE(A, B), C INTO :WS-AB, :WS-C FROM T END-EXEC",
+      "SELECT",
+    )).toEqual([
+      { column: "C", hostVar: "WS-C" },
+    ]);
+  });
+
+  it("returns empty for FETCH (column list lives on the DECLARE CURSOR, not here)", () => {
+    expect(parseSqlColumnBindings(
+      "EXEC SQL FETCH C1 INTO :WS-ID, :WS-NAME END-EXEC",
+      "FETCH",
+    )).toEqual([]);
+  });
+
+  it("returns empty when operation is undefined", () => {
+    expect(parseSqlColumnBindings("anything", undefined)).toEqual([]);
+  });
+
+  it("handles multi-line SQL (newlines between clauses)", () => {
+    const sql = `EXEC SQL
+      INSERT INTO CUSTOMERS
+        (ID, NAME)
+      VALUES
+        (:WS-ID, :WS-NAME)
+      END-EXEC`;
+    expect(parseSqlColumnBindings(sql, "INSERT")).toEqual([
+      { column: "ID", hostVar: "WS-ID" },
+      { column: "NAME", hostVar: "WS-NAME" },
+    ]);
+  });
+});
 
 describe("parseReplacingPairs (#37 Phase A)", () => {
   it("parses single-token form X BY Y", () => {
@@ -736,6 +859,134 @@ describe("buildDb2TableLineage", () => {
     expect(unresolved?.rationale).not.toContain("REPLACING");
     // … but the typo and missing-copybook breadcrumbs should still be there.
     expect(unresolved?.rationale).toContain("typos");
+  });
+
+  describe("DB2 column-level host-var binding (#41 Phase A)", () => {
+    // SQL fixtures: every line stays inside COBOL fixed-format columns
+    // 8-72. `programWithSql` glues an array of pre-indented SQL lines
+    // into a PROCEDURE DIVISION around a fixed three-field WS layout.
+    function programWithSql(programId: string, sqlLines: string[]): string {
+      const lines = sqlLines.map((l) => `           ${l}`).join("\n");
+      return `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ${programId}.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-ID              PIC X(10).
+       01  WS-NAME            PIC X(30).
+       01  WS-EMAIL           PIC X(50).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+${lines}
+           STOP RUN.
+`;
+    }
+    const reader = programWithSql("READER", [
+      "EXEC SQL SELECT ID, NAME INTO :WS-ID, :WS-NAME",
+      "         FROM CUSTOMERS END-EXEC.",
+    ]);
+
+    it("attaches column to writer host vars from INSERT (col-list) VALUES (host-list)", () => {
+      const writer = programWithSql("WRITER", [
+        "EXEC SQL INSERT INTO CUSTOMERS (ID, NAME, EMAIL)",
+        "         VALUES (:WS-ID, :WS-NAME, :WS-EMAIL) END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const entry = lineage!.entries[0]!;
+      const byName = new Map(entry.writer.hostVars.map((hv) => [hv.name, hv]));
+      expect(byName.get("WS-ID")?.column).toBe("ID");
+      expect(byName.get("WS-NAME")?.column).toBe("NAME");
+      expect(byName.get("WS-EMAIL")?.column).toBe("EMAIL");
+    });
+
+    it("attaches column to reader host vars from SELECT col-list INTO host-list", () => {
+      const writer = programWithSql("WRITER", [
+        "EXEC SQL INSERT INTO CUSTOMERS (ID, NAME)",
+        "         VALUES (:WS-ID, :WS-NAME) END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const readerVars = lineage!.entries[0]!.reader.hostVars;
+      expect(readerVars.find((hv) => hv.name === "WS-ID")?.column).toBe("ID");
+      expect(readerVars.find((hv) => hv.name === "WS-NAME")?.column).toBe("NAME");
+    });
+
+    it("attaches column on UPDATE SET pairs; WHERE-clause host vars stay unbound", () => {
+      const updater = programWithSql("UPDATER", [
+        "EXEC SQL UPDATE CUSTOMERS",
+        "         SET NAME = :WS-NAME, EMAIL = :WS-EMAIL",
+        "         WHERE ID = :WS-ID END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(updater, "UPDATER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const writerVars = lineage!.entries[0]!.writer.hostVars;
+      const byName = new Map(writerVars.map((hv) => [hv.name, hv]));
+      expect(byName.get("WS-NAME")?.column).toBe("NAME");
+      expect(byName.get("WS-EMAIL")?.column).toBe("EMAIL");
+      // WHERE clause filter — no column binding.
+      expect(byName.get("WS-ID")?.column).toBeUndefined();
+      // But the host var itself is still resolved (has a dataItem).
+      expect(byName.get("WS-ID")?.dataItem?.picture).toBe("X(10)");
+    });
+
+    it("falls through to no column when INSERT has no column list", () => {
+      const writer = programWithSql("WRITER", [
+        "EXEC SQL INSERT INTO CUSTOMERS",
+        "         VALUES (:WS-ID, :WS-NAME, :WS-EMAIL) END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const writerVars = lineage!.entries[0]!.writer.hostVars;
+      // Host vars still listed; just no column attached.
+      expect(writerVars.find((hv) => hv.name === "WS-ID")?.dataItem?.picture).toBe("X(10)");
+      expect(writerVars.every((hv) => hv.column === undefined)).toBe(true);
+    });
+
+    it("a later SQL ref can attach a column to a host var first seen unbound", () => {
+      // Two SQL blocks in the same program against the same table: the
+      // first uses a WHERE filter (no column binding), the second is an
+      // INSERT with a column list. The bump-merge logic attaches the
+      // column from the second block to the existing host-var entry.
+      const writer = programWithSql("WRITER", [
+        "EXEC SQL SELECT NAME FROM CUSTOMERS",
+        "         WHERE ID = :WS-ID END-EXEC.",
+        "EXEC SQL INSERT INTO CUSTOMERS (ID, NAME)",
+        "         VALUES (:WS-ID, :WS-NAME) END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const writerVars = lineage!.entries[0]!.writer.hostVars;
+      expect(writerVars.find((hv) => hv.name === "WS-ID")?.column).toBe("ID");
+      expect(writerVars.find((hv) => hv.name === "WS-NAME")?.column).toBe("NAME");
+    });
+
+    it("aborts column binding on arity mismatch (3 cols, 2 hosts) — host vars still listed without column", () => {
+      // Caller wrote a buggy SQL: 3 columns, only 2 values. We refuse
+      // to guess a positional pairing for the surviving values, drop
+      // ALL bindings for that ref.
+      const writer = programWithSql("WRITER", [
+        "EXEC SQL INSERT INTO CUSTOMERS (ID, NAME, EMAIL)",
+        "         VALUES (:WS-ID, :WS-NAME) END-EXEC.",
+      ]);
+      const lineage = buildDb2TableLineage([
+        model(writer, "WRITER.cbl"),
+        model(reader, "READER.cbl"),
+      ]);
+      const writerVars = lineage!.entries[0]!.writer.hostVars;
+      expect(writerVars.every((hv) => hv.column === undefined)).toBe(true);
+    });
   });
 
   describe("REPLACING-aware host-var resolution (#37 Phase A)", () => {

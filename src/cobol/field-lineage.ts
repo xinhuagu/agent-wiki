@@ -576,13 +576,20 @@ function formatInferredStructure(
  * `host-var-unresolved` diagnostic in the exclusions table tells the
  * user why. When the field was reached via REPLACING substitution (#37
  * Phase A), the rename trail (`from CUSTOMER-ID via REPLACING`) appears so
- * a reviewer sees why the SQL name and copybook name disagree. `<br>`
- * separates entries so a many-host-var cell stays readable.
+ * a reviewer sees why the SQL name and copybook name disagree. When the
+ * host var binds to a specific SQL column (#41 Phase A), the column name
+ * appears as `HV → COLUMN` so a reviewer sees which column each var
+ * touches. `<br>` separates entries so a many-host-var cell stays
+ * readable.
  */
 function formatHostVars(hostVars: HostVarRef[]): string {
   if (hostVars.length === 0) return "—";
   return hostVars.map((hv) => {
-    if (!hv.dataItem) return `\`${hv.name}\` (?)`;
+    // `HV → COLUMN` prefix when we parsed a column binding (#41 Phase A);
+    // bare `HV` otherwise. Keeps backwards-compatible rendering for SQL
+    // shapes parseSqlColumnBindings can't structure.
+    const head = hv.column ? `\`${hv.name}\` → \`${hv.column}\`` : `\`${hv.name}\``;
+    if (!hv.dataItem) return `${head} (?)`;
     const shape = hv.dataItem.picture ?? "group";
     // Substitution wins over plain origin: the user needs to see the rename
     // pair first, then the copybook. A field reached via REPLACING always
@@ -594,7 +601,7 @@ function formatHostVars(hostVars: HostVarRef[]): string {
     } else if (hv.dataItem.originCopybook) {
       trail = ` from \`${hv.dataItem.originCopybook}\``;
     }
-    return `\`${hv.name}\` (${shape}${trail})`;
+    return `${head} (${shape}${trail})`;
   }).join("<br>");
 }
 
@@ -1321,7 +1328,7 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
   if (db2 && (db2.entries.length > 0 || db2.diagnostics.length > 0)) {
     lines.push("## DB2 Table Lineage");
     lines.push("");
-    lines.push(`Cross-program field flow inferred from shared DB2 tables. A pair appears when one program writes to a table (\`INSERT\` / \`UPDATE\` / \`DELETE\` / \`MERGE\`) and another reads from it (\`SELECT\` / \`FETCH\`). Host variables on each side are listed; mapping them to specific columns requires a SQL parser and is out of scope here.`);
+    lines.push(`Cross-program field flow inferred from shared DB2 tables. A pair appears when one program writes to a table (\`INSERT\` / \`UPDATE\` / \`DELETE\` / \`MERGE\`) and another reads from it (\`SELECT\` / \`FETCH\`). Host variables on each side are listed; \`HV → COLUMN\` indicates a column binding parsed from the SQL (INSERT col-list, SELECT INTO, UPDATE SET — #41 Phase A). Bare host vars appear when the SQL shape doesn't carry an explicit column list (INSERT without column list, WHERE-only filters, FETCH from a cursor, subqueries).`);
     lines.push("");
     const totalDb2Diag = db2.diagnostics.length;
     const db2Coverage = totalDb2Diag > 0

@@ -2,9 +2,22 @@ import type { CobolCodeModel } from "./extractors.js";
 import type { DataItemNode, SourceLocation } from "./types.js";
 import { resolveCanonicalId, displayLabel, normalizeCopybookName } from "./graph.js";
 import type { CallBoundLineage, SerializedCallBoundLineageEntry } from "./call-boundary-lineage.js";
-import type { Db2Lineage, HostVarRef } from "./db2-table-lineage.js";
+import { parseReplacingPairs, type Db2Lineage, type HostVarRef } from "./db2-table-lineage.js";
 
-export type LineageLinkage = "deterministic";
+/**
+ * Linkage tier on a deterministic shared-copybook entry.
+ *
+ *   - `"deterministic"`: emitted by the empty REPLACING cohort. Consumers
+ *     all COPY without substitution; the entry's `fieldName` matches the
+ *     copybook verbatim. This was the only linkage prior to #39 Phase B.
+ *   - `"deterministic-via-replacing"` (#39 Phase B): emitted by a
+ *     non-empty REPLACING cohort. Consumers all apply the same
+ *     `COPY ... REPLACING` clause, so they share the post-substitution
+ *     shape. The entry's `fieldName` is the consumer-view name; when the
+ *     field's own name was substituted, the entry carries a `replacing`
+ *     evidence dimension showing the rename pair.
+ */
+export type LineageLinkage = "deterministic" | "deterministic-via-replacing";
 /**
  * Confidence tier for cross-copybook inferred lineage.
  *
@@ -42,6 +55,14 @@ export interface SerializedFieldLineageEntry {
   pictures: string[];
   usages: string[];
   levels: number[];
+  /**
+   * #39 Phase B — set only on `deterministic-via-replacing` entries whose
+   * field name itself was substituted by the cohort's `COPY ... REPLACING`
+   * clause. Absent on regular `deterministic` entries and on
+   * `deterministic-via-replacing` entries for fields the substitution
+   * doesn't touch.
+   */
+  replacing?: { fromName: string; toName: string };
   rationale: string;
 }
 
@@ -85,6 +106,14 @@ export interface SerializedFieldLineage {
       copybooks: number;
       programs: number;
       fields: number;
+      /**
+       * #39 Phase B — count of deterministic entries emitted via a
+       * REPLACING cohort (`linkage === "deterministic-via-replacing"`).
+       * Subset of `fields`. Reported separately so downstream renderers
+       * (Coverage block, evidence report) can split the breakdown without
+       * walking the entries array.
+       */
+      viaReplacing: number;
     };
     inferred: {
       copybooks: number;
@@ -151,6 +180,11 @@ export function normalizeLoadedFieldLineage(raw: SerializedFieldLineage): Serial
     ...raw,
     summary: {
       ...summary,
+      deterministic: {
+        ...summary.deterministic,
+        // #39 Phase B — pre-#39 artifacts don't carry this split; backfill to 0.
+        viaReplacing: summary.deterministic?.viaReplacing ?? 0,
+      },
       inferred: {
         ...summary.inferred,
         // #35 — pre-#35 artifacts predate the semantic tier; backfill to 0.
@@ -166,7 +200,7 @@ export function normalizeLoadedFieldLineage(raw: SerializedFieldLineage): Serial
 function emptyCopybookLineage(): SerializedFieldLineage {
   return {
     summary: {
-      deterministic: { copybooks: 0, programs: 0, fields: 0 },
+      deterministic: { copybooks: 0, programs: 0, fields: 0, viaReplacing: 0 },
       inferred: { copybooks: 0, programs: 0, highConfidence: 0, ambiguous: 0, semantic: 0 },
       diagnosticsByKind: emptyDiagnosticsByKind(),
     },
@@ -284,6 +318,7 @@ function buildEntry(
   fields: FlattenedField[],
   programs: FieldConsumer[],
   rationale: string,
+  replacingPair?: { fromName: string; toName: string },
 ): SerializedFieldLineageEntry {
   const copybooks = [...new Map(
     fields.map((field) => [field.copybookId, { id: field.copybookId, sourceFile: field.copybookSourceFile }])
@@ -303,7 +338,86 @@ function buildEntry(
     pictures: sortUnique(fields.map((field) => field.picture).filter((value): value is string => Boolean(value))),
     usages: sortUnique(fields.map((field) => field.usage).filter((value): value is string => Boolean(value))),
     levels: [...new Set(fields.map((field) => field.level))].sort((a, b) => a - b),
+    ...(replacingPair ? { replacing: replacingPair } : {}),
     rationale,
+  };
+}
+
+/**
+ * Group a copybook's consumers into REPLACING cohorts (#39 Phase B).
+ * Cohort identity is the raw, source-order `replacing` tuple stringified —
+ * two consumers share a cohort iff their COPY directives carry the same
+ * REPLACING clause verbatim. Empty / missing `replacing` collapses to the
+ * empty-tuple cohort (key `[]`), which is the byte-identical pre-#39
+ * "exact COPY" group. Parsed `pairs` are cached on the cohort so the
+ * per-field substitution step in `buildFieldLineage` doesn't re-parse.
+ */
+interface ReplacingCohort {
+  /** Stringified raw `replacing` array; identifies cohort membership. */
+  key: string;
+  /** Parsed substitution pairs (empty for the exact-COPY cohort). */
+  pairs: Array<{ from: string; to: string }>;
+  consumers: FieldConsumer[];
+}
+function groupConsumersByReplacing(consumers: FieldConsumer[]): ReplacingCohort[] {
+  const byKey = new Map<string, ReplacingCohort>();
+  for (const c of consumers) {
+    const raw = c.replacing ?? [];
+    const key = JSON.stringify(raw);
+    let cohort = byKey.get(key);
+    if (!cohort) {
+      cohort = { key, pairs: parseReplacingPairs(raw), consumers: [] };
+      byKey.set(key, cohort);
+    }
+    cohort.consumers.push(c);
+  }
+  // Stable sort: empty cohort first, then by key. Keeps deterministic
+  // entry order across rebuilds regardless of consumer iteration order.
+  return [...byKey.values()].sort((a, b) => {
+    if (a.key === "[]") return -1;
+    if (b.key === "[]") return 1;
+    return a.key.localeCompare(b.key);
+  });
+}
+
+/**
+ * Carries a flattened field through a cohort's REPLACING pairs. When a
+ * pair's `from` matches the field's leaf name, the leaf and every
+ * qualified-path segment is rewritten to the pair's `to`. The original
+ * pair is returned alongside so the entry can carry it as evidence.
+ *
+ * Parent and qualified-path substitution: applies the pair to every
+ * segment of the qualified path, not just the leaf — REPLACING is purely
+ * textual in COBOL, so a `from` name that also occurs as a parent record
+ * name is renamed everywhere it appears. Multi-pair cohorts iterate pairs
+ * in declaration order; first hit per segment wins (matches COBOL
+ * REPLACING semantics — earlier pairs apply first; later pairs see the
+ * post-substitution text).
+ */
+function projectFieldThroughReplacing(
+  field: FlattenedField,
+  pairs: ReplacingCohort["pairs"],
+): FlattenedField & { replacingPair?: { fromName: string; toName: string } } {
+  if (pairs.length === 0) {
+    return { ...field };
+  }
+  const sub = (segment: string): string => {
+    const upper = segment.toUpperCase();
+    for (const p of pairs) {
+      if (p.from === upper) return p.to;
+    }
+    return segment;
+  };
+  const matchedLeaf = pairs.find((p) => p.from === field.fieldName.toUpperCase());
+  return {
+    ...field,
+    fieldName: matchedLeaf?.to ?? field.fieldName,
+    qualifiedName: field.qualifiedName.split(".").map(sub).join("."),
+    parentQualifiedName: field.parentQualifiedName?.split(".").map(sub).join("."),
+    siblings: field.siblings.map(sub),
+    replacingPair: matchedLeaf
+      ? { fromName: matchedLeaf.from, toName: matchedLeaf.to }
+      : undefined,
   };
 }
 
@@ -581,12 +695,17 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
         (consumersByCopybook.get(normalizeCopybookName(logicalName)) ?? [])
           .map((consumer) => [`${consumer.id}@${consumer.sourceFile}`, consumer])
       ).values()].sort(compareProgram);
-      const exactPrograms = consumers.filter((program) => !program.replacing || program.replacing.length === 0);
+      // #39 Phase B — cohort by the consumer's raw REPLACING tuple. Same
+      // tuple = same post-substitution shape = same deterministic plane.
+      // Empty/missing replacing collapses to the "exact COPY" cohort (key
+      // "[]"); this is byte-identical to the pre-#39 exactPrograms gate
+      // for REPLACING-free corpora.
+      const cohorts = groupConsumersByReplacing(consumers);
       return {
         copybookId,
         sourceFile: copybook.sourceFile,
         programs: consumers,
-        exactPrograms,
+        cohorts,
         fieldCount: flattenedByCopybook.get(copybookId)?.length ?? 0,
       };
     }).filter((entry) => entry.programs.length > 0)
@@ -596,26 +715,41 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
     return diagnostics.length > 0 ? withDiagnostics(emptyCopybookLineage()) : null;
   }
 
+  // Per-cohort deterministic emission (#39 Phase B). Each cohort with ≥2
+  // consumers contributes one entry per copybook field, with REPLACING
+  // substitution applied to the field name and qualified-path segments
+  // when the cohort's pairs reference them.
   const deterministic: SerializedFieldLineageEntry[] = [];
   for (const usage of rawCopybookUsage) {
     const fields = flattenedByCopybook.get(usage.copybookId) ?? [];
-    for (const field of fields) {
-      if (usage.exactPrograms.length < 2) continue;
-      deterministic.push(buildEntry(
-        "deterministic",
-        [field],
-        usage.exactPrograms,
-        "Exact parsed copybook field shared by multiple programs through COPY."
-      ));
+    for (const cohort of usage.cohorts) {
+      if (cohort.consumers.length < 2) continue;
+      const isReplacingCohort = cohort.pairs.length > 0;
+      for (const field of fields) {
+        const projected = projectFieldThroughReplacing(field, cohort.pairs);
+        const linkage: LineageLinkage = isReplacingCohort ? "deterministic-via-replacing" : "deterministic";
+        const rationale = isReplacingCohort
+          ? "Exact parsed copybook field shared by multiple programs through identical COPY ... REPLACING."
+          : "Exact parsed copybook field shared by multiple programs through COPY.";
+        deterministic.push(buildEntry(linkage, [projected], cohort.consumers, rationale, projected.replacingPair));
+      }
     }
   }
 
-  const candidateFields = rawCopybookUsage.flatMap((usage) =>
-    (flattenedByCopybook.get(usage.copybookId) ?? [])
-      .filter((field) => usage.exactPrograms.length > 0)
+  // Inferred candidate sourcing keeps the original (pre-#39) semantics: only
+  // empty-cohort consumers participate, and even a singleton empty cohort
+  // can seed candidates (cross-copybook pairing needs at least one consumer
+  // per copybook, not two). Phase C (REPLACING-aware inferred) is
+  // intentionally deferred — widening this set now would let renamed
+  // fields cross-match without name evidence, blowing up the precision
+  // contract that high/ambiguous depend on.
+  const candidateFields = rawCopybookUsage.flatMap((usage) => {
+    const exact = usage.cohorts.find((c) => c.pairs.length === 0);
+    if (!exact || exact.consumers.length === 0) return [];
+    return (flattenedByCopybook.get(usage.copybookId) ?? [])
       .filter((field) => Boolean(field.picture) || Boolean(field.usage))
-      .map((field) => ({ field, programs: usage.exactPrograms }))
-  );
+      .map((field) => ({ field, programs: exact.consumers }));
+  });
 
   const candidateGroups = new Map<string, Array<{ field: FlattenedField; programs: FieldConsumer[] }>>();
   for (const candidate of candidateFields) {
@@ -740,12 +874,13 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
   //
   // Pairs whose field names match would already have been emitted by the
   // name-keyed pass; drop them here to avoid double-reporting.
-  const semanticCandidateFields = rawCopybookUsage.flatMap((usage) =>
-    (flattenedByCopybook.get(usage.copybookId) ?? [])
-      .filter((field) => usage.exactPrograms.length > 0)
+  const semanticCandidateFields = rawCopybookUsage.flatMap((usage) => {
+    const exact = usage.cohorts.find((c) => c.pairs.length === 0);
+    if (!exact || exact.consumers.length === 0) return [];
+    return (flattenedByCopybook.get(usage.copybookId) ?? [])
       .filter((field) => Boolean(field.picture) && Boolean(field.usage))
-      .map((field) => ({ field, programs: usage.exactPrograms })),
-  );
+      .map((field) => ({ field, programs: exact.consumers }));
+  });
   const shapeGroups = new Map<string, Array<{ field: FlattenedField; programs: FieldConsumer[] }>>();
   for (const candidate of semanticCandidateFields) {
     const shapeKey = `${normalizePicture(candidate.field.picture)}|${normalizeUsage(candidate.field.usage)}|${candidate.field.level}`;
@@ -882,6 +1017,9 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
         copybooks: participatingCopybookIds.size,
         programs: participatingProgramIds.size,
         fields: sortedDeterministic.length,
+        viaReplacing: sortedDeterministic.filter(
+          (e) => e.linkage === "deterministic-via-replacing",
+        ).length,
       },
       inferred: {
         // `copybooks` / `programs` deliberately count name-keyed entries only
@@ -1042,8 +1180,15 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
       lines.push("| Copybook | Field | Structure | Programs | PIC | Linkage |");
       lines.push("|----------|-------|-----------|----------|-----|---------|");
       for (const entry of lineage.deterministic) {
+        // #39 Phase B — when the cohort renamed this field, surface the
+        // rename pair inline so the user sees both names without having to
+        // cross-reference the artifact. Field cell only — Structure column
+        // already shows the post-substitution qualified path.
+        const fieldCell = entry.replacing
+          ? `${entry.fieldName} (was ${entry.replacing.fromName})`
+          : entry.fieldName;
         lines.push(
-          `| ${formatCopybooks(entry.copybooks)} | ${entry.fieldName} | ${entry.qualifiedNames.join("<br>")} | ${formatPrograms(entry.programs)} | ${entry.pictures.join(", ") || "—"} | ${entry.linkage} |`
+          `| ${formatCopybooks(entry.copybooks)} | ${fieldCell} | ${entry.qualifiedNames.join("<br>")} | ${formatPrograms(entry.programs)} | ${entry.pictures.join(", ") || "—"} | ${entry.linkage} |`
         );
       }
     }
@@ -1357,11 +1502,28 @@ function renderCoverageSection(
     // appear; once added, sum their counter in here.
     const indexed = lineage.copybookUsage.length + zeroDataItemsCount;
     // Yielding splits inferred into the name-keyed and shape-keyed halves
-    // (#35). The semantic suffix is conditional so the cell stays byte-
-    // identical on rename-free corpora — regression lock contract.
+    // (#35) and the deterministic count into the regular cohort and the
+    // REPLACING cohort (#39 Phase B). Both `(R via REPLACING)` and
+    // `semantic` suffixes are conditional so the cell stays byte-identical
+    // on corpora without rename pairs / without REPLACING — regression
+    // lock contract.
+    //
+    // Both numbers in the deterministic cell are copybook counts (so the
+    // parenthetical is a true subset of the main count). The artifact's
+    // `summary.deterministic.viaReplacing` exposes the entry count for
+    // JSON consumers; the renderer recomputes copybooks for display
+    // because that's the visible apples-to-apples number.
+    const replacingCopybookCount = new Set(
+      lineage.deterministic
+        .filter((e) => e.linkage === "deterministic-via-replacing")
+        .flatMap((e) => e.copybooks.map((c) => c.id)),
+    ).size;
+    const deterministicCell = replacingCopybookCount > 0
+      ? `${lineage.summary.deterministic.copybooks} deterministic (${replacingCopybookCount} via REPLACING)`
+      : `${lineage.summary.deterministic.copybooks} deterministic`;
     const yielding = semanticCount > 0
-      ? `${lineage.summary.deterministic.copybooks} deterministic, ${lineage.summary.inferred.copybooks} inferred, ${semanticCount} semantic`
-      : `${lineage.summary.deterministic.copybooks} deterministic, ${lineage.summary.inferred.copybooks} inferred`;
+      ? `${deterministicCell}, ${lineage.summary.inferred.copybooks} inferred, ${semanticCount} semantic`
+      : `${deterministicCell}, ${lineage.summary.inferred.copybooks} inferred`;
     rows.push(
       `| Copybook | ${indexed} | ${yielding} | ${topExclusionReasons(copybookDiagByKind)} |`,
     );

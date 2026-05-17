@@ -1042,6 +1042,178 @@ describe("COBOL field lineage", () => {
     });
   });
 
+  describe("deterministic-via-replacing cohorts (#39 Phase B)", () => {
+    function withReplacing(programId: string, copybook: string, pairsClause: string): string {
+      // pairsClause is the literal text following REPLACING, e.g.
+      // "CUSTOMER-ID BY CLIENT-ID" or "==CUSTOMER-ID== BY ==CLIENT-ID==".
+      return `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ${programId}.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY ${copybook} REPLACING ${pairsClause}.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+    }
+
+    it("emits one deterministic-via-replacing entry per renamed field when ≥2 consumers share the same REPLACING", () => {
+      const lineage = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(withReplacing("PROGA", "CUSTOMER-REC", "CUSTOMER-ID BY CLIENT-ID"), "PROGA.cbl"),
+        model(withReplacing("PROGB", "CUSTOMER-REC", "CUSTOMER-ID BY CLIENT-ID"), "PROGB.cbl"),
+      ]);
+      expect(lineage).not.toBeNull();
+      const clientId = lineage!.deterministic.find((e) => e.fieldName === "CLIENT-ID");
+      expect(clientId).toBeDefined();
+      expect(clientId!.linkage).toBe("deterministic-via-replacing");
+      expect(clientId!.replacing).toEqual({ fromName: "CUSTOMER-ID", toName: "CLIENT-ID" });
+      expect(clientId!.programs.map((p) => p.id)).toEqual(["program:PROGA", "program:PROGB"]);
+      // The pre-substitution name doesn't show as a separate deterministic
+      // entry — both programs see the renamed name.
+      expect(lineage!.deterministic.find((e) => e.fieldName === "CUSTOMER-ID")).toBeUndefined();
+      expect(lineage!.summary.deterministic.viaReplacing).toBeGreaterThan(0);
+    });
+
+    it("untouched fields in a REPLACING cohort still emit with deterministic-via-replacing linkage, no replacing field", () => {
+      const lineage = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(withReplacing("PROGA", "CUSTOMER-REC", "CUSTOMER-ID BY CLIENT-ID"), "PROGA.cbl"),
+        model(withReplacing("PROGB", "CUSTOMER-REC", "CUSTOMER-ID BY CLIENT-ID"), "PROGB.cbl"),
+      ]);
+      // ZIP-CODE is in the copybook but not renamed by the REPLACING.
+      const zip = lineage!.deterministic.find((e) => e.fieldName === "ZIP-CODE");
+      expect(zip).toBeDefined();
+      expect(zip!.linkage).toBe("deterministic-via-replacing"); // cohort label
+      expect(zip!.replacing).toBeUndefined();
+      expect(zip!.programs.map((p) => p.id)).toEqual(["program:PROGA", "program:PROGB"]);
+    });
+
+    it("two programs with DIFFERENT REPLACING clauses each form singleton cohorts — no deterministic", () => {
+      const lineage = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(withReplacing("PROGA", "CUSTOMER-REC", "CUSTOMER-ID BY CLIENT-ID"), "PROGA.cbl"),
+        model(withReplacing("PROGB", "CUSTOMER-REC", "CUSTOMER-ID BY ORDER-ID"), "PROGB.cbl"),
+      ]);
+      // No cohort has ≥2 consumers → null (no deterministic + no inferred + no
+      // semantic + no diagnostics).
+      expect(lineage).toBeNull();
+    });
+
+    it("mixed cohorts: empty + REPLACING each ≥2 → two distinct deterministic entries", () => {
+      const lineage = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CUSTOMER-REC"), "PROGB.cbl"),
+        model(withReplacing("PROGC", "CUSTOMER-REC", "CUSTOMER-ID BY CLIENT-ID"), "PROGC.cbl"),
+        model(withReplacing("PROGD", "CUSTOMER-REC", "CUSTOMER-ID BY CLIENT-ID"), "PROGD.cbl"),
+      ]);
+      expect(lineage).not.toBeNull();
+      // Empty cohort emits CUSTOMER-ID (deterministic, programs A+B).
+      const custId = lineage!.deterministic.find(
+        (e) => e.fieldName === "CUSTOMER-ID" && e.linkage === "deterministic",
+      );
+      expect(custId).toBeDefined();
+      expect(custId!.programs.map((p) => p.id).sort()).toEqual(["program:PROGA", "program:PROGB"]);
+      expect(custId!.replacing).toBeUndefined();
+      // REPLACING cohort emits CLIENT-ID (deterministic-via-replacing, programs C+D).
+      const clientId = lineage!.deterministic.find(
+        (e) => e.fieldName === "CLIENT-ID" && e.linkage === "deterministic-via-replacing",
+      );
+      expect(clientId).toBeDefined();
+      expect(clientId!.programs.map((p) => p.id).sort()).toEqual(["program:PROGC", "program:PROGD"]);
+      expect(clientId!.replacing).toEqual({ fromName: "CUSTOMER-ID", toName: "CLIENT-ID" });
+    });
+
+    it("regression lock: existing REPLACING-singleton fixture still yields null", () => {
+      // Same fixture the pre-#39 test `does not treat COPY REPLACING
+      // consumers as deterministic shared lineage` uses: one empty-cohort
+      // consumer + one REPLACING-cohort consumer (each a singleton).
+      const orderA = model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl");
+      const orderB = model(program("ORDERB", "CUSTOMER-REC"), "ORDERB.cbl");
+      orderB.copies[0]!.replacing = ["CUSTOMER-ID", "BY", "CLIENT-ID"];
+      const lineage = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        orderA,
+        orderB,
+      ]);
+      expect(lineage).toBeNull();
+    });
+
+    it("REPLACING substitution propagates through qualified-path segments", () => {
+      // CUSTOMER-ADDRESS.ZIP-CODE — REPLACING renames CUSTOMER-ADDRESS to
+      // CLIENT-ADDRESS. Both the parent segment in the qualified path and
+      // the leaf-field's parentQualifiedName follow.
+      const lineage = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(withReplacing("PROGA", "CUSTOMER-REC", "CUSTOMER-ADDRESS BY CLIENT-ADDRESS"), "PROGA.cbl"),
+        model(withReplacing("PROGB", "CUSTOMER-REC", "CUSTOMER-ADDRESS BY CLIENT-ADDRESS"), "PROGB.cbl"),
+      ]);
+      const zip = lineage!.deterministic.find((e) => e.fieldName === "ZIP-CODE");
+      expect(zip).toBeDefined();
+      // The path under the renamed parent is post-substitution.
+      expect(zip!.qualifiedNames.some((n) => n.includes("CLIENT-ADDRESS.ZIP-CODE"))).toBe(true);
+      expect(zip!.parentQualifiedNames.some((n) => n.endsWith("CLIENT-ADDRESS"))).toBe(true);
+    });
+
+    it("renderer: Coverage cell adds `(N via REPLACING)` suffix only when viaReplacing > 0", () => {
+      const empty = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "CUSTOMER-REC"), "PROGB.cbl"),
+      ]);
+      const emptyPage = generateFieldLineagePage(empty!);
+      const emptyCoverage = emptyPage.content.slice(
+        emptyPage.content.indexOf("## Coverage"),
+        emptyPage.content.indexOf("## Overview"),
+      );
+      expect(emptyCoverage).not.toContain("via REPLACING");
+
+      const withRepl = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(withReplacing("PROGC", "CUSTOMER-REC", "CUSTOMER-ID BY CLIENT-ID"), "PROGC.cbl"),
+        model(withReplacing("PROGD", "CUSTOMER-REC", "CUSTOMER-ID BY CLIENT-ID"), "PROGD.cbl"),
+      ]);
+      const replPage = generateFieldLineagePage(withRepl!);
+      const replCoverage = replPage.content.slice(
+        replPage.content.indexOf("## Coverage"),
+        replPage.content.indexOf("## Overview"),
+      );
+      expect(replCoverage).toMatch(/\d+ deterministic \(\d+ via REPLACING\)/);
+    });
+
+    it("renderer: Shared-fields Field cell shows `Y (was X)` for renamed entries", () => {
+      const lineage = buildFieldLineage([
+        model(sharedCopybook, "CUSTOMER-REC.cpy"),
+        model(withReplacing("PROGA", "CUSTOMER-REC", "CUSTOMER-ID BY CLIENT-ID"), "PROGA.cbl"),
+        model(withReplacing("PROGB", "CUSTOMER-REC", "CUSTOMER-ID BY CLIENT-ID"), "PROGB.cbl"),
+      ]);
+      const page = generateFieldLineagePage(lineage!);
+      expect(page.content).toContain("CLIENT-ID (was CUSTOMER-ID)");
+      expect(page.content).toContain("deterministic-via-replacing");
+    });
+
+    it("normalizeLoadedFieldLineage backfills summary.deterministic.viaReplacing for pre-#39 JSON", () => {
+      const pre39 = {
+        summary: {
+          deterministic: { copybooks: 1, programs: 2, fields: 3 },
+          inferred: { copybooks: 0, programs: 0, highConfidence: 0, ambiguous: 0, semantic: 0 },
+          diagnosticsByKind: { "parsed-zero-data-items": 0 },
+        },
+        copybookUsage: [],
+        deterministic: [],
+        inferredHighConfidence: [],
+        inferredAmbiguous: [],
+        inferredSemantic: [],
+        diagnostics: [],
+      } as unknown as SerializedFieldLineage;
+      const normalized = normalizeLoadedFieldLineage(pre39);
+      expect(normalized.summary.deterministic.viaReplacing).toBe(0);
+    });
+  });
+
   it("generates a lineage wiki summary page", () => {
     const lineage = buildFieldLineage([
       model(sharedCopybook, "CUSTOMER-REC.cpy"),

@@ -273,6 +273,235 @@ describe("COBOL MCP tools integration", () => {
       "program:ORDERA",
       "program:ORDERB",
     ]);
+    // #44 — response shape additions: top-level keys for each family
+    // and per-family counts in summary. Existing consumers reading
+    // `deterministic` / `inferredHighConfidence` / `inferredAmbiguous`
+    // keep working; new consumers see the wider surface.
+    expect(parsed.inferredSemantic).toEqual([]);
+    expect(parsed.callBound.entries).toEqual([]);
+    expect(parsed.db2.entries).toEqual([]);
+    expect(parsed.db2.columnPairs).toEqual([]);
+    expect(parsed.summary.inferredSemanticMatches).toBe(0);
+    expect(parsed.summary.callBoundMatches).toBe(0);
+    expect(parsed.summary.db2Matches).toBe(0);
+    expect(parsed.summary.db2ColumnPairMatches).toBe(0);
+    // No callBound / db2 lineage in this fixture → familyAvailability flags off.
+    expect(parsed.summary.familyAvailability).toEqual({
+      copybook: true,
+      callBound: false,
+      db2: false,
+    });
+  });
+
+  it("code_query field_lineage surfaces semantic-inferred matches (#44)", async () => {
+    // Two copybooks with the same shape but renamed leaf field
+    // (CUSTOMER-ID vs CUST-ID) under matching parent path + ≥2 shared
+    // siblings — exactly the shape #35 semantic-inferred tier matches.
+    const customerRec = `
+       01  CUSTOMER-REC.
+           05  ADDRESS.
+               10  CUSTOMER-ID  PIC X(10) USAGE DISPLAY.
+               10  STREET       PIC X(30) USAGE DISPLAY.
+               10  ZIP          PIC X(5)  USAGE DISPLAY.
+`;
+    const clientRec = `
+       01  CLIENT-REC.
+           05  ADDRESS.
+               10  CUST-ID      PIC X(10) USAGE DISPLAY.
+               10  STREET       PIC X(30) USAGE DISPLAY.
+               10  ZIP          PIC X(5)  USAGE DISPLAY.
+`;
+    const progA = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROGA.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+    const progB = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROGB.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CLIENT-REC.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+    wiki.rawAdd("PROGA.cbl", { content: progA });
+    wiki.rawAdd("PROGB.cbl", { content: progB });
+    wiki.rawAdd("CUSTOMER-REC.cpy", { content: customerRec });
+    wiki.rawAdd("CLIENT-REC.cpy", { content: clientRec });
+    await handleTool(wiki, "code_parse", { path: "PROGA.cbl" });
+    await handleTool(wiki, "code_parse", { path: "PROGB.cbl" });
+    await handleTool(wiki, "code_parse", { path: "CUSTOMER-REC.cpy" });
+    await handleTool(wiki, "code_parse", { path: "CLIENT-REC.cpy" });
+
+    // Query by either leaf name — semantic matcher widens fieldName
+    // to either side of the rename pair (#44).
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      field_name: "CUST-ID",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.summary.inferredSemanticMatches).toBeGreaterThan(0);
+    expect(parsed.inferredSemantic).toHaveLength(1);
+    expect(parsed.inferredSemantic[0].confidence).toBe("semantic");
+    // Cross-family envelope: semantic match is `weak` / `inferred`, not absent.
+    expect(parsed.evidence.confidence).toBe("weak");
+    expect(parsed.evidence.basis).toBe("inferred");
+    expect(parsed.evidence.abstain).toBe(false);
+  });
+
+  it("code_query field_lineage surfaces CALL boundary matches (#44)", async () => {
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-REC.
+           05  WS-FIELD-A      PIC X(5).
+           05  WS-FIELD-B      PIC X(5).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "CALLEE" USING WS-REC.
+           STOP RUN.
+`;
+    const callee = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-REC.
+           05  LK-FIELD-A      PIC X(5).
+           05  LK-FIELD-B      PIC X(5).
+       PROCEDURE DIVISION USING LK-REC.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+    wiki.rawAdd("CALLER.cbl", { content: caller });
+    wiki.rawAdd("CALLEE.cbl", { content: callee });
+    await handleTool(wiki, "code_parse", { path: "CALLER.cbl" });
+    await handleTool(wiki, "code_parse", { path: "CALLEE.cbl" });
+
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      field_name: "WS-REC",
+    });
+    const parsed = JSON.parse(result as string);
+    // CALL boundary top-level entry pairs WS-REC ↔ LK-REC. Either side's
+    // fieldName matches when queried by name.
+    expect(parsed.summary.callBoundMatches).toBeGreaterThan(0);
+    expect(parsed.callBound.entries.length).toBeGreaterThan(0);
+    // Envelope reflects CALL boundary deterministic-tier as strong.
+    expect(parsed.evidence.confidence).toBe("strong");
+    expect(parsed.summary.familyAvailability.callBound).toBe(true);
+  });
+
+  it("code_query field_lineage surfaces DB2 entries + column pairs (#44)", async () => {
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WR-ID              PIC X(10).
+       01  WR-NAME            PIC X(30).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (ID, NAME)
+                    VALUES (:WR-ID, :WR-NAME) END-EXEC.
+           STOP RUN.
+`;
+    const reader = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. READER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  RD-ID              PIC X(10).
+       01  RD-NAME            PIC X(30).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL SELECT ID, NAME INTO :RD-ID, :RD-NAME
+                    FROM CUSTOMERS END-EXEC.
+           STOP RUN.
+`;
+    wiki.rawAdd("WRITER.cbl", { content: writer });
+    wiki.rawAdd("READER.cbl", { content: reader });
+    await handleTool(wiki, "code_parse", { path: "WRITER.cbl" });
+    await handleTool(wiki, "code_parse", { path: "READER.cbl" });
+
+    // Query by writer host-var name.
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      field_name: "WR-ID",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.summary.db2Matches).toBe(1);
+    expect(parsed.db2.entries[0].table).toBe("CUSTOMERS");
+    // Column-pair surface — WR-ID feeds ID column, RD-ID receives it.
+    expect(parsed.summary.db2ColumnPairMatches).toBe(1);
+    expect(parsed.db2.columnPairs[0]).toMatchObject({
+      table: "CUSTOMERS",
+      column: "ID",
+      writerHostVar: "WR-ID",
+      readerHostVar: "RD-ID",
+    });
+    // Envelope: DB2 deterministic-tier as strong.
+    expect(parsed.evidence.confidence).toBe("strong");
+    expect(parsed.summary.familyAvailability.db2).toBe(true);
+  });
+
+  it("code_query field_lineage with qualified_name + DB2 surfaces the leaf-fallback note (#44)", async () => {
+    const writer = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. WRITER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WR-ID              PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL INSERT INTO CUSTOMERS (ID)
+                    VALUES (:WR-ID) END-EXEC.
+           STOP RUN.
+`;
+    const reader = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. READER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  RD-ID              PIC X(10).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL SELECT ID INTO :RD-ID FROM CUSTOMERS END-EXEC.
+           STOP RUN.
+`;
+    wiki.rawAdd("WRITER.cbl", { content: writer });
+    wiki.rawAdd("READER.cbl", { content: reader });
+    await handleTool(wiki, "code_parse", { path: "WRITER.cbl" });
+    await handleTool(wiki, "code_parse", { path: "READER.cbl" });
+
+    // qualified_name supplied; DB2 fallback applies.
+    const result = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      qualified_name: "ANYTHING.WR-ID",
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.notes).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("DB2 host vars do not carry a full qualified path"),
+      ]),
+    );
   });
 
   it("code_parse persists inferred field-lineage artifacts for cross-copybook matches", async () => {

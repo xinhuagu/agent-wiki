@@ -342,8 +342,22 @@ Returns: `{ query, source, summary, impactedByDepth: [...], diagnostics }`
 **query_type: procedure_flow** — Returns section/paragraph PERFORM flow for one source file.
 Returns: `{ path, procedure?, flow: [...] }`
 
-**query_type: field_lineage** — Queries compiled cross-file field lineage. Requires `field-lineage.json` artifact — built by parsing BOTH `.cbl`/`.cob` program files AND `.cpy` copybook files.
-Returns: `{ query, summary, deterministic: [...], inferredHighConfidence: [...], inferredAmbiguous: [...] }`
+**query_type: field_lineage** — Queries compiled cross-file field lineage. Requires `field-lineage.json` artifact — built by parsing BOTH `.cbl`/`.cob` program files AND `.cpy` copybook files. Returns matches across **every lineage family** the artifact carries:
+
+- `deterministic`: same parsed copybook reaches ≥2 programs via exact COPY.
+- `inferredHighConfidence` / `inferredAmbiguous`: cross-copybook same-name fields with structural alignment evidence; ambiguous = ≥1 competing match.
+- `inferredSemantic`: shape-keyed renames across copybooks (`CUSTOMER-ID` ↔ `CUST-ID`). `field_name` matches either side's leaf.
+- `callBound.entries`: `CALL ... USING` caller↔callee field pairs. `field_name` matches caller or callee leaf; `qualified_name` matches caller or callee qualified path.
+- `db2.entries`: DB2 writer→reader pairs on shared tables. `field_name` matches any writer/reader host-var name OR its resolved `dataItem.name`. `qualified_name` falls back to comparing the **leaf segment** against `dataItem.name` because DB2 host vars don't carry a full qualified path — the response includes a `notes` entry calling out this fallback.
+- `db2.columnPairs`: DB2 cross-program column-level pairings (`writerHostVar → column → readerHostVar`). Matches when `field_name` equals either host-var name.
+
+Returns: `{ query, summary: { deterministicMatches, inferredHighConfidenceMatches, inferredAmbiguousMatches, inferredSemanticMatches, callBoundMatches, db2Matches, db2ColumnPairMatches, familyAvailability: { copybook, callBound, db2 } }, evidence, deterministic: [...], inferredHighConfidence: [...], inferredAmbiguous: [...], inferredSemantic: [...], callBound: { entries: [...] }, db2: { entries: [...], columnPairs: [...] }, notes: [...] }`
+
+`evidence` is the **strongest evidence across all families** (deterministic copybook OR CALL-boundary-deterministic OR DB2 → `strong`/`deterministic`; inferred high-confidence OR CALL-boundary-high OR semantic → `weak`/`inferred`; ambiguous-only or no match → `absent` + `abstain`).
+
+`familyAvailability` flags whether each family branch is present in the artifact at all — useful for distinguishing "no artifact for this family" from "family available but query didn't match it".
+
+`copybook` filter only narrows the copybook-family results; CALL boundary and DB2 entries don't have copybook anchoring and are returned irrespective of that filter (or skipped entirely when `copybook` is set).
 
 **query_type: dataflow_edges** — Queries MOVE/COMPUTE/SQL/CALL dataflow edges for one source file. Pass `field + transitive: true` to follow chains. Requires `path`.
 Returns (non-transitive): `{ file, total, edges: [...] }`

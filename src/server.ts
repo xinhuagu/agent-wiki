@@ -1114,26 +1114,26 @@ function inferredEntryMatches(
  * Match a CALL boundary entry against the query. The copybook filter
  * doesn't apply — CALL boundary pairs are caller/callee program data
  * items, not copybook-anchored.
+ *
+ * Walks caller and callee as complete endpoints: each must satisfy ALL
+ * filters together (Codex review #3 on #45). The pre-fix split-check
+ * let `field_name=WS-REC + qualified_name=LK-REC` match a `WS-REC ↔
+ * LK-REC` pair because field_name hit the caller and qualified_name
+ * hit the callee, even though neither endpoint individually satisfied
+ * both — the same cross-side bug already fixed for inferred and DB2.
  */
 function callBoundEntryMatches(
   entry: SerializedCallBoundLineageEntry,
   requestedFieldName?: string,
   requestedQualifiedName?: string,
 ): boolean {
-  if (requestedFieldName) {
-    const upper = requestedFieldName.toUpperCase();
-    if (
-      entry.caller.fieldName.toUpperCase() !== upper
-      && entry.callee.fieldName.toUpperCase() !== upper
-    ) return false;
-  }
-  if (requestedQualifiedName) {
-    if (
-      !qualifiedNameMatches(entry.caller.qualifiedName, requestedQualifiedName)
-      && !qualifiedNameMatches(entry.callee.qualifiedName, requestedQualifiedName)
-    ) return false;
-  }
-  return true;
+  const fnUpper = requestedFieldName?.toUpperCase();
+  const matchesEndpoint = (endpoint: { fieldName: string; qualifiedName: string }): boolean => {
+    if (fnUpper !== undefined && endpoint.fieldName.toUpperCase() !== fnUpper) return false;
+    if (!qualifiedNameMatches(endpoint.qualifiedName, requestedQualifiedName)) return false;
+    return true;
+  };
+  return matchesEndpoint(entry.caller) || matchesEndpoint(entry.callee);
 }
 
 /**

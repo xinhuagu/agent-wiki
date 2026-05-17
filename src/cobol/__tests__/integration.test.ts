@@ -593,6 +593,62 @@ describe("COBOL MCP tools integration", () => {
     });
   });
 
+  it("code_query field_lineage CALL boundary same-endpoint constraint (#44 Codex review #5)", async () => {
+    // Pair: WS-REC (caller) ↔ LK-REC (callee). Cross-endpoint query
+    // (field_name from caller, qualified_name from callee) was a false
+    // positive pre-fix because the two checks ran independently. Same
+    // bug pattern as semantic / DB2; same fix.
+    const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-REC.
+           05  WS-FIELD-A      PIC X(5).
+           05  WS-FIELD-B      PIC X(5).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL "CALLEE" USING WS-REC.
+           STOP RUN.
+`;
+    const callee = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLEE.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-REC.
+           05  LK-FIELD-A      PIC X(5).
+           05  LK-FIELD-B      PIC X(5).
+       PROCEDURE DIVISION USING LK-REC.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+    wiki.rawAdd("CALLER.cbl", { content: caller });
+    wiki.rawAdd("CALLEE.cbl", { content: callee });
+    await handleTool(wiki, "code_parse", { path: "CALLER.cbl" });
+    await handleTool(wiki, "code_parse", { path: "CALLEE.cbl" });
+
+    // Cross-endpoint query: field_name on caller, qualified_name on callee.
+    const crossResult = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      field_name: "WS-REC",
+      qualified_name: "LK-REC",
+    });
+    const cross = JSON.parse(crossResult as string);
+    expect(cross.summary.callBoundMatches).toBe(0);
+
+    // Sanity: same-endpoint (both filters on caller) still matches.
+    const sameResult = await handleTool(wiki, "code_query", {
+      query_type: "field_lineage",
+      field_name: "WS-REC",
+      qualified_name: "WS-REC",
+    });
+    const same = JSON.parse(sameResult as string);
+    expect(same.summary.callBoundMatches).toBe(1);
+  });
+
   it("code_query field_lineage DB2 same-host-var constraint (#44 Codex review #3)", async () => {
     // CUSTOMERS entry has separate host vars WR-ID (writer) and RD-NAME
     // (reader). Pre-fix: field_name=WR-ID + qualified_name=ANY.RD-NAME

@@ -72,14 +72,21 @@ export interface CobolCodeModel {
    *     The only write shape that produces a resolvable literal.
    *   - `verb: "MOVE"` without `literal` — non-literal MOVE source
    *     (identifier or numeric). Disqualifies resolution.
-   *   - `verb: "INITIALIZE" | "STRING" | "UNSTRING"` (always no
-   *     `literal`) — non-MOVE writes that clobber the target with a
-   *     value the resolver can't statically determine. Same effect
-   *     as a non-literal MOVE: abstain.
+   *   - `verb: "INITIALIZE" | "STRING" | "UNSTRING" | "ACCEPT" | "READ"`
+   *     (always no `literal`) — non-MOVE write verbs that clobber the
+   *     target with a runtime-computed value the resolver can't
+   *     statically determine. Same effect as a non-literal MOVE:
+   *     abstain. ACCEPT covers env/console/date input; READ covers the
+   *     optional `READ <file> INTO <ident>` clause.
    *
    * Multi-target `MOVE X TO A B` produces two entries with the same
    * source. Qualified targets (`A OF B`, `A IN B`) are skipped at
    * extraction time — Phase A doesn't handle them.
+   *
+   * Out of scope (Phase B+): SET, INSPECT, CALL ... RETURNING, and the
+   * arithmetic verbs (ADD/SUBTRACT/MULTIPLY/DIVIDE/COMPUTE — those
+   * write numeric variables, not the alphanumeric ones used as
+   * program-name aliases).
    *
    * `verb` is optional for back-compat with pre-#48 artifacts where
    * every entry was implicitly a MOVE; missing values default to

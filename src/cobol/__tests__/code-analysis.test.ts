@@ -466,6 +466,8 @@ describe("code-analysis plugin system", () => {
       expect(migrated.db2References).toEqual([]);
       expect(migrated.cicsReferences).toEqual([]);
       expect(migrated.fileAccesses).toEqual([]);
+      // #46 Phase A added moveAssignments — backfill to [] for legacy.
+      expect(migrated.moveAssignments).toEqual([]);
       expect(migrated.calls[0].usingArgs).toEqual([]);
     });
 

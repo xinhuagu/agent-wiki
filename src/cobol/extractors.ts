@@ -348,26 +348,47 @@ function extractStatementRelations(
   }
 
   if (verb === "MOVE") {
-    // `MOVE <source> TO <target>...`. Parser strips the TO keyword from
-    // operands (TO has its own token type, not pushed to operands), so
-    // ops[0] is the source and ops[1..] are targets. Literal-source MOVEs
-    // feed the dynamic-CALL constant-propagation resolver (#46 Phase A);
-    // non-literal sources are still recorded (with `literal` undefined)
-    // so the resolver can see "this variable has a non-literal write"
-    // and conservatively abstain.
-    const ops = stmt.operands;
-    if (ops.length >= 2) {
-      const source = ops[0]!;
-      const isLiteral = /^["']/.test(source);
-      const literal = isLiteral ? source.replace(/^["']|["']$/g, "") : undefined;
-      for (let i = 1; i < ops.length; i++) {
-        const target = ops[i];
-        if (!target) continue;
-        model.moveAssignments.push({
-          target,
-          ...(literal !== undefined ? { literal } : {}),
-          loc: stmt.loc,
-        });
+    // `MOVE <source> TO <target>...`. Use the typed token stream rather
+    // than `stmt.operands`: operands silently drops OF/IN qualifier
+    // keywords, so `MOVE A OF B TO C` would arrive as `[A, B, C]` and
+    // produce a wrong `(source=A, targets=[B, C])` record. Walking
+    // tokens lets us locate the `TO` boundary and refuse qualified
+    // operands.
+    //
+    // Phase A conservative: only emit when each side is a single
+    // unqualified identifier (or single literal on the source). Group
+    // moves (`MOVE A TO B C D`) emit one record per target. Qualified
+    // forms (`A OF B`, `A IN B`) are skipped entirely — they're
+    // uncommon for program-name variables and Phase A's constant-
+    // propagation resolver doesn't need them.
+    const tokens = stmt.tokens;
+    const toIdx = tokens.findIndex((t) => t.type === "TO");
+    if (toIdx > 1) {
+      // Slice off the leading MOVE verb token; collect source and
+      // target token windows separated by TO.
+      const sourceTokens = tokens.slice(1, toIdx);
+      const targetTokens = tokens.slice(toIdx + 1);
+      const hasQualifier = (ts: typeof sourceTokens): boolean =>
+        ts.some((t) => t.type === "OF" || t.type === "IN");
+      const sourceIsSingleScalar = sourceTokens.length === 1
+        && (sourceTokens[0]!.type === "IDENTIFIER"
+          || sourceTokens[0]!.type === "LITERAL"
+          || sourceTokens[0]!.type === "NUMERIC");
+      // Targets: each must be one IDENTIFIER token (multi-target MOVE
+      // is space-separated, no OF/IN expected for the simple cases we
+      // care about). Reject if ANY target is qualified.
+      if (sourceIsSingleScalar && !hasQualifier(sourceTokens) && !hasQualifier(targetTokens)) {
+        const source = sourceTokens[0]!.value;
+        const isLiteral = /^["']/.test(source);
+        const literal = isLiteral ? source.replace(/^["']|["']$/g, "") : undefined;
+        for (const tt of targetTokens) {
+          if (tt.type !== "IDENTIFIER") continue;
+          model.moveAssignments.push({
+            target: tt.value,
+            ...(literal !== undefined ? { literal } : {}),
+            loc: stmt.loc,
+          });
+        }
       }
     }
   }

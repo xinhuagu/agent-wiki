@@ -1285,6 +1285,41 @@ describe("buildCallBoundLineage", () => {
       expect(lineage!.entries).toEqual([]);
     });
 
+    it("qualified MOVE (`MOVE X OF Y TO Z`) is conservatively skipped — no false propagation", () => {
+      // Self-review concern: a naive `operands[0] = source, [1..] = targets`
+      // approach would mis-parse `MOVE A OF GROUP TO TARGET` as
+      // (source=A, targets=[GROUP, TARGET]) because OF is a keyword and
+      // gets stripped from operands. The token-based extractor refuses
+      // qualified sources/targets entirely — qualified MOVEs simply
+      // don't feed the resolver.
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  GROUP-A.
+           05  PGM-NAME       PIC X(8) VALUE "CUSTBILL".
+       01  WS-PGM             PIC X(8).
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           MOVE PGM-NAME OF GROUP-A TO WS-PGM.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("CUSTBILL"), "CUSTBILL.cbl"),
+      ]);
+      // WS-PGM has no literal MOVE recorded (the qualified MOVE was
+      // skipped) and no VALUE clause → resolver returns null →
+      // dynamic-call. The PGM-NAME field's VALUE doesn't propagate
+      // (we'd need full data-flow tracking — Phase B).
+      expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(true);
+      expect(lineage!.entries).toEqual([]);
+    });
+
     it("resolved-but-not-in-corpus: emits unresolved-callee with resolution trail in rationale", () => {
       const caller = `
        IDENTIFICATION DIVISION.

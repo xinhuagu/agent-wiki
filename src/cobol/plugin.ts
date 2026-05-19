@@ -91,6 +91,10 @@ export function migrateLoadedModel(raw: unknown): CobolCodeModel {
   if (!Array.isArray(m.db2References)) m.db2References = [];
   if (!Array.isArray(m.cicsReferences)) m.cicsReferences = [];
   if (!Array.isArray(m.fileAccesses)) m.fileAccesses = [];
+  // #46 Phase A — moveAssignments is new; pre-#46 artifacts on disk
+  // don't carry it. The call-bound builder iterates this list when
+  // resolving dynamic CALL targets, so a missing field would throw.
+  if (!Array.isArray(m.moveAssignments)) m.moveAssignments = [];
   for (const call of m.calls) {
     if (!Array.isArray((call as { usingArgs?: unknown }).usingArgs)) {
       (call as { usingArgs: string[] }).usingArgs = [];

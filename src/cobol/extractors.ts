@@ -465,30 +465,33 @@ function extractStatementRelations(
     //   [COUNT IN <c>] [target-2 ...] [WITH POINTER <ptr>] [TALLYING IN <t>]
     //   END-UNSTRING`. After INTO, IDENTIFIER tokens are targets until
     // the next non-IDENTIFIER keyword (DELIMITER/COUNT/POINTER/TALLYING/etc.).
-    // Phase A.1 simplification: capture up to the FIRST qualifier or
-    // keyword boundary; rare edge cases (qualified targets, multiple
-    // delimiter clauses) fall through unhandled.
+    //
+    // Phase A.1 conservative rule: if ANY OF/IN qualifier appears in the
+    // target run, skip the whole statement. Nested-qualifier handling
+    // (`A OF B OF C`) is too brittle without proper grammar tracking;
+    // false-negative (we miss the abstain) is preferred over false-
+    // positive (we capture a non-target as a target).
     const tokens = stmt.tokens;
     const intoIdx = tokens.findIndex((t) => t.type === "INTO");
     if (intoIdx > 0) {
+      const candidates: string[] = [];
+      let qualified = false;
       for (let i = intoIdx + 1; i < tokens.length; i++) {
         const t = tokens[i]!;
         if (t.type === "IDENTIFIER") {
-          const next = tokens[i + 1];
-          if (next && (next.type === "OF" || next.type === "IN")) {
-            // Skip past the qualified target (don't capture it).
-            i += 2;
-            continue;
-          }
-          model.moveAssignments.push({ target: t.value, verb: "UNSTRING", loc: stmt.loc });
+          candidates.push(t.value);
         } else if (t.type === "OF" || t.type === "IN") {
-          // Mid-stream OF/IN shouldn't happen if we skipped correctly above.
-          continue;
+          qualified = true;
+          break;
         } else {
           // Stop at the first non-IDENTIFIER/non-OF/IN token (DELIMITER /
-          // COUNT / WITH / etc.). UNSTRING's grammar has more clauses we
-          // don't track for now.
+          // COUNT / WITH / etc.).
           break;
+        }
+      }
+      if (!qualified) {
+        for (const target of candidates) {
+          model.moveAssignments.push({ target, verb: "UNSTRING", loc: stmt.loc });
         }
       }
     }

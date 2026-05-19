@@ -63,17 +63,39 @@ export interface CobolCodeModel {
     loc: SourceLocation;
   }[];
   /**
-   * `MOVE <source> TO <target>...` records (#46 Phase A). Each target
-   * receives its own entry; multi-target `MOVE X TO A B` produces two
-   * entries with the same source. `literal` is set when the source is a
-   * quoted string literal — surrogate evidence for constant propagation
-   * in the call-bound lineage builder. Non-literal sources (identifiers,
-   * numerics) populate the entry too so the resolver can detect "this
-   * variable has a non-literal write" and abstain conservatively.
+   * Write-like assignment records used by the dynamic-CALL constant-
+   * propagation resolver (#46 Phase A; extended in #48 Phase A.1 to
+   * cover non-MOVE write verbs). Each entry names a target identifier
+   * and the verb that wrote it:
+   *
+   *   - `verb: "MOVE"` with a `literal` — `MOVE "FOO" TO target`.
+   *     The only write shape that produces a resolvable literal.
+   *   - `verb: "MOVE"` without `literal` — non-literal MOVE source
+   *     (identifier or numeric). Disqualifies resolution.
+   *   - `verb: "INITIALIZE" | "STRING" | "UNSTRING" | "ACCEPT" | "READ"`
+   *     (always no `literal`) — non-MOVE write verbs that clobber the
+   *     target with a runtime-computed value the resolver can't
+   *     statically determine. Same effect as a non-literal MOVE:
+   *     abstain. ACCEPT covers env/console/date input; READ covers the
+   *     optional `READ <file> INTO <ident>` clause.
+   *
+   * Multi-target `MOVE X TO A B` produces two entries with the same
+   * source. Qualified targets (`A OF B`, `A IN B`) are skipped at
+   * extraction time — Phase A doesn't handle them.
+   *
+   * Out of scope (Phase B+): SET, INSPECT, CALL ... RETURNING, and the
+   * arithmetic verbs (ADD/SUBTRACT/MULTIPLY/DIVIDE/COMPUTE — those
+   * write numeric variables, not the alphanumeric ones used as
+   * program-name aliases).
+   *
+   * `verb` is optional for back-compat with pre-#48 artifacts where
+   * every entry was implicitly a MOVE; missing values default to
+   * "MOVE" at consumer time.
    */
   moveAssignments: {
     target: string;
     literal?: string;
+    verb?: "MOVE" | "INITIALIZE" | "STRING" | "UNSTRING" | "ACCEPT" | "READ";
     loc: SourceLocation;
   }[];
 }
@@ -364,8 +386,6 @@ function extractStatementRelations(
     const tokens = stmt.tokens;
     const toIdx = tokens.findIndex((t) => t.type === "TO");
     if (toIdx > 1) {
-      // Slice off the leading MOVE verb token; collect source and
-      // target token windows separated by TO.
       const sourceTokens = tokens.slice(1, toIdx);
       const targetTokens = tokens.slice(toIdx + 1);
       const hasQualifier = (ts: typeof sourceTokens): boolean =>
@@ -374,9 +394,6 @@ function extractStatementRelations(
         && (sourceTokens[0]!.type === "IDENTIFIER"
           || sourceTokens[0]!.type === "LITERAL"
           || sourceTokens[0]!.type === "NUMERIC");
-      // Targets: each must be one IDENTIFIER token (multi-target MOVE
-      // is space-separated, no OF/IN expected for the simple cases we
-      // care about). Reject if ANY target is qualified.
       if (sourceIsSingleScalar && !hasQualifier(sourceTokens) && !hasQualifier(targetTokens)) {
         const source = sourceTokens[0]!.value;
         const isLiteral = /^["']/.test(source);
@@ -386,9 +403,143 @@ function extractStatementRelations(
           model.moveAssignments.push({
             target: tt.value,
             ...(literal !== undefined ? { literal } : {}),
+            verb: "MOVE",
             loc: stmt.loc,
           });
         }
+      }
+    }
+  }
+
+  // #48 Phase A.1 — non-MOVE write verbs that can clobber a variable.
+  // These never produce a resolvable literal (the written value is
+  // computed at runtime), so they're emitted with `literal: undefined`
+  // and the resolver's existing "any non-literal write disqualifies"
+  // gate catches them. Each verb has a distinct target-extraction
+  // shape — see comments per verb. Qualified targets (`A OF B`) are
+  // skipped at the per-token level for the same reason as MOVE.
+  if (verb === "INITIALIZE") {
+    // `INITIALIZE <ident>... [REPLACING ...] [DEFAULT TO ...]`. Every
+    // unqualified IDENTIFIER token after the verb is a target, until
+    // the first OF/IN qualifier (skip the whole statement) or any
+    // other keyword (REPLACING/DEFAULT/etc., stop).
+    const tokens = stmt.tokens;
+    const candidates: string[] = [];
+    let qualified = false;
+    for (let i = 1; i < tokens.length; i++) {
+      const t = tokens[i]!;
+      if (t.type === "IDENTIFIER") {
+        candidates.push(t.value);
+      } else if (t.type === "OF" || t.type === "IN") {
+        qualified = true;
+        break;
+      } else {
+        break;
+      }
+    }
+    if (!qualified) {
+      for (const target of candidates) {
+        model.moveAssignments.push({ target, verb: "INITIALIZE", loc: stmt.loc });
+      }
+    }
+  }
+
+  if (verb === "STRING") {
+    // `STRING <source-list> INTO <target> [WITH POINTER <ptr>] ... END-STRING`.
+    // The first IDENTIFIER after `INTO` is the destination target.
+    // A `WITH POINTER` operand is also a write target but rare for
+    // program-name vars; track only the primary INTO target for now.
+    const tokens = stmt.tokens;
+    const intoIdx = tokens.findIndex((t) => t.type === "INTO");
+    if (intoIdx > 0) {
+      for (let i = intoIdx + 1; i < tokens.length; i++) {
+        const t = tokens[i]!;
+        if (t.type === "IDENTIFIER") {
+          // Reject if the very next token is OF/IN (qualified target).
+          const next = tokens[i + 1];
+          if (next && (next.type === "OF" || next.type === "IN")) break;
+          model.moveAssignments.push({ target: t.value, verb: "STRING", loc: stmt.loc });
+          break;
+        }
+        // Skip any leading keyword tokens between INTO and the target.
+        if (t.type === "OF" || t.type === "IN") break;
+      }
+    }
+  }
+
+  if (verb === "UNSTRING") {
+    // `UNSTRING <source> [DELIMITED BY ...] INTO <target-1> [DELIMITER IN <d>]
+    //   [COUNT IN <c>] [target-2 ...] [WITH POINTER <ptr>] [TALLYING IN <t>]
+    //   END-UNSTRING`. After INTO, IDENTIFIER tokens are targets until
+    // the next non-IDENTIFIER keyword (DELIMITER/COUNT/POINTER/TALLYING/etc.).
+    //
+    // Phase A.1 conservative rule: if ANY OF/IN qualifier appears in the
+    // target run, skip the whole statement. Nested-qualifier handling
+    // (`A OF B OF C`) is too brittle without proper grammar tracking;
+    // false-negative (we miss the abstain) is preferred over false-
+    // positive (we capture a non-target as a target).
+    const tokens = stmt.tokens;
+    const intoIdx = tokens.findIndex((t) => t.type === "INTO");
+    if (intoIdx > 0) {
+      const candidates: string[] = [];
+      let qualified = false;
+      for (let i = intoIdx + 1; i < tokens.length; i++) {
+        const t = tokens[i]!;
+        if (t.type === "IDENTIFIER") {
+          candidates.push(t.value);
+        } else if (t.type === "OF" || t.type === "IN") {
+          qualified = true;
+          break;
+        } else {
+          // Stop at the first non-IDENTIFIER/non-OF/IN token (DELIMITER /
+          // COUNT / WITH / etc.).
+          break;
+        }
+      }
+      if (!qualified) {
+        for (const target of candidates) {
+          model.moveAssignments.push({ target, verb: "UNSTRING", loc: stmt.loc });
+        }
+      }
+    }
+  }
+
+  if (verb === "ACCEPT") {
+    // `ACCEPT <ident> [FROM <source>]`. The target is the FIRST
+    // unqualified IDENTIFIER after the verb. ACCEPT reads runtime
+    // input (date/time/env/console), so the resulting value is by
+    // definition not constant — same precision risk as STRING.
+    // Skip qualified targets for consistency with the other verbs.
+    const tokens = stmt.tokens;
+    if (tokens.length >= 2) {
+      const t = tokens[1]!;
+      const next = tokens[2];
+      const qualified = next && (next.type === "OF" || next.type === "IN");
+      if (t.type === "IDENTIFIER" && !qualified) {
+        model.moveAssignments.push({ target: t.value, verb: "ACCEPT", loc: stmt.loc });
+      }
+    }
+  }
+
+  if (verb === "READ") {
+    // `READ <file> [NEXT RECORD] INTO <ident>` — the optional INTO
+    // clause copies the read record into <ident>, clobbering whatever
+    // was there. Without INTO, READ writes only the FD/record area
+    // (handled by fileAccesses for file-lineage purposes, not relevant
+    // to dynamic-CALL resolution). Same INTO-then-IDENTIFIER pattern
+    // as STRING.
+    const tokens = stmt.tokens;
+    const intoIdx = tokens.findIndex((t) => t.type === "INTO");
+    if (intoIdx > 0) {
+      for (let i = intoIdx + 1; i < tokens.length; i++) {
+        const t = tokens[i]!;
+        if (t.type === "IDENTIFIER") {
+          const next = tokens[i + 1];
+          if (next && (next.type === "OF" || next.type === "IN")) break;
+          model.moveAssignments.push({ target: t.value, verb: "READ", loc: stmt.loc });
+          break;
+        }
+        if (t.type === "OF" || t.type === "IN") break;
       }
     }
   }

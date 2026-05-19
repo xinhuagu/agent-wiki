@@ -104,6 +104,19 @@ export interface SerializedCallBoundLineageEntry {
    * on without parsing domain detail.
    */
   envelope: EvidenceEnvelope;
+  /**
+   * #46 Phase A — present when the CALL site target was an identifier
+   * (dynamic call) that the resolver proved holds exactly one literal
+   * program name (via VALUE clause OR exactly-one literal MOVE with no
+   * non-literal writes). Lets the consumer distinguish "true literal
+   * CALL" from "dynamic CALL resolved via constant propagation",
+   * carrying the rename trail (identifier → literal, by which source).
+   */
+  dynamicCallResolution?: {
+    identifier: string;
+    literal: string;
+    source: "VALUE" | "MOVE";
+  };
   rationale: string;
 }
 
@@ -125,6 +138,90 @@ function isCopybook(filename: string): boolean {
 function findTopLevelDataItem(items: DataItemNode[], name: string): DataItemNode | undefined {
   const upper = name.toUpperCase();
   return items.find((item) => item.name.toUpperCase() === upper);
+}
+
+/**
+ * Recursive data-item lookup over a program's WS + LINKAGE trees. Used by
+ * `resolveDynamicCallTarget` to check VALUE clauses on identifiers that
+ * might live nested in a record. Different from `findTopLevelDataItem`
+ * (used by USING-arg resolution which only accepts 01-level records) —
+ * a program-name variable is just as likely to be `05 WS-PGM` inside
+ * `01 WS-VARS` as `01 WS-PGM` at top level.
+ */
+function findDataItemAnywhere(items: DataItemNode[], name: string): DataItemNode | undefined {
+  const upper = name.toUpperCase();
+  for (const item of items) {
+    if (item.name.toUpperCase() === upper) return item;
+    const inner = findDataItemAnywhere(item.children, name);
+    if (inner) return inner;
+  }
+  return undefined;
+}
+
+/**
+ * Extract a string-literal value from a `DataItemNode.value` field. The
+ * parser preserves quotes for LITERAL tokens (`VALUE "FOO"` lands as
+ * `value === '"FOO"'`), so we recognise literals by the leading quote
+ * and strip both ends. NUMERIC values and figurative-constant IDENTIFIER
+ * values (`SPACES`, `ZEROES`, ...) return undefined — those aren't
+ * usable program names for static CALL resolution.
+ */
+function extractStringLiteralValue(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  if (!/^["']/.test(raw)) return undefined;
+  return raw.replace(/^["']|["']$/g, "");
+}
+
+/**
+ * Resolve a `CALL <identifier>` target to a literal program name via
+ * conservative constant propagation (#46 Phase A). Returns `null`
+ * whenever the identifier doesn't uniquely hold a single literal value —
+ * fail-safe to the existing `dynamic-call` diagnostic. Two patterns
+ * succeed:
+ *
+ *   1. **Exactly one literal MOVE** to the identifier, with no
+ *      non-literal MOVE to the same identifier anywhere in the program.
+ *      Source classified as `"MOVE"`. If a VALUE clause also exists on
+ *      the data item, it must agree with the MOVE literal — disagreement
+ *      means two distinct possible values, so we abstain.
+ *   2. **VALUE clause** initializer with a string literal, and no MOVE
+ *      to the identifier at all. Source classified as `"VALUE"`.
+ *
+ * Anything else — multiple distinct literals, any non-literal MOVE,
+ * disagreement between VALUE and MOVE, no value at all — returns null.
+ * Multi-branch dispatch (`IF X MOVE "A" TO P ELSE MOVE "B"`) is Phase B
+ * scope; it currently lands as "two distinct literals" and falls
+ * through to the diagnostic.
+ */
+function resolveDynamicCallTarget(
+  caller: CobolCodeModel,
+  identifier: string,
+): { literal: string; source: "VALUE" | "MOVE" } | null {
+  const upper = identifier.toUpperCase();
+  const assignments = caller.moveAssignments.filter(
+    (a) => a.target.toUpperCase() === upper,
+  );
+  const dataItem = findDataItemAnywhere(caller.dataItems, identifier)
+    ?? findDataItemAnywhere(caller.linkageItems, identifier);
+  const valueLit = extractStringLiteralValue(dataItem?.value);
+
+  if (assignments.length > 0) {
+    // Any non-literal write disqualifies — we don't know what the
+    // identifier holds at the call site.
+    if (assignments.some((a) => a.literal === undefined)) return null;
+    const uniqueLiterals = new Set(assignments.map((a) => a.literal!));
+    if (uniqueLiterals.size !== 1) return null;
+    const literal = [...uniqueLiterals][0]!;
+    // A VALUE clause may coexist with MOVEs as long as it agrees with
+    // the literal MOVE value. Disagreement = two distinct candidates.
+    if (valueLit !== undefined && valueLit !== literal) return null;
+    return { literal, source: "MOVE" };
+  }
+
+  if (valueLit !== undefined) {
+    return { literal: valueLit, source: "VALUE" };
+  }
+  return null;
 }
 
 /**
@@ -242,6 +339,7 @@ function emitPair(
   calleeName: string,
   entries: SerializedCallBoundLineageEntry[],
   diagnostics: CallBoundDiagnostic[],
+  dynamicCallResolution?: { identifier: string; literal: string; source: "VALUE" | "MOVE" },
 ): void {
   const callerShape = shapeOf(callerItem, callerQualified);
   const calleeShape = shapeOf(calleeItem, calleeQualified);
@@ -284,6 +382,7 @@ function emitPair(
     callSite,
     evidence,
     envelope: buildEnvelope(confidence, callerSourceFile, calleeSourceFile, callSite.line),
+    ...(dynamicCallResolution ? { dynamicCallResolution } : {}),
     rationale: buildRationale(evidence, position, isTopLevel),
   });
 
@@ -307,6 +406,7 @@ function emitPair(
         calleeName,
         entries,
         diagnostics,
+        dynamicCallResolution,
       );
     }
   }
@@ -399,35 +499,63 @@ export function buildCallBoundLineage(
       // diagnostic, just an empty trace.
       if (call.usingArgs.length === 0) continue;
 
-      const callee = byProgramId.get(call.target.toUpperCase());
+      // #46 Phase A — try to resolve a dynamic `CALL <identifier>` to a
+      // literal program name via VALUE / single-MOVE constant propagation
+      // BEFORE the byProgramId lookup. On success, the downstream code
+      // treats this site like a literal CALL with `effectiveTarget` and
+      // attaches a `dynamicCallResolution` evidence dimension to entries.
+      // On failure, behavior is unchanged (still falls through to
+      // `dynamic-call` diagnostic at the lookup).
+      let effectiveTarget = call.target;
+      let dynamicCallResolution:
+        | { identifier: string; literal: string; source: "VALUE" | "MOVE" }
+        | undefined;
+      if (call.targetKind === "identifier") {
+        const resolved = resolveDynamicCallTarget(caller, call.target);
+        if (resolved) {
+          effectiveTarget = resolved.literal;
+          dynamicCallResolution = {
+            identifier: call.target,
+            literal: resolved.literal,
+            source: resolved.source,
+          };
+        }
+      }
+
+      const callee = byProgramId.get(effectiveTarget.toUpperCase());
       if (!callee) {
-        // Distinguish three cases:
-        //   1. CALL <var>             → dynamic-call
-        //   2. CALL "IBM-runtime"     → system-call (#26 phase 1)
-        //   3. CALL "user-program"    → unresolved-callee (real gap)
-        // Order matters: literal targets that match the IBM whitelist
-        // are documented runtime APIs, not missing user programs. The
-        // identifier-vs-literal check stays first so a dynamically
-        // resolved name doesn't accidentally match a system call.
+        // Distinguish four cases (#46 Phase A added the dynamic-resolved
+        // branches; resolved dynamic calls go through the literal-call
+        // diagnostic paths because we know the target name now):
+        //   1. CALL <var>             unresolved → dynamic-call
+        //   2. CALL <var> → "IBM"     resolved   → system-call (whitelist)
+        //   3. CALL "IBM"             literal    → system-call (whitelist)
+        //   4. CALL "user"            literal    → unresolved-callee
         let kind: CallBoundDiagnosticKind;
         let rationale: string;
-        if (call.targetKind === "identifier") {
+        if (call.targetKind === "identifier" && !dynamicCallResolution) {
           kind = "dynamic-call";
-          rationale = `CALL via identifier \`${call.target}\` is resolved at runtime; static lineage cannot determine the callee.`;
-        } else if (SYSTEM_CALLEES.has(call.target.toUpperCase())) {
+          rationale = `CALL via identifier \`${call.target}\` is resolved at runtime; static lineage cannot determine the callee. (No exactly-one literal MOVE or VALUE clause found for the identifier.)`;
+        } else if (SYSTEM_CALLEES.has(effectiveTarget.toUpperCase())
+          || extraSystemCalleesNorm.has(effectiveTarget.toUpperCase())) {
           kind = "system-call";
-          rationale = `CALL "${call.target}" targets a documented IBM runtime API (MQ / Language Environment / CICS-batch family); excluded from user-program lineage.`;
-        } else if (extraSystemCalleesNorm.has(call.target.toUpperCase())) {
-          kind = "system-call";
-          rationale = `CALL "${call.target}" matches the project-local system-call extension (\`extraSystemCallees\`); excluded from user-program lineage.`;
+          const isExtra = !SYSTEM_CALLEES.has(effectiveTarget.toUpperCase());
+          const baseRationale = isExtra
+            ? `CALL "${effectiveTarget}" matches the project-local system-call extension (\`extraSystemCallees\`); excluded from user-program lineage.`
+            : `CALL "${effectiveTarget}" targets a documented IBM runtime API (MQ / Language Environment / CICS-batch family); excluded from user-program lineage.`;
+          rationale = dynamicCallResolution
+            ? `${baseRationale} (Resolved from CALL \`${dynamicCallResolution.identifier}\` via ${dynamicCallResolution.source}.)`
+            : baseRationale;
         } else {
           kind = "unresolved-callee";
-          rationale = `CALL "${call.target}" has no matching program in the corpus.`;
+          rationale = dynamicCallResolution
+            ? `CALL via identifier \`${dynamicCallResolution.identifier}\` resolved to "${effectiveTarget}" (via ${dynamicCallResolution.source}) but no matching program in the corpus.`
+            : `CALL "${effectiveTarget}" has no matching program in the corpus.`;
         }
         diagnostics.push({
           kind,
           callerProgramId,
-          target: call.target,
+          target: effectiveTarget,
           callSite: call.loc,
           rationale,
         });
@@ -465,11 +593,11 @@ export function buildCallBoundLineage(
         diagnostics.push({
           kind: "arity-mismatch",
           callerProgramId,
-          target: call.target,
+          target: effectiveTarget,
           callSite: call.loc,
           rationale:
             `CALL passes ${call.usingArgs.length} arg(s) but callee `
-            + `\`${call.target}\` declares ${callee.linkageItems.length} `
+            + `\`${effectiveTarget}\` declares ${callee.linkageItems.length} `
             + `LINKAGE record(s).`,
         });
         continue;
@@ -495,7 +623,7 @@ export function buildCallBoundLineage(
           diagnostics.push({
             kind: "caller-arg-not-top-level",
             callerProgramId,
-            target: call.target,
+            target: effectiveTarget,
             callSite: call.loc,
             rationale:
               `Position ${i}: USING arg \`${callerArgName}\` is not a top-level `
@@ -517,9 +645,10 @@ export function buildCallBoundLineage(
           caller.sourceFile,
           callee.sourceFile,
           call.loc,
-          call.target,
+          effectiveTarget,
           entries,
           diagnostics,
+          dynamicCallResolution,
         );
       }
     }

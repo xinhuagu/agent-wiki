@@ -1115,11 +1115,258 @@ describe("buildCallBoundLineage", () => {
     expect(findChildName(lineage2)).toBe("FIELD-V1");
   });
 
-  it("dynamic CALL <var> resolving to an IBM API name does NOT match the whitelist (#26 phase 1)", () => {
-    // The whitelist is gated behind targetKind === "literal" — a runtime-
-    // resolved CALL <variable> stays a dynamic-call diagnostic regardless
-    // of whether the value at the call site happens to match an IBM API
-    // name. Static lineage can't see the variable's runtime value.
+  describe("Dynamic CALL constant propagation (#46 Phase A)", () => {
+    function calleeFixture(programId: string): string {
+      return `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ${programId}.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-A               PIC X(8).
+       PROCEDURE DIVISION USING LK-A.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+    }
+
+    it("VALUE clause: CALL <var> where var has only a VALUE literal resolves to the literal", () => {
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM             PIC X(8) VALUE "CUSTBILL".
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("CUSTBILL"), "CUSTBILL.cbl"),
+      ]);
+      expect(lineage).not.toBeNull();
+      // The resolved call produces entries (callee CUSTBILL is in the corpus).
+      expect(lineage!.entries.length).toBeGreaterThan(0);
+      const entry = lineage!.entries[0]!;
+      expect(entry.dynamicCallResolution).toEqual({
+        identifier: "WS-PGM",
+        literal: "CUSTBILL",
+        source: "VALUE",
+      });
+      // No dynamic-call diagnostic — we resolved the target.
+      expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(false);
+    });
+
+    it("single literal MOVE: CALL <var> after exactly one MOVE literal resolves", () => {
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM             PIC X(8).
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           MOVE "CUSTBILL" TO WS-PGM.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("CUSTBILL"), "CUSTBILL.cbl"),
+      ]);
+      const entry = lineage!.entries[0]!;
+      expect(entry.dynamicCallResolution).toEqual({
+        identifier: "WS-PGM",
+        literal: "CUSTBILL",
+        source: "MOVE",
+      });
+    });
+
+    it("VALUE + MOVE agreeing: still resolves (source = MOVE — most recent observation wins)", () => {
+      // The Phase A rule is "the identifier holds exactly one literal value".
+      // A VALUE clause and a MOVE both giving the same literal still satisfy
+      // the uniqueness gate; the MOVE branch fires first, so source = "MOVE".
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM             PIC X(8) VALUE "CUSTBILL".
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           MOVE "CUSTBILL" TO WS-PGM.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("CUSTBILL"), "CUSTBILL.cbl"),
+      ]);
+      expect(lineage!.entries[0]!.dynamicCallResolution?.literal).toBe("CUSTBILL");
+    });
+
+    it("VALUE + MOVE DISAGREEING: stays dynamic-call (two distinct candidate values)", () => {
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM             PIC X(8) VALUE "PROG-A".
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           MOVE "PROG-B" TO WS-PGM.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("PROG-A"), "PROG-A.cbl"),
+      ]);
+      expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(true);
+      expect(lineage!.entries).toEqual([]);
+    });
+
+    it("two distinct literal MOVEs: stays dynamic-call (ambiguous)", () => {
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM             PIC X(8).
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           MOVE "PROG-A" TO WS-PGM.
+           MOVE "PROG-B" TO WS-PGM.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("PROG-A"), "PROG-A.cbl"),
+      ]);
+      expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(true);
+    });
+
+    it("non-literal MOVE source: stays dynamic-call (unknown runtime value)", () => {
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM             PIC X(8) VALUE "CUSTBILL".
+       01  WS-OTHER           PIC X(8).
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           MOVE WS-OTHER TO WS-PGM.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("CUSTBILL"), "CUSTBILL.cbl"),
+      ]);
+      // VALUE says "CUSTBILL" but the non-literal MOVE makes runtime
+      // value unknowable. Conservative: drop.
+      expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(true);
+      expect(lineage!.entries).toEqual([]);
+    });
+
+    it("qualified MOVE (`MOVE X OF Y TO Z`) is conservatively skipped — no false propagation", () => {
+      // Self-review concern: a naive `operands[0] = source, [1..] = targets`
+      // approach would mis-parse `MOVE A OF GROUP TO TARGET` as
+      // (source=A, targets=[GROUP, TARGET]) because OF is a keyword and
+      // gets stripped from operands. The token-based extractor refuses
+      // qualified sources/targets entirely — qualified MOVEs simply
+      // don't feed the resolver.
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  GROUP-A.
+           05  PGM-NAME       PIC X(8) VALUE "CUSTBILL".
+       01  WS-PGM             PIC X(8).
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           MOVE PGM-NAME OF GROUP-A TO WS-PGM.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("CUSTBILL"), "CUSTBILL.cbl"),
+      ]);
+      // WS-PGM has no literal MOVE recorded (the qualified MOVE was
+      // skipped) and no VALUE clause → resolver returns null →
+      // dynamic-call. The PGM-NAME field's VALUE doesn't propagate
+      // (we'd need full data-flow tracking — Phase B).
+      expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(true);
+      expect(lineage!.entries).toEqual([]);
+    });
+
+    it("resolved-but-not-in-corpus: emits unresolved-callee with resolution trail in rationale", () => {
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM             PIC X(8) VALUE "MISSING".
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      // No callee program in the corpus for "MISSING".
+      const otherCaller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. OTHER.
+       DATA DIVISION.
+       LINKAGE SECTION.
+       01  LK-X       PIC X(8).
+       PROCEDURE DIVISION USING LK-X.
+       A000-MAIN SECTION.
+       A100-START.
+           GOBACK.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(otherCaller, "OTHER.cbl"),
+      ]);
+      // Resolved target is "MISSING" — not in corpus, and not on the IBM
+      // whitelist. Classifies as unresolved-callee, not dynamic-call.
+      expect(lineage!.diagnostics.some((d) => d.kind === "unresolved-callee")).toBe(true);
+      expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(false);
+      const unresolved = lineage!.diagnostics.find((d) => d.kind === "unresolved-callee");
+      expect(unresolved?.rationale).toContain("resolved to \"MISSING\"");
+      expect(unresolved?.rationale).toContain("via VALUE");
+    });
+  });
+
+  it("dynamic CALL <var> resolving to an IBM API name VIA CONSTANT PROPAGATION matches the whitelist (#46 Phase A)", () => {
+    // Pre-#46 this case stayed a `dynamic-call` diagnostic because static
+    // lineage refused to look through the variable. #46 Phase A adds
+    // VALUE / single-MOVE constant propagation, and the resolved literal
+    // is then checked against the IBM whitelist — so a CALL to a
+    // variable holding "MQCONN" via exactly one literal MOVE now
+    // correctly classifies as `system-call`.
     const caller = `
        IDENTIFICATION DIVISION.
        PROGRAM-ID. CALLER.
@@ -1151,7 +1398,12 @@ describe("buildCallBoundLineage", () => {
     ]);
 
     expect(lineage).not.toBeNull();
-    expect(lineage!.diagnostics.some((d) => d.kind === "system-call")).toBe(false);
-    expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(true);
+    // Resolved via single-MOVE constant propagation, target "MQCONN" is on
+    // the IBM whitelist → system-call diagnostic, no dynamic-call.
+    expect(lineage!.diagnostics.some((d) => d.kind === "system-call")).toBe(true);
+    expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(false);
+    // The system-call diagnostic carries the resolution trail.
+    const sysCall = lineage!.diagnostics.find((d) => d.kind === "system-call");
+    expect(sysCall?.rationale).toContain("Resolved from CALL `WS-PROG-NAME` via MOVE");
   });
 });

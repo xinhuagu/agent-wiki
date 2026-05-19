@@ -63,17 +63,32 @@ export interface CobolCodeModel {
     loc: SourceLocation;
   }[];
   /**
-   * `MOVE <source> TO <target>...` records (#46 Phase A). Each target
-   * receives its own entry; multi-target `MOVE X TO A B` produces two
-   * entries with the same source. `literal` is set when the source is a
-   * quoted string literal — surrogate evidence for constant propagation
-   * in the call-bound lineage builder. Non-literal sources (identifiers,
-   * numerics) populate the entry too so the resolver can detect "this
-   * variable has a non-literal write" and abstain conservatively.
+   * Write-like assignment records used by the dynamic-CALL constant-
+   * propagation resolver (#46 Phase A; extended in #48 Phase A.1 to
+   * cover non-MOVE write verbs). Each entry names a target identifier
+   * and the verb that wrote it:
+   *
+   *   - `verb: "MOVE"` with a `literal` — `MOVE "FOO" TO target`.
+   *     The only write shape that produces a resolvable literal.
+   *   - `verb: "MOVE"` without `literal` — non-literal MOVE source
+   *     (identifier or numeric). Disqualifies resolution.
+   *   - `verb: "INITIALIZE" | "STRING" | "UNSTRING"` (always no
+   *     `literal`) — non-MOVE writes that clobber the target with a
+   *     value the resolver can't statically determine. Same effect
+   *     as a non-literal MOVE: abstain.
+   *
+   * Multi-target `MOVE X TO A B` produces two entries with the same
+   * source. Qualified targets (`A OF B`, `A IN B`) are skipped at
+   * extraction time — Phase A doesn't handle them.
+   *
+   * `verb` is optional for back-compat with pre-#48 artifacts where
+   * every entry was implicitly a MOVE; missing values default to
+   * "MOVE" at consumer time.
    */
   moveAssignments: {
     target: string;
     literal?: string;
+    verb?: "MOVE" | "INITIALIZE" | "STRING" | "UNSTRING";
     loc: SourceLocation;
   }[];
 }
@@ -364,8 +379,6 @@ function extractStatementRelations(
     const tokens = stmt.tokens;
     const toIdx = tokens.findIndex((t) => t.type === "TO");
     if (toIdx > 1) {
-      // Slice off the leading MOVE verb token; collect source and
-      // target token windows separated by TO.
       const sourceTokens = tokens.slice(1, toIdx);
       const targetTokens = tokens.slice(toIdx + 1);
       const hasQualifier = (ts: typeof sourceTokens): boolean =>
@@ -374,9 +387,6 @@ function extractStatementRelations(
         && (sourceTokens[0]!.type === "IDENTIFIER"
           || sourceTokens[0]!.type === "LITERAL"
           || sourceTokens[0]!.type === "NUMERIC");
-      // Targets: each must be one IDENTIFIER token (multi-target MOVE
-      // is space-separated, no OF/IN expected for the simple cases we
-      // care about). Reject if ANY target is qualified.
       if (sourceIsSingleScalar && !hasQualifier(sourceTokens) && !hasQualifier(targetTokens)) {
         const source = sourceTokens[0]!.value;
         const isLiteral = /^["']/.test(source);
@@ -386,8 +396,99 @@ function extractStatementRelations(
           model.moveAssignments.push({
             target: tt.value,
             ...(literal !== undefined ? { literal } : {}),
+            verb: "MOVE",
             loc: stmt.loc,
           });
+        }
+      }
+    }
+  }
+
+  // #48 Phase A.1 — non-MOVE write verbs that can clobber a variable.
+  // These never produce a resolvable literal (the written value is
+  // computed at runtime), so they're emitted with `literal: undefined`
+  // and the resolver's existing "any non-literal write disqualifies"
+  // gate catches them. Each verb has a distinct target-extraction
+  // shape — see comments per verb. Qualified targets (`A OF B`) are
+  // skipped at the per-token level for the same reason as MOVE.
+  if (verb === "INITIALIZE") {
+    // `INITIALIZE <ident>... [REPLACING ...] [DEFAULT TO ...]`. Every
+    // unqualified IDENTIFIER token after the verb is a target, until
+    // the first OF/IN qualifier (skip the whole statement) or any
+    // other keyword (REPLACING/DEFAULT/etc., stop).
+    const tokens = stmt.tokens;
+    const candidates: string[] = [];
+    let qualified = false;
+    for (let i = 1; i < tokens.length; i++) {
+      const t = tokens[i]!;
+      if (t.type === "IDENTIFIER") {
+        candidates.push(t.value);
+      } else if (t.type === "OF" || t.type === "IN") {
+        qualified = true;
+        break;
+      } else {
+        break;
+      }
+    }
+    if (!qualified) {
+      for (const target of candidates) {
+        model.moveAssignments.push({ target, verb: "INITIALIZE", loc: stmt.loc });
+      }
+    }
+  }
+
+  if (verb === "STRING") {
+    // `STRING <source-list> INTO <target> [WITH POINTER <ptr>] ... END-STRING`.
+    // The first IDENTIFIER after `INTO` is the destination target.
+    // A `WITH POINTER` operand is also a write target but rare for
+    // program-name vars; track only the primary INTO target for now.
+    const tokens = stmt.tokens;
+    const intoIdx = tokens.findIndex((t) => t.type === "INTO");
+    if (intoIdx > 0) {
+      for (let i = intoIdx + 1; i < tokens.length; i++) {
+        const t = tokens[i]!;
+        if (t.type === "IDENTIFIER") {
+          // Reject if the very next token is OF/IN (qualified target).
+          const next = tokens[i + 1];
+          if (next && (next.type === "OF" || next.type === "IN")) break;
+          model.moveAssignments.push({ target: t.value, verb: "STRING", loc: stmt.loc });
+          break;
+        }
+        // Skip any leading keyword tokens between INTO and the target.
+        if (t.type === "OF" || t.type === "IN") break;
+      }
+    }
+  }
+
+  if (verb === "UNSTRING") {
+    // `UNSTRING <source> [DELIMITED BY ...] INTO <target-1> [DELIMITER IN <d>]
+    //   [COUNT IN <c>] [target-2 ...] [WITH POINTER <ptr>] [TALLYING IN <t>]
+    //   END-UNSTRING`. After INTO, IDENTIFIER tokens are targets until
+    // the next non-IDENTIFIER keyword (DELIMITER/COUNT/POINTER/TALLYING/etc.).
+    // Phase A.1 simplification: capture up to the FIRST qualifier or
+    // keyword boundary; rare edge cases (qualified targets, multiple
+    // delimiter clauses) fall through unhandled.
+    const tokens = stmt.tokens;
+    const intoIdx = tokens.findIndex((t) => t.type === "INTO");
+    if (intoIdx > 0) {
+      for (let i = intoIdx + 1; i < tokens.length; i++) {
+        const t = tokens[i]!;
+        if (t.type === "IDENTIFIER") {
+          const next = tokens[i + 1];
+          if (next && (next.type === "OF" || next.type === "IN")) {
+            // Skip past the qualified target (don't capture it).
+            i += 2;
+            continue;
+          }
+          model.moveAssignments.push({ target: t.value, verb: "UNSTRING", loc: stmt.loc });
+        } else if (t.type === "OF" || t.type === "IN") {
+          // Mid-stream OF/IN shouldn't happen if we skipped correctly above.
+          continue;
+        } else {
+          // Stop at the first non-IDENTIFIER/non-OF/IN token (DELIMITER /
+          // COUNT / WITH / etc.). UNSTRING's grammar has more clauses we
+          // don't track for now.
+          break;
         }
       }
     }

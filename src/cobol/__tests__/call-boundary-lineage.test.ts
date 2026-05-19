@@ -1320,6 +1320,113 @@ describe("buildCallBoundLineage", () => {
       expect(lineage!.entries).toEqual([]);
     });
 
+    it("STRING ... INTO clobbers VALUE clause: resolver abstains (#48 Phase A.1)", () => {
+      // VALUE "FALLBACK" then STRING into WS-PGM means the variable
+      // value at the CALL site is computed, not constant. Pre-#48 the
+      // resolver saw no MOVE, fell back to VALUE, and falsely resolved
+      // the call to "FALLBACK". Now: the STRING write is tracked as a
+      // non-literal assignment and the resolver abstains.
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM             PIC X(8) VALUE "FALLBACK".
+       01  WS-PREFIX          PIC X(4).
+       01  WS-SUFFIX          PIC X(4).
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STRING WS-PREFIX WS-SUFFIX INTO WS-PGM.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("FALLBACK"), "FALLBACK.cbl"),
+      ]);
+      expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(true);
+      expect(lineage!.entries).toEqual([]);
+    });
+
+    it("INITIALIZE clobbers VALUE clause: resolver abstains (#48 Phase A.1)", () => {
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM             PIC X(8) VALUE "FALLBACK".
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           INITIALIZE WS-PGM.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("FALLBACK"), "FALLBACK.cbl"),
+      ]);
+      expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(true);
+      expect(lineage!.entries).toEqual([]);
+    });
+
+    it("UNSTRING ... INTO clobbers VALUE clause: resolver abstains (#48 Phase A.1)", () => {
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-INPUT           PIC X(20).
+       01  WS-PGM             PIC X(8) VALUE "FALLBACK".
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           UNSTRING WS-INPUT INTO WS-PGM.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("FALLBACK"), "FALLBACK.cbl"),
+      ]);
+      expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(true);
+      expect(lineage!.entries).toEqual([]);
+    });
+
+    it("non-MOVE write on a DIFFERENT identifier doesn't disqualify resolution (#48 Phase A.1)", () => {
+      // Verify the abstain gate is precise to the queried identifier —
+      // INITIALIZE of WS-OTHER doesn't affect resolution of WS-PGM.
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-PGM             PIC X(8) VALUE "CUSTBILL".
+       01  WS-OTHER           PIC X(8).
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           INITIALIZE WS-OTHER.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("CUSTBILL"), "CUSTBILL.cbl"),
+      ]);
+      expect(lineage!.entries.length).toBeGreaterThan(0);
+      expect(lineage!.entries[0]!.dynamicCallResolution).toEqual({
+        identifier: "WS-PGM",
+        literal: "CUSTBILL",
+        source: "VALUE",
+      });
+    });
+
     it("resolved-but-not-in-corpus: emits unresolved-callee with resolution trail in rationale", () => {
       const caller = `
        IDENTIFICATION DIVISION.

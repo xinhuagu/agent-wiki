@@ -88,7 +88,7 @@ export interface CobolCodeModel {
   moveAssignments: {
     target: string;
     literal?: string;
-    verb?: "MOVE" | "INITIALIZE" | "STRING" | "UNSTRING";
+    verb?: "MOVE" | "INITIALIZE" | "STRING" | "UNSTRING" | "ACCEPT";
     loc: SourceLocation;
   }[];
 }
@@ -493,6 +493,23 @@ function extractStatementRelations(
         for (const target of candidates) {
           model.moveAssignments.push({ target, verb: "UNSTRING", loc: stmt.loc });
         }
+      }
+    }
+  }
+
+  if (verb === "ACCEPT") {
+    // `ACCEPT <ident> [FROM <source>]`. The target is the FIRST
+    // unqualified IDENTIFIER after the verb. ACCEPT reads runtime
+    // input (date/time/env/console), so the resulting value is by
+    // definition not constant — same precision risk as STRING.
+    // Skip qualified targets for consistency with the other verbs.
+    const tokens = stmt.tokens;
+    if (tokens.length >= 2) {
+      const t = tokens[1]!;
+      const next = tokens[2];
+      const qualified = next && (next.type === "OF" || next.type === "IN");
+      if (t.type === "IDENTIFIER" && !qualified) {
+        model.moveAssignments.push({ target: t.value, verb: "ACCEPT", loc: stmt.loc });
       }
     }
   }

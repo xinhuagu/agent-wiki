@@ -88,7 +88,7 @@ export interface CobolCodeModel {
   moveAssignments: {
     target: string;
     literal?: string;
-    verb?: "MOVE" | "INITIALIZE" | "STRING" | "UNSTRING" | "ACCEPT";
+    verb?: "MOVE" | "INITIALIZE" | "STRING" | "UNSTRING" | "ACCEPT" | "READ";
     loc: SourceLocation;
   }[];
 }
@@ -510,6 +510,29 @@ function extractStatementRelations(
       const qualified = next && (next.type === "OF" || next.type === "IN");
       if (t.type === "IDENTIFIER" && !qualified) {
         model.moveAssignments.push({ target: t.value, verb: "ACCEPT", loc: stmt.loc });
+      }
+    }
+  }
+
+  if (verb === "READ") {
+    // `READ <file> [NEXT RECORD] INTO <ident>` — the optional INTO
+    // clause copies the read record into <ident>, clobbering whatever
+    // was there. Without INTO, READ writes only the FD/record area
+    // (handled by fileAccesses for file-lineage purposes, not relevant
+    // to dynamic-CALL resolution). Same INTO-then-IDENTIFIER pattern
+    // as STRING.
+    const tokens = stmt.tokens;
+    const intoIdx = tokens.findIndex((t) => t.type === "INTO");
+    if (intoIdx > 0) {
+      for (let i = intoIdx + 1; i < tokens.length; i++) {
+        const t = tokens[i]!;
+        if (t.type === "IDENTIFIER") {
+          const next = tokens[i + 1];
+          if (next && (next.type === "OF" || next.type === "IN")) break;
+          model.moveAssignments.push({ target: t.value, verb: "READ", loc: stmt.loc });
+          break;
+        }
+        if (t.type === "OF" || t.type === "IN") break;
       }
     }
   }

@@ -1423,6 +1423,39 @@ describe("buildCallBoundLineage", () => {
       expect(lineage!.entries).toEqual([]);
     });
 
+    it("READ ... INTO clobbers VALUE clause: resolver abstains (#48 Phase A.1)", () => {
+      // Reading a record from a file overwrites the target with file
+      // data — runtime-computed, not constant. Same precision class as
+      // ACCEPT / STRING.
+      const caller = `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CALLER.
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT PGM-FILE ASSIGN TO "PGMFILE".
+       DATA DIVISION.
+       FILE SECTION.
+       FD  PGM-FILE.
+       01  PGM-RECORD         PIC X(80).
+       WORKING-STORAGE SECTION.
+       01  WS-PGM             PIC X(8) VALUE "FALLBACK".
+       01  WS-A               PIC X(8).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           READ PGM-FILE INTO WS-PGM.
+           CALL WS-PGM USING WS-A.
+           STOP RUN.
+`;
+      const lineage = buildCallBoundLineage([
+        model(caller, "CALLER.cbl"),
+        model(calleeFixture("FALLBACK"), "FALLBACK.cbl"),
+      ]);
+      expect(lineage!.diagnostics.some((d) => d.kind === "dynamic-call")).toBe(true);
+      expect(lineage!.entries).toEqual([]);
+    });
+
     it("non-MOVE write on a DIFFERENT identifier doesn't disqualify resolution (#48 Phase A.1)", () => {
       // Verify the abstain gate is precise to the queried identifier —
       // INITIALIZE of WS-OTHER doesn't affect resolution of WS-PGM.

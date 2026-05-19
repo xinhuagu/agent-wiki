@@ -62,6 +62,20 @@ export interface CobolCodeModel {
     rawText: string;
     loc: SourceLocation;
   }[];
+  /**
+   * `MOVE <source> TO <target>...` records (#46 Phase A). Each target
+   * receives its own entry; multi-target `MOVE X TO A B` produces two
+   * entries with the same source. `literal` is set when the source is a
+   * quoted string literal — surrogate evidence for constant propagation
+   * in the call-bound lineage builder. Non-literal sources (identifiers,
+   * numerics) populate the entry too so the resolver can detect "this
+   * variable has a non-literal write" and abstain conservatively.
+   */
+  moveAssignments: {
+    target: string;
+    literal?: string;
+    loc: SourceLocation;
+  }[];
 }
 
 export interface CodeSummary {
@@ -97,6 +111,7 @@ export function extractModel(ast: CobolAST): CobolCodeModel {
     db2References: [],
     cicsReferences: [],
     fileAccesses: [],
+    moveAssignments: [],
   };
 
   for (const div of ast.divisions) {
@@ -329,6 +344,31 @@ function extractStatementRelations(
         usingArgs: extractUsingArgs(stmt.rawText),
         loc: stmt.loc,
       });
+    }
+  }
+
+  if (verb === "MOVE") {
+    // `MOVE <source> TO <target>...`. Parser strips the TO keyword from
+    // operands (TO has its own token type, not pushed to operands), so
+    // ops[0] is the source and ops[1..] are targets. Literal-source MOVEs
+    // feed the dynamic-CALL constant-propagation resolver (#46 Phase A);
+    // non-literal sources are still recorded (with `literal` undefined)
+    // so the resolver can see "this variable has a non-literal write"
+    // and conservatively abstain.
+    const ops = stmt.operands;
+    if (ops.length >= 2) {
+      const source = ops[0]!;
+      const isLiteral = /^["']/.test(source);
+      const literal = isLiteral ? source.replace(/^["']|["']$/g, "") : undefined;
+      for (let i = 1; i < ops.length; i++) {
+        const target = ops[i];
+        if (!target) continue;
+        model.moveAssignments.push({
+          target,
+          ...(literal !== undefined ? { literal } : {}),
+          loc: stmt.loc,
+        });
+      }
     }
   }
 

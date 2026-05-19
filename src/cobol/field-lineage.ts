@@ -1318,10 +1318,26 @@ export function generateFieldLineagePage(lineage: SerializedFieldLineage): { pat
         const highCount = group.entries.filter((e) => e.confidence === "high").length;
         lines.push(`### ${displayLabel(group.callerProgramId)} → ${displayLabel(group.calleeProgramId)}`);
         lines.push("");
+        // #46 Phase A — surface the dynamic-call resolution trail in the
+        // group summary when one or more entries was resolved via VALUE
+        // or single-MOVE constant propagation. Dedup the trails: a
+        // group can include multiple CALL sites and the trails might
+        // differ; show each unique `identifier → literal (source)`
+        // exactly once so the summary stays compact.
+        const resolutionTrails = new Set<string>();
+        for (const entry of group.entries) {
+          if (entry.dynamicCallResolution) {
+            const r = entry.dynamicCallResolution;
+            resolutionTrails.add(`\`${r.identifier}\` → "${r.literal}" via ${r.source}`);
+          }
+        }
         const summary = highCount > 0
           ? `${group.entries.length} pair(s): ${detCount} deterministic, ${highCount} high-confidence (name divergence — review below).`
           : `${group.entries.length} pair(s), all deterministic.`;
-        lines.push(`*${summary}*`);
+        const resolved = resolutionTrails.size > 0
+          ? ` Resolved from dynamic CALL: ${[...resolutionTrails].join("; ")}.`
+          : "";
+        lines.push(`*${summary}${resolved}*`);
         lines.push("");
         lines.push("| Pos | Caller | Callee | Confidence | Evidence |");
         lines.push("|-----|--------|--------|------------|----------|");

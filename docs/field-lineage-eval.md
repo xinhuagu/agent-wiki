@@ -185,13 +185,36 @@ landing the change.
   that the upstream parse was the cause. Re-run the affected file
   through `code_parse` to inspect diagnostics.
 
+## Fixture inventory
+
+- `eval/basic/` — deterministic copybook reuse + inferred-high cross-
+  copybook + CALL-USING positional pair. The widest-coverage fixture;
+  exercises three families.
+- `eval/db2-column-pairs/` — DB2 cross-program flow with column-level
+  binding. INSERT INTO T (cols) VALUES (:hv) on the writer + SELECT
+  cols INTO :hv FROM T on the reader. Anchors the `:writer-hv → COL
+  → :reader-hv` pairing emitted by `db2-table-lineage.ts:159`. All
+  other families declared `[]` to confirm the harness doesn't emit
+  anything spurious for them.
+- `eval/replacing/` — `deterministic-via-replacing` cohort (#39
+  Phase B). Two consumers share a COPY ... REPLACING clause; the
+  manifest pins the post-substitution field names. Anchors against
+  a Phase B regression that drops the rename.
+
+A `inferredSemantic` fixture is not yet included — the shape-keyed
+matcher has five conjoined gates (PIC match, USAGE match, level
+match, exact parent path, ≥2 sibling overlap) that interact in
+subtle ways. Building a minimal fixture that exercises ONLY semantic
+without bleeding into the inferred-high tier requires more care than
+the others, and is deferred until there's a concrete tier change
+that needs it as a regression anchor.
+
 ## Future
 
-- A second fixture exercising `REPLACING`, `inferredSemantic`, and DB2
-  column pairs once the basic fixture is anchored.
 - A CLI surface (`agent-wiki eval lineage <dir>`) once there are enough
   fixtures to make running the suite outside vitest worthwhile.
 - A baseline-comparison mode that diffs current metrics against a
   committed `baseline.json` and fails if precision regresses — once we
   have stable enough corpora to baseline.
 - Linkage-tier grading in the canonical key (v2 schema).
+- A `inferredSemantic` fixture (see note above).

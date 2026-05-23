@@ -1,0 +1,14 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. DB2-READ.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-OUT-ID          PIC X(10).
+       01  WS-OUT-NAME        PIC X(30).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL
+             SELECT ID, NAME INTO :WS-OUT-ID, :WS-OUT-NAME
+             FROM CUSTOMERS
+           END-EXEC.
+           STOP RUN.

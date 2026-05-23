@@ -78,6 +78,69 @@ describe("field-lineage eval harness — basic fixture", () => {
   });
 });
 
+describe("field-lineage eval harness — DB2 column-pair fixture", () => {
+  const fixtureDir = resolve(process.cwd(), "src/cobol/__tests__/fixtures/eval/db2-column-pairs");
+  let report: EvalReport;
+  beforeAll(() => {
+    report = evaluateFieldLineage(fixtureDir);
+  });
+
+  it("perfectly grades DB2 cross-program column pairs (precision = recall = 1.0)", () => {
+    expect(report.overall.precision).toBeCloseTo(1, 10);
+    expect(report.overall.recall).toBeCloseTo(1, 10);
+  });
+
+  it("emits the table-level pair plus both column-level pairs", () => {
+    const fam = report.families.db2;
+    if (fam.skipped) throw new Error("db2 unexpectedly skipped");
+    // 1 pair key + 2 column keys = 3 graded facts.
+    expect(fam.expected).toBe(3);
+    expect(fam.actual).toBe(3);
+    expect(fam.truePositives).toBe(3);
+  });
+
+  it("does not light up unrelated families (no copybook reuse, no CALL-USING)", () => {
+    const det = report.families.deterministic;
+    const cb = report.families.callBound;
+    if (det.skipped || cb.skipped) throw new Error("graded family unexpectedly skipped");
+    expect(det.actual).toBe(0);
+    expect(cb.actual).toBe(0);
+  });
+});
+
+describe("field-lineage eval harness — REPLACING cohort fixture", () => {
+  const fixtureDir = resolve(process.cwd(), "src/cobol/__tests__/fixtures/eval/replacing");
+  let report: EvalReport;
+  beforeAll(() => {
+    report = evaluateFieldLineage(fixtureDir);
+  });
+
+  it("perfectly grades the REPLACING cohort (precision = recall = 1.0)", () => {
+    expect(report.overall.precision).toBeCloseTo(1, 10);
+    expect(report.overall.recall).toBeCloseTo(1, 10);
+  });
+
+  it("captures the post-substitution field name (CLIENT-ID) and untouched fields (ZIP-CODE) under one cohort", () => {
+    const det = report.families.deterministic;
+    if (det.skipped) throw new Error("deterministic unexpectedly skipped");
+    // CUSTOMER-REC + CLIENT-ID + CUSTOMER-ADDRESS + ZIP-CODE = 4 entries.
+    expect(det.expected).toBe(4);
+    expect(det.actual).toBe(4);
+    expect(det.truePositives).toBe(4);
+    expect(det.falsePositives).toEqual([]);
+    expect(det.falseNegatives).toEqual([]);
+  });
+
+  it("anchors against a Phase B regression: a builder that loses the REPLACING rename would surface CUSTOMER-ID as FP and CLIENT-ID as FN", () => {
+    // Sanity check against the canonical-key shape — the manifest's CLIENT-ID
+    // entry must be matched by the builder's emission of the renamed field,
+    // not by an accidental match on the pre-substitution name.
+    const det = report.families.deterministic;
+    if (det.skipped) throw new Error("deterministic unexpectedly skipped");
+    expect(det.falsePositives.find((k) => k.startsWith("CUSTOMER-ID|"))).toBeUndefined();
+  });
+});
+
 describe("field-lineage eval harness — renderer edge cases", () => {
   it("emits a false-positive section in markdown when actual exceeds expected", () => {
     const report: EvalReport = {

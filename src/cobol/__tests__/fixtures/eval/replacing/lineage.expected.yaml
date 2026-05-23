@@ -1,0 +1,37 @@
+version: 1
+description: >
+  REPLACING cohort fixture (#39 Phase B). PROGA and PROGB both COPY
+  CUSTOMER-REC with the same `REPLACING CUSTOMER-ID BY CLIENT-ID`
+  clause. They share a REPLACING cohort, so every field (renamed or
+  not) emits as a `deterministic-via-replacing` entry. The harness's
+  canonical key uses post-substitution field names — CUSTOMER-ID
+  appears as CLIENT-ID; untouched fields (CUSTOMER-ADDRESS, ZIP-CODE)
+  keep their original names.
+
+  Linkage tier is intentionally NOT pinned by the manifest (the v1
+  schema doesn't distinguish `deterministic` from
+  `deterministic-via-replacing` — documented limitation). This fixture
+  still anchors the post-substitution field shape, so a Phase B
+  regression that drops the rename (CUSTOMER-ID surviving as
+  CUSTOMER-ID) lights up as both an FP (CUSTOMER-ID) and an FN
+  (CLIENT-ID).
+
+deterministic:
+  - fieldName: CUSTOMER-REC
+    copybooks: [CUSTOMER-REC]
+    programs: [PROGA, PROGB]
+  - fieldName: CLIENT-ID
+    copybooks: [CUSTOMER-REC]
+    programs: [PROGA, PROGB]
+  - fieldName: CUSTOMER-ADDRESS
+    copybooks: [CUSTOMER-REC]
+    programs: [PROGA, PROGB]
+  - fieldName: ZIP-CODE
+    copybooks: [CUSTOMER-REC]
+    programs: [PROGA, PROGB]
+
+inferredHigh: []
+inferredAmbiguous: []
+inferredSemantic: []
+callBound: []
+db2: []

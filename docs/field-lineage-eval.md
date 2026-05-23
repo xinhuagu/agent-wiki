@@ -164,10 +164,10 @@ report. No CLI wrapper yet; vitest is the runner.
    so float accumulation in the F1 formula doesn't make the assertion
    brittle on future non-perfect fixtures.
 
-When a tier's gates are changed (e.g. the precision-protection comment
-at `field-lineage.ts:776` is revisited for Phase C), rerun every fixture
-under `eval/` and confirm metrics move in the intended direction before
-landing the change.
+When a tier's gates are changed (e.g. the Phase C precision gate at
+`field-lineage.ts:773`, or the inferred-semantic five-gate at the
+matcher), rerun every fixture under `eval/` and confirm metrics move
+in the intended direction before landing the change.
 
 ## Known limitations
 
@@ -202,6 +202,16 @@ landing the change.
   Phase B). Two consumers share a COPY ... REPLACING clause; the
   manifest pins the post-substitution field names. Anchors against
   a Phase B regression that drops the rename.
+- `eval/replacing-inferred/` — Phase C (REPLACING-aware inferred).
+  Two unrelated copybooks consumed only via REPLACING; the matcher
+  widens candidate sourcing to include those cohorts but uses the
+  ORIGINAL (pre-substitution) field as matching evidence — projection
+  is only used to gate out leaves the cohort would have renamed (their
+  name has no source-text backing). The fixture verifies both halves:
+  COMMON-ID / COMMON-NAME emit as cross-copybook inferred-high pairs
+  on their pre-substitution names (recall gain over pre-Phase-C);
+  ENTITY-PK (would be laundered from USER-PK + SKU into the same
+  target name) is filtered out by the precision gate.
 
 A `inferredSemantic` fixture is not yet included — the shape-keyed
 matcher has five conjoined gates (PIC match, USAGE match, level

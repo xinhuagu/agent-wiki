@@ -1220,6 +1220,159 @@ describe("COBOL field lineage", () => {
       expect(lineage).toBeNull();
     });
 
+    it("Phase C: untouched leaves under a REPLACING cohort participate in cross-copybook inferred matching", () => {
+      // CUSTOMER-REC has an empty cohort with one consumer (ORDERA) plus a
+      // REPLACING cohort with two consumers (PROGA / PROGB), all sharing
+      // the same untouched leaf CUSTOMER-ID (PIC 9(8) — distinct shape from
+      // sharedCopybook so it doesn't tangle with that). LEGACY-PEER has
+      // CUSTOMER-ID with the same shape and a matching sibling
+      // CUSTOMER-ZIP. Pre-Phase-C, the cross-copybook pair would form only
+      // via the empty cohort (one program on the CUSTOMER-REC side); Phase
+      // C unions the REPLACING-cohort consumers into the same candidate
+      // because the original (pre-substitution) leaf identity is the same.
+      const customer = `
+       01  CUSTOMER-REC.
+           05  CUSTOMER-ID       PIC 9(8).
+           05  CUSTOMER-ZIP      PIC 9(5).
+`;
+      const legacyPeer = `
+       01  LEGACY-PEER.
+           05  CUSTOMER-ID       PIC 9(8).
+           05  CUSTOMER-ZIP      PIC 9(5).
+`;
+      const replacingProgram = (programId: string) => `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ${programId}.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY CUSTOMER-REC REPLACING CUSTOMER-ZIP BY ZIP-CODE.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+      const lineage = buildFieldLineage([
+        model(customer, "CUSTOMER-REC.cpy"),
+        model(legacyPeer, "LEGACY-PEER.cpy"),
+        model(program("ORDERA", "CUSTOMER-REC"), "ORDERA.cbl"),
+        model(replacingProgram("PROGA"), "PROGA.cbl"),
+        model(replacingProgram("PROGB"), "PROGB.cbl"),
+        model(program("LEGACYA", "LEGACY-PEER"), "LEGACYA.cbl"),
+      ]);
+      expect(lineage).not.toBeNull();
+      const customerId = lineage!.inferredHighConfidence.find((e) => e.fieldName === "CUSTOMER-ID");
+      expect(customerId, "CUSTOMER-ID should pair high-confidence across cohorts").toBeDefined();
+      // CUSTOMER-REC side carries programs from BOTH the empty cohort
+      // (ORDERA) and the REPLACING cohort (PROGA, PROGB). Pre-Phase-C this
+      // would have been [ORDERA] only.
+      const customerSide = customerId!.left.copybook.id === "copybook:CUSTOMER-REC"
+        ? customerId!.left
+        : customerId!.right;
+      expect(customerSide.programs.map((p) => p.id).sort()).toEqual([
+        "program:ORDERA",
+        "program:PROGA",
+        "program:PROGB",
+      ]);
+    });
+
+    it("Phase C precision gate: a leaf renamed by REPLACING does NOT enter the inferred candidate pool", () => {
+      // Both copybooks rename a distinct source field to the same target
+      // (ENTITY-PK), but share two unrenamed siblings (COMMON-A, COMMON-B).
+      // The unrenamed pair should match (recall gain Phase C delivers).
+      // The renamed-into-the-same-target pair (ENTITY-PK) is laundered
+      // evidence — the precision gate filters it. The companion eval
+      // fixture (eval/replacing-inferred/) covers the full scenario; this
+      // unit test pins the gate behavior at the builder level.
+      const customer = `
+       01  CUSTOMER-REC.
+           05  USER-PK           PIC X(8).
+           05  COMMON-A          PIC X(10).
+           05  COMMON-B          PIC X(10).
+`;
+      const product = `
+       01  PRODUCT-REC.
+           05  SKU               PIC X(8).
+           05  COMMON-A          PIC X(10).
+           05  COMMON-B          PIC X(10).
+`;
+      const replacingProgram = (programId: string, copybook: string, from: string) => `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ${programId}.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY ${copybook} REPLACING ${from} BY ENTITY-PK.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+      const lineage = buildFieldLineage([
+        model(customer, "CUSTOMER-REC.cpy"),
+        model(product, "PRODUCT-REC.cpy"),
+        model(replacingProgram("USRA", "CUSTOMER-REC", "USER-PK"), "USRA.cbl"),
+        model(replacingProgram("USRB", "CUSTOMER-REC", "USER-PK"), "USRB.cbl"),
+        model(replacingProgram("PRDA", "PRODUCT-REC", "SKU"), "PRDA.cbl"),
+        model(replacingProgram("PRDB", "PRODUCT-REC", "SKU"), "PRDB.cbl"),
+      ]);
+      // COMMON-A and COMMON-B (untouched on both sides) should both emit —
+      // Phase C's recall gain.
+      const commonA = lineage?.inferredHighConfidence.find((e) => e.fieldName === "COMMON-A");
+      const commonB = lineage?.inferredHighConfidence.find((e) => e.fieldName === "COMMON-B");
+      expect(commonA, "COMMON-A pair should emit under Phase C").toBeDefined();
+      expect(commonB, "COMMON-B pair should emit under Phase C").toBeDefined();
+      // ENTITY-PK must NOT emit — both sides' names came from REPLACING.
+      expect(
+        lineage?.inferredHighConfidence.some((e) => e.fieldName === "ENTITY-PK"),
+        "ENTITY-PK pair must be filtered by the precision gate",
+      ).not.toBe(true);
+    });
+
+    it("Phase C precision gate: laundered siblings cannot supply sibling-overlap evidence on their own", () => {
+      // Two copybooks each rename a different source to the same target
+      // (LAUNDERED-NAME), leaving one untouched leaf X with NO other shared
+      // siblings between the copybooks. Pre-refactor Phase C projected
+      // siblings through REPLACING — both X's siblings would have contained
+      // LAUNDERED-NAME, yielding a phantom sibling-overlap match. The
+      // current Phase C uses pre-substitution siblings, so X's siblings
+      // remain distinct (USER-FOO vs PROD-BAR) and the pair is correctly
+      // rejected.
+      const customer = `
+       01  CUSTOMER-REC.
+           05  USER-FOO          PIC X(8).
+           05  X-FIELD           PIC X(10).
+`;
+      const product = `
+       01  PRODUCT-REC.
+           05  PROD-BAR          PIC X(8).
+           05  X-FIELD           PIC X(10).
+`;
+      const replacingProgram = (programId: string, copybook: string, from: string) => `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. ${programId}.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       COPY ${copybook} REPLACING ${from} BY LAUNDERED-NAME.
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           STOP RUN.
+`;
+      const lineage = buildFieldLineage([
+        model(customer, "CUSTOMER-REC.cpy"),
+        model(product, "PRODUCT-REC.cpy"),
+        model(replacingProgram("USRA", "CUSTOMER-REC", "USER-FOO"), "USRA.cbl"),
+        model(replacingProgram("USRB", "CUSTOMER-REC", "USER-FOO"), "USRB.cbl"),
+        model(replacingProgram("PRDA", "PRODUCT-REC", "PROD-BAR"), "PRDA.cbl"),
+        model(replacingProgram("PRDB", "PRODUCT-REC", "PROD-BAR"), "PRDB.cbl"),
+      ]);
+      // X-FIELD must NOT match — the only would-be shared sibling
+      // (LAUNDERED-NAME) was substitution-laundered into existence.
+      expect(
+        lineage?.inferredHighConfidence.some((e) => e.fieldName === "X-FIELD"),
+        "X-FIELD pair must be rejected when the only shared sibling is laundered",
+      ).not.toBe(true);
+    });
+
     it("normalizeLoadedFieldLineage backfills summary.deterministic.viaReplacing for pre-#39 JSON", () => {
       const pre39 = {
         summary: {

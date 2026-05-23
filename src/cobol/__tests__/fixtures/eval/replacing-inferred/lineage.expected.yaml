@@ -1,0 +1,75 @@
+version: 1
+description: >
+  Phase C fixture. Two unrelated copybooks (USER-TPL, PRODUCT-TPL),
+  each consumed only via COPY ... REPLACING — no empty-cohort
+  consumer. Pre-Phase-C, the inferred matcher excluded both copybooks
+  from candidate sourcing (no plain COPY) and emitted zero inferred
+  pairs.
+
+  Phase C widens candidate sourcing to include REPLACING cohorts, but
+  matches on the ORIGINAL (pre-substitution) field shape — fieldName,
+  qualifiedName, siblings all read from the source-text declaration.
+  Projection is used only to detect the leaf-rename precision gate:
+  if the cohort would have renamed a leaf, that leaf is excluded (its
+  post-substitution name has no source-text backing, so pairing it
+  with an identically-renamed leaf in another copybook would be
+  naming-laundered evidence).
+
+  This fixture exercises both halves of the gate. Pre-substitution:
+  USER-TPL has USER-PK, COMMON-ID, COMMON-NAME; PRODUCT-TPL has SKU,
+  COMMON-ID, COMMON-NAME. Both cohorts apply
+  `REPLACING <leaf> BY ENTITY-PK` (different sources, same target).
+  Post-substitution:
+    - ENTITY-PK appears in both views but its name came from REPLACING
+      on BOTH sides → gate excludes it → no inferred pair.
+    - COMMON-ID and COMMON-NAME appear in both views with their
+      pre-substitution names intact → eligible for inferred-high.
+
+  Without Phase C: zero inferred pairs (regression).
+  With naive Phase C (no gate): 3 pairs, 1 phantom (precision 67%).
+  With Phase C + gate (current): 2 pairs, both correct (precision 100%).
+
+deterministic:
+  - fieldName: USER-REC
+    copybooks: [USER-TPL]
+    programs: [USRA, USRB]
+    linkage: deterministic-via-replacing
+  - fieldName: ENTITY-PK
+    copybooks: [USER-TPL]
+    programs: [USRA, USRB]
+    linkage: deterministic-via-replacing
+  - fieldName: COMMON-ID
+    copybooks: [USER-TPL]
+    programs: [USRA, USRB]
+    linkage: deterministic-via-replacing
+  - fieldName: COMMON-NAME
+    copybooks: [USER-TPL]
+    programs: [USRA, USRB]
+    linkage: deterministic-via-replacing
+  - fieldName: PRODUCT-REC
+    copybooks: [PRODUCT-TPL]
+    programs: [PRDA, PRDB]
+    linkage: deterministic-via-replacing
+  - fieldName: ENTITY-PK
+    copybooks: [PRODUCT-TPL]
+    programs: [PRDA, PRDB]
+    linkage: deterministic-via-replacing
+  - fieldName: COMMON-ID
+    copybooks: [PRODUCT-TPL]
+    programs: [PRDA, PRDB]
+    linkage: deterministic-via-replacing
+  - fieldName: COMMON-NAME
+    copybooks: [PRODUCT-TPL]
+    programs: [PRDA, PRDB]
+    linkage: deterministic-via-replacing
+
+inferredHigh:
+  - fieldName: COMMON-ID
+    copybooks: [PRODUCT-TPL, USER-TPL]
+  - fieldName: COMMON-NAME
+    copybooks: [PRODUCT-TPL, USER-TPL]
+
+inferredAmbiguous: []
+inferredSemantic: []
+callBound: []
+db2: []

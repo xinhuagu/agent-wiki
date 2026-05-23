@@ -770,19 +770,64 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
     }
   }
 
-  // Inferred candidate sourcing keeps the original (pre-#39) semantics: only
-  // empty-cohort consumers participate, and even a singleton empty cohort
-  // can seed candidates (cross-copybook pairing needs at least one consumer
-  // per copybook, not two). Phase C (REPLACING-aware inferred) is
-  // intentionally deferred — widening this set now would let renamed
-  // fields cross-match without name evidence, blowing up the precision
-  // contract that high/ambiguous depend on.
+  // #50 Phase C — widen inferred candidate sourcing to include REPLACING
+  // cohorts, but ONLY for leaves the substitution didn't touch. A leaf
+  // whose name came from a REPLACING clause has no source-text name
+  // evidence; pairing it with an identically-named leaf in another
+  // copybook would let renamed-into-the-same-target fields cross-match
+  // without basis (the precision-burning case the deferred-Phase-C
+  // comment warned about; see eval/replacing-inferred/ for the
+  // regression anchor).
+  //
+  // Matching evidence comes from the ORIGINAL field, not the projected
+  // view: the cohort's role is to gate (no leaf rename) and contribute
+  // consumers. Using the projected view would leak two problems —
+  // (a) a parent-only REPLACING in one cohort would split the same
+  // physical leaf into two candidate views with different qualified
+  // paths, double-counting it and demoting its high-confidence match
+  // to ambiguous; (b) post-substitution sibling names could carry
+  // laundered evidence (two copybooks each renaming a different source
+  // field to the same target would gain a fake shared sibling).
+  // Pre-substitution fieldName / qualifiedName / siblings keep matching
+  // anchored to source-text evidence.
+  //
+  // Reporting trade-off: the emitted inferred-high entry surfaces the
+  // ORIGINAL qualifiedName, even when a contributing program saw a
+  // renamed parent in its REPLACING cohort. The per-cohort rename
+  // remains visible on the deterministic-via-replacing entry for the
+  // same field — that is the right place to look for "what does
+  // program PROGA see for this field" — while the inferred entry
+  // reports the cross-copybook canonical identity.
   const candidateFields = rawCopybookUsage.flatMap((usage) => {
-    const exact = usage.cohorts.find((c) => c.pairs.length === 0);
-    if (!exact || exact.consumers.length === 0) return [];
-    return (flattenedByCopybook.get(usage.copybookId) ?? [])
-      .filter((field) => Boolean(field.picture) || Boolean(field.usage))
-      .map((field) => ({ field, programs: exact.consumers }));
+    const fields = flattenedByCopybook.get(usage.copybookId) ?? [];
+    // Dedup across cohorts on (fieldName, qualifiedName) — the original
+    // identity, unchanged by cohort substitution. Programs are unioned so
+    // every consumer that legitimately sees this leaf shows up on the
+    // emitted entry.
+    const byField = new Map<string, { field: FlattenedField; programs: FieldConsumer[] }>();
+    for (const cohort of usage.cohorts) {
+      if (cohort.consumers.length === 0) continue;
+      // Same Phase A limit as deterministic emission — fragment-style REPLACING
+      // we can't structure into pairs doesn't contribute candidates.
+      if (cohort.key !== "[]" && cohort.pairs.length === 0) continue;
+      for (const field of fields) {
+        if (!field.picture && !field.usage) continue;
+        // Precision gate: project the field only to detect whether this
+        // cohort would rewrite its leaf name. The projection is discarded
+        // after the gate; the candidate carries the unprojected field.
+        const projected = projectFieldThroughReplacing(field, cohort.pairs);
+        if (projected.replacingPair) continue;
+        const key = `${field.fieldName}|${field.qualifiedName}`;
+        const existing = byField.get(key);
+        if (existing) {
+          const seen = new Set(existing.programs.map((p) => p.id));
+          for (const p of cohort.consumers) if (!seen.has(p.id)) existing.programs.push(p);
+        } else {
+          byField.set(key, { field, programs: [...cohort.consumers] });
+        }
+      }
+    }
+    return [...byField.values()];
   });
 
   const candidateGroups = new Map<string, Array<{ field: FlattenedField; programs: FieldConsumer[] }>>();
@@ -908,6 +953,14 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
   //
   // Pairs whose field names match would already have been emitted by the
   // name-keyed pass; drop them here to avoid double-reporting.
+  //
+  // Phase C widening is INTENTIONALLY NOT applied to the semantic tier —
+  // semantic already matches with no name alignment whatsoever, so adding
+  // candidates from REPLACING cohorts (whose pre-substitution names are
+  // discarded by the shape-keyed match) compounds the laundering risk
+  // the leaf-rename gate guards against on the name-keyed tier. Revisit
+  // once a fixture demonstrates a concrete recall case Phase C semantic
+  // widening would unblock.
   const semanticCandidateFields = rawCopybookUsage.flatMap((usage) => {
     const exact = usage.cohorts.find((c) => c.pairs.length === 0);
     if (!exact || exact.consumers.length === 0) return [];

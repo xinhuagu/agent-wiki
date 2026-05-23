@@ -141,6 +141,50 @@ describe("field-lineage eval harness — REPLACING cohort fixture", () => {
   });
 });
 
+describe("field-lineage eval harness — REPLACING + inferred (Phase C)", () => {
+  // Phase C: candidate sourcing for inferred matching widens to include
+  // REPLACING cohorts, but matches on the ORIGINAL (pre-substitution)
+  // field shape. Projection is used only to gate out leaves whose name
+  // was rewritten by REPLACING (no source-text backing for the matched
+  // name). The fixture exercises both halves of the gate — see the
+  // manifest description for the full setup.
+  const fixtureDir = resolve(process.cwd(), "src/cobol/__tests__/fixtures/eval/replacing-inferred");
+  let report: EvalReport;
+  beforeAll(() => {
+    report = evaluateFieldLineage(fixtureDir);
+  });
+
+  it("Phase C surfaces COMMON-ID and COMMON-NAME cross-copybook pairs (recall gain over pre-Phase-C)", () => {
+    const ih = report.families.inferredHigh;
+    if (ih.skipped) throw new Error("inferredHigh unexpectedly skipped");
+    expect(ih.expected).toBe(2);
+    expect(ih.actual).toBe(2);
+    expect(ih.truePositives).toBe(2);
+  });
+
+  it("precision gate filters the REPLACING-laundered ENTITY-PK pair — both leaves came from substitution on different source names", () => {
+    const ih = report.families.inferredHigh;
+    if (ih.skipped) throw new Error("inferredHigh unexpectedly skipped");
+    expect(ih.falsePositives).toEqual([]);
+    // Sanity: ENTITY-PK is NOT in the actual emission set. If a future
+    // regression dropped the gate, this assertion would fail loudly.
+    expect(ih.falseNegatives).toEqual([]);
+  });
+
+  it("each REPLACING cohort still emits its full deterministic-via-replacing entry set (8 entries across the two copybooks)", () => {
+    const det = report.families.deterministic;
+    if (det.skipped) throw new Error("deterministic unexpectedly skipped");
+    expect(det.expected).toBe(8);
+    expect(det.actual).toBe(8);
+    expect(det.truePositives).toBe(8);
+  });
+
+  it("overall fixture grades 1.0 / 1.0 after Phase C", () => {
+    expect(report.overall.precision).toBeCloseTo(1, 10);
+    expect(report.overall.recall).toBeCloseTo(1, 10);
+  });
+});
+
 describe("field-lineage eval harness — renderer edge cases", () => {
   it("emits a false-positive section in markdown when actual exceeds expected", () => {
     const report: EvalReport = {

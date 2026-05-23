@@ -8,27 +8,28 @@ description: >
   appears as CLIENT-ID; untouched fields (CUSTOMER-ADDRESS, ZIP-CODE)
   keep their original names.
 
-  Linkage tier is intentionally NOT pinned by the manifest (the v1
-  schema doesn't distinguish `deterministic` from
-  `deterministic-via-replacing` — documented limitation). This fixture
-  still anchors the post-substitution field shape, so a Phase B
-  regression that drops the rename (CUSTOMER-ID surviving as
-  CUSTOMER-ID) lights up as both an FP (CUSTOMER-ID) and an FN
-  (CLIENT-ID).
+  Every entry pins `linkage: deterministic-via-replacing`, so a Phase B
+  regression that emits the post-substitution field name under the wrong
+  tier (e.g. plain `deterministic`, losing the `replacing` evidence)
+  surfaces as FN+FP — even when the field name itself is correct.
 
 deterministic:
   - fieldName: CUSTOMER-REC
     copybooks: [CUSTOMER-REC]
     programs: [PROGA, PROGB]
+    linkage: deterministic-via-replacing
   - fieldName: CLIENT-ID
     copybooks: [CUSTOMER-REC]
     programs: [PROGA, PROGB]
+    linkage: deterministic-via-replacing
   - fieldName: CUSTOMER-ADDRESS
     copybooks: [CUSTOMER-REC]
     programs: [PROGA, PROGB]
+    linkage: deterministic-via-replacing
   - fieldName: ZIP-CODE
     copybooks: [CUSTOMER-REC]
     programs: [PROGA, PROGB]
+    linkage: deterministic-via-replacing
 
 inferredHigh: []
 inferredAmbiguous: []

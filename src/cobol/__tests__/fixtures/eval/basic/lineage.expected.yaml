@@ -9,15 +9,19 @@ deterministic:
   - fieldName: CUSTOMER-REC
     copybooks: [CUSTOMER-REC]
     programs: [ORDERA, ORDERB]
+    linkage: deterministic
   - fieldName: CUSTOMER-ID
     copybooks: [CUSTOMER-REC]
     programs: [ORDERA, ORDERB]
+    linkage: deterministic
   - fieldName: CUSTOMER-NAME
     copybooks: [CUSTOMER-REC]
     programs: [ORDERA, ORDERB]
+    linkage: deterministic
   - fieldName: CUSTOMER-ZIP
     copybooks: [CUSTOMER-REC]
     programs: [ORDERA, ORDERB]
+    linkage: deterministic
 
 inferredHigh:
   - fieldName: CUSTOMER-ID

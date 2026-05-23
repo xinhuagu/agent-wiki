@@ -42,6 +42,13 @@ deterministic:
   - fieldName: CUSTOMER-ID
     copybooks: [CUSTOMER-REC]     # logical names, no "copybook:" prefix
     programs:  [ORDERA, ORDERB]   # program IDs, no "program:" prefix
+    # Optional linkage-tier pin. Either ALL deterministic entries pin
+    # `linkage`, or NONE do. When pinned, the canonical key includes the
+    # tier — a builder regression that emits the right field name under
+    # the wrong tier (e.g. plain `deterministic` instead of
+    # `deterministic-via-replacing`, losing the `replacing` evidence)
+    # lands as FN+FP. Values: `deterministic` | `deterministic-via-replacing`.
+    linkage: deterministic
 
 inferredHigh:
   - fieldName: CUSTOMER-ID
@@ -164,11 +171,6 @@ landing the change.
 
 ## Known limitations
 
-- **Linkage tier (`deterministic` vs `deterministic-via-replacing`)
-  is not part of the canonical key.** A manifest can't pin which tier
-  the builder used to emit a deterministic fact. The basic fixture
-  doesn't exercise REPLACING, so this is acceptable for now; adding
-  tier-aware grading is a v2 schema concern.
 - **The production combiner (`combineFieldLineage`) is bypassed.** The
   harness inspects each builder's raw output directly. If a future
   change adds cross-family filtering at combine time, the harness's
@@ -216,5 +218,7 @@ that needs it as a regression anchor.
 - A baseline-comparison mode that diffs current metrics against a
   committed `baseline.json` and fails if precision regresses — once we
   have stable enough corpora to baseline.
-- Linkage-tier grading in the canonical key (v2 schema).
 - A `inferredSemantic` fixture (see note above).
+- Confidence-tier grading on `callBound` (`deterministic` vs `high`) —
+  same shape as deterministic-family linkage pinning; deferred until a
+  fixture needs the discrimination.

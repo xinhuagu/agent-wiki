@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import {
@@ -331,5 +331,85 @@ describe("field-lineage eval harness — manifest validation", () => {
       `version: 1\ndeterministic:\n  - fieldName: 42\n    copybooks: [A]\n    programs: [P1, P2]\n`,
     );
     expect(() => evaluateFieldLineage(scratchDir)).toThrow(/Manifest .*lineage\.expected\.yaml:.*fieldName must be a string/);
+  });
+
+  it("rejects invalid deterministic linkage values", () => {
+    scratchDir = mkFixture(
+      `version: 1\ndeterministic:\n  - fieldName: X\n    copybooks: [A]\n    programs: [P1, P2]\n    linkage: garbage\n`,
+    );
+    expect(() => evaluateFieldLineage(scratchDir)).toThrow(/linkage must be one of/);
+  });
+
+  it("rejects mixed-pin deterministic family (some entries pin linkage, others don't)", () => {
+    scratchDir = mkFixture(
+      `version: 1\ndeterministic:\n  - fieldName: X\n    copybooks: [A]\n    programs: [P1, P2]\n    linkage: deterministic\n  - fieldName: Y\n    copybooks: [A]\n    programs: [P1, P2]\n`,
+    );
+    expect(() => evaluateFieldLineage(scratchDir)).toThrow(/either ALL entries must pin linkage, or NONE/);
+  });
+});
+
+describe("field-lineage eval harness — deterministic linkage-tier grading", () => {
+  const basicFixture = resolve(process.cwd(), "src/cobol/__tests__/fixtures/eval/basic");
+  const replacingFixture = resolve(process.cwd(), "src/cobol/__tests__/fixtures/eval/replacing");
+
+  it("basic fixture's deterministic family scores 1.0 with tier=deterministic pinned", () => {
+    const report = evaluateFieldLineage(basicFixture);
+    const det = report.families.deterministic;
+    if (det.skipped) throw new Error("deterministic unexpectedly skipped");
+    expect(det.precision).toBeCloseTo(1, 10);
+    expect(det.recall).toBeCloseTo(1, 10);
+  });
+
+  it("replacing fixture's deterministic family scores 1.0 with tier=deterministic-via-replacing pinned", () => {
+    const report = evaluateFieldLineage(replacingFixture);
+    const det = report.families.deterministic;
+    if (det.skipped) throw new Error("deterministic unexpectedly skipped");
+    expect(det.precision).toBeCloseTo(1, 10);
+    expect(det.recall).toBeCloseTo(1, 10);
+  });
+
+  it("rejects swapped-tier manifest: a basic-style fixture with linkage=deterministic-via-replacing surfaces every entry as FP+FN", () => {
+    // Write a clone of the basic fixture but with the WRONG tier pinned —
+    // the builder emits `deterministic` (no REPLACING in the sources), so
+    // every pinned-as-via-replacing manifest entry should land as FN, and
+    // every emitted deterministic entry should land as FP. This is the
+    // anchor that proves tier pinning works: the previous tier-agnostic
+    // harness would have scored this 1.0/1.0.
+    const dir = mkdtempSync(join(tmpdir(), "lineage-eval-tier-"));
+    try {
+      // Copy basic fixture's COBOL sources verbatim.
+      const sources = [
+        "CALLEE.cbl",
+        "CALLER.cbl",
+        "CLIENT-REC.cpy",
+        "CLIENTA.cbl",
+        "CUSTOMER-REC.cpy",
+        "ORDERA.cbl",
+        "ORDERB.cbl",
+      ];
+      for (const f of sources) {
+        const src = readFileSync(join(basicFixture, f), "utf-8");
+        writeFileSync(join(dir, f), src, "utf-8");
+      }
+      // Wrong-tier manifest: deterministic-via-replacing instead of deterministic.
+      writeFileSync(
+        join(dir, "lineage.expected.yaml"),
+        `version: 1\ndeterministic:\n  - fieldName: CUSTOMER-REC\n    copybooks: [CUSTOMER-REC]\n    programs: [ORDERA, ORDERB]\n    linkage: deterministic-via-replacing\n  - fieldName: CUSTOMER-ID\n    copybooks: [CUSTOMER-REC]\n    programs: [ORDERA, ORDERB]\n    linkage: deterministic-via-replacing\n  - fieldName: CUSTOMER-NAME\n    copybooks: [CUSTOMER-REC]\n    programs: [ORDERA, ORDERB]\n    linkage: deterministic-via-replacing\n  - fieldName: CUSTOMER-ZIP\n    copybooks: [CUSTOMER-REC]\n    programs: [ORDERA, ORDERB]\n    linkage: deterministic-via-replacing\n`,
+        "utf-8",
+      );
+      const report = evaluateFieldLineage(dir);
+      const det = report.families.deterministic;
+      if (det.skipped) throw new Error("deterministic unexpectedly skipped");
+      // Every expected entry is FN (wrong tier), every actual entry is FP.
+      expect(det.truePositives).toBe(0);
+      expect(det.falseNegatives.length).toBe(4);
+      expect(det.falsePositives.length).toBe(4);
+      // The FN keys carry the wrong tier suffix; the FP keys carry the right one.
+      expect(det.falseNegatives[0]).toContain("tier=deterministic-via-replacing");
+      expect(det.falsePositives[0]).toContain("tier=deterministic");
+      expect(det.falsePositives[0]).not.toContain("via-replacing");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

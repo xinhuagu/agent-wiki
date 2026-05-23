@@ -5,6 +5,7 @@ import { parse } from "./parser.js";
 import { extractModel } from "./extractors.js";
 import {
   buildFieldLineage,
+  type LineageLinkage,
   type SerializedFieldLineage,
   type SerializedFieldLineageEntry,
   type SerializedInferredFieldLineageEntry,
@@ -37,10 +38,6 @@ import {
  * families without being punished for not declaring the others.
  *
  * Known limitations (intentional, documented at docs/field-lineage-eval.md):
- *   - Linkage tier (`deterministic` vs `deterministic-via-replacing`) is
- *     not part of the canonical key — a manifest cannot pin the tier.
- *     The basic fixture doesn't exercise REPLACING; adding tier-aware
- *     grading is a v2 schema concern.
  *   - The production combiner (`combineFieldLineage`) is bypassed; the
  *     harness inspects each builder's raw output. Any future cross-
  *     family filtering at combine time would diverge from harness
@@ -72,6 +69,16 @@ export interface ExpectedDeterministic {
   copybooks: string[];
   /** Program IDs (no `program:` prefix). Order-independent. */
   programs: string[];
+  /**
+   * Optional linkage tier pin. When set, only an actual entry whose
+   * `linkage` field matches this value counts as a true positive — a
+   * builder regression that emits the correct field under the wrong
+   * tier (e.g. plain `deterministic` instead of
+   * `deterministic-via-replacing`, losing the `replacing` evidence)
+   * surfaces as FN+FP. Mode is family-wide: either ALL deterministic
+   * entries pin linkage, or NONE do.
+   */
+  linkage?: LineageLinkage;
 }
 
 export interface ExpectedInferred {
@@ -242,6 +249,11 @@ function requireNonNegativeInteger(value: unknown, path: string): number {
   return value;
 }
 
+const LINKAGE_VALUES: ReadonlySet<LineageLinkage> = new Set<LineageLinkage>([
+  "deterministic",
+  "deterministic-via-replacing",
+]);
+
 function validateDeterministic(entry: unknown, index: number): ExpectedDeterministic {
   if (!entry || typeof entry !== "object") {
     throw new Error(`deterministic[${index}] must be an object.`);
@@ -257,11 +269,20 @@ function validateDeterministic(entry: unknown, index: number): ExpectedDetermini
       `deterministic[${index}].programs must list at least two programs (deterministic emission requires ≥2 consumers).`,
     );
   }
-  return {
+  const result: ExpectedDeterministic = {
     fieldName: requireString(e.fieldName, `deterministic[${index}].fieldName`),
     copybooks,
     programs,
   };
+  if (e.linkage !== undefined) {
+    if (typeof e.linkage !== "string" || !LINKAGE_VALUES.has(e.linkage as LineageLinkage)) {
+      throw new Error(
+        `deterministic[${index}].linkage must be one of ${[...LINKAGE_VALUES].map((v) => `'${v}'`).join(", ")} (got ${String(e.linkage)}).`,
+      );
+    }
+    result.linkage = e.linkage as LineageLinkage;
+  }
+  return result;
 }
 
 function validateInferred(entry: unknown, index: number, family: FamilyName): ExpectedInferred {
@@ -455,8 +476,14 @@ function sortedUpper(values: Iterable<string>): string[] {
   return [...values].map(up).sort();
 }
 
-function deterministicKey(fieldName: string, copybooks: string[], programs: string[]): string {
-  return `${up(fieldName)}|cbs=${sortedUpper(copybooks).join(",")}|pgs=${sortedUpper(programs).join(",")}`;
+function deterministicKey(
+  fieldName: string,
+  copybooks: string[],
+  programs: string[],
+  linkage?: LineageLinkage,
+): string {
+  const base = `${up(fieldName)}|cbs=${sortedUpper(copybooks).join(",")}|pgs=${sortedUpper(programs).join(",")}`;
+  return linkage === undefined ? base : `${base}|tier=${linkage}`;
 }
 
 function gradeDeterministic(
@@ -464,12 +491,26 @@ function gradeDeterministic(
   actual: SerializedFieldLineage | null,
 ): FamilyResult {
   if (expected === undefined) return { skipped: true };
-  const expectedList = expected.map((e) => deterministicKey(e.fieldName, e.copybooks, e.programs));
+  // All-or-nothing tier pinning: a deterministic family is either tier-aware
+  // (every entry pins `linkage`) or tier-agnostic (none do). Mixed-pin would
+  // require per-entry matching to disambiguate; reject it for the same
+  // reason inferred-family mixed qualifiedNames are rejected.
+  const pinned = expected.filter((e) => e.linkage !== undefined).length;
+  if (pinned !== 0 && pinned !== expected.length) {
+    throw new Error(
+      `deterministic: either ALL entries must pin linkage, or NONE — got ${pinned} pinned of ${expected.length}. Mixed pinning makes tier-aware grading ambiguous.`,
+    );
+  }
+  const tierAware = pinned > 0;
+  const expectedList = expected.map((e) =>
+    deterministicKey(e.fieldName, e.copybooks, e.programs, tierAware ? e.linkage : undefined),
+  );
   const actualList = (actual?.deterministic ?? []).map((entry: SerializedFieldLineageEntry) =>
     deterministicKey(
       entry.fieldName,
       entry.copybooks.map((cb) => stripPrefix(cb.id, "copybook:")),
       entry.programs.map((p) => stripPrefix(p.id, "program:")),
+      tierAware ? entry.linkage : undefined,
     ),
   );
   assertNoDuplicates(expectedList, "deterministic (manifest)");

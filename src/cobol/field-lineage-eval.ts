@@ -12,6 +12,7 @@ import {
 } from "./field-lineage.js";
 import {
   buildCallBoundLineage,
+  type CallBoundConfidence,
   type CallBoundLineage,
   type SerializedCallBoundLineageEntry,
 } from "./call-boundary-lineage.js";
@@ -113,6 +114,15 @@ export interface ExpectedCallBound {
   callerQualified?: string;
   /** Callee-side qualified path; overrides `calleeField` when both set. */
   calleeQualified?: string;
+  /**
+   * Optional confidence-tier pin. When set, only an actual call-bound
+   * entry whose `confidence` matches counts as a true positive — a
+   * builder regression that emits the correct field pair under the
+   * wrong tier (e.g. a `deterministic` shape-match landing as `high`,
+   * losing pictureMatch/shapeMatch evidence) lands as FN+FP. Mode is
+   * family-wide: either ALL entries pin `confidence`, or NONE do.
+   */
+  confidence?: CallBoundConfidence;
 }
 
 export interface ExpectedDb2ColumnPair {
@@ -254,6 +264,11 @@ const LINKAGE_VALUES: ReadonlySet<LineageLinkage> = new Set<LineageLinkage>([
   "deterministic-via-replacing",
 ]);
 
+const CALL_BOUND_CONFIDENCE_VALUES: ReadonlySet<CallBoundConfidence> = new Set<CallBoundConfidence>([
+  "deterministic",
+  "high",
+]);
+
 function validateDeterministic(entry: unknown, index: number): ExpectedDeterministic {
   if (!entry || typeof entry !== "object") {
     throw new Error(`deterministic[${index}] must be an object.`);
@@ -348,6 +363,14 @@ function validateCallBound(entry: unknown, index: number): ExpectedCallBound {
     throw new Error(
       `callBound[${index}] must use the same pinning mode on both sides — got ${callerPinned ? "callerQualified" : "callerField"} + ${calleePinned ? "calleeQualified" : "calleeField"}.`,
     );
+  }
+  if (e.confidence !== undefined) {
+    if (typeof e.confidence !== "string" || !CALL_BOUND_CONFIDENCE_VALUES.has(e.confidence as CallBoundConfidence)) {
+      throw new Error(
+        `callBound[${index}].confidence must be one of ${[...CALL_BOUND_CONFIDENCE_VALUES].map((v) => `'${v}'`).join(", ")} (got ${String(e.confidence)}).`,
+      );
+    }
+    result.confidence = e.confidence as CallBoundConfidence;
   }
   return result;
 }
@@ -581,8 +604,10 @@ function callBoundKey(
   position: number,
   callerName: string,
   calleeName: string,
+  confidence?: CallBoundConfidence,
 ): string {
-  return [up(caller), up(callee), position, up(callerName), up(calleeName)].join("|");
+  const base = [up(caller), up(callee), position, up(callerName), up(calleeName)].join("|");
+  return confidence === undefined ? base : `${base}|tier=${confidence}`;
 }
 
 function gradeCallBound(
@@ -603,11 +628,19 @@ function gradeCallBound(
       `callBound: either ALL entries must pin qualifiedNames, or NONE — got ${qualifiedEntries} pinned of ${expected.length}.`,
     );
   }
+  // Same all-or-nothing rule for confidence-tier pinning.
+  const tierPinned = expected.filter((e) => e.confidence !== undefined).length;
+  if (tierPinned !== 0 && tierPinned !== expected.length) {
+    throw new Error(
+      `callBound: either ALL entries must pin confidence, or NONE — got ${tierPinned} pinned of ${expected.length}.`,
+    );
+  }
   const anyQualified = qualifiedEntries > 0;
+  const tierAware = tierPinned > 0;
   const expectedList = expected.map((e) => {
     const callerName = anyQualified ? e.callerQualified! : e.callerField!;
     const calleeName = anyQualified ? e.calleeQualified! : e.calleeField!;
-    return callBoundKey(e.caller, e.callee, e.position, callerName, calleeName);
+    return callBoundKey(e.caller, e.callee, e.position, callerName, calleeName, tierAware ? e.confidence : undefined);
   });
   const actualList = (actual?.entries ?? []).map((e: SerializedCallBoundLineageEntry) =>
     callBoundKey(
@@ -616,6 +649,7 @@ function gradeCallBound(
       e.position,
       anyQualified ? e.caller.qualifiedName : e.caller.fieldName,
       anyQualified ? e.callee.qualifiedName : e.callee.fieldName,
+      tierAware ? e.confidence : undefined,
     ),
   );
   assertNoDuplicates(expectedList, "callBound (manifest)");

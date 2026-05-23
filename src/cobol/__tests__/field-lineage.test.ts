@@ -1373,6 +1373,49 @@ describe("COBOL field lineage", () => {
       ).not.toBe(true);
     });
 
+    it("FILLER fields are excluded from inferred candidate sourcing — cross-copybook FILLER ↔ FILLER carries no identity evidence", () => {
+      // Two copybooks each with a FILLER placeholder and a shared
+      // meaningful field. The meaningful field SHOULD pair across the
+      // copybooks (recall signal), but the FILLER must NOT — FILLER is
+      // COBOL's name-for-unnamed and matching FILLERs across unrelated
+      // records produces noise.
+      const customer = `
+       01  CUSTOMER-REC.
+           05  CUSTOMER-ID       PIC X(10).
+           05  FILLER            PIC X(5).
+           05  CUSTOMER-NAME     PIC X(30).
+`;
+      const product = `
+       01  PRODUCT-REC.
+           05  CUSTOMER-ID       PIC X(10).
+           05  FILLER            PIC X(5).
+           05  CUSTOMER-NAME     PIC X(30).
+`;
+      const lineage = buildFieldLineage([
+        model(customer, "CUSTOMER-REC.cpy"),
+        model(product, "PRODUCT-REC.cpy"),
+        model(program("PROGA", "CUSTOMER-REC"), "PROGA.cbl"),
+        model(program("PROGB", "PRODUCT-REC"), "PROGB.cbl"),
+      ]);
+      expect(lineage).not.toBeNull();
+      // CUSTOMER-ID and CUSTOMER-NAME pair — recall confirmed.
+      expect(
+        lineage!.inferredHighConfidence.some((e) => e.fieldName === "CUSTOMER-ID"),
+      ).toBe(true);
+      expect(
+        lineage!.inferredHighConfidence.some((e) => e.fieldName === "CUSTOMER-NAME"),
+      ).toBe(true);
+      // FILLER must NOT pair.
+      expect(
+        lineage!.inferredHighConfidence.some((e) => e.fieldName === "FILLER"),
+        "FILLER ↔ FILLER pair must be filtered",
+      ).toBe(false);
+      expect(
+        lineage!.inferredAmbiguous.some((e) => e.fieldName === "FILLER"),
+        "FILLER must not appear in inferred-ambiguous either",
+      ).toBe(false);
+    });
+
     it("normalizeLoadedFieldLineage backfills summary.deterministic.viaReplacing for pre-#39 JSON", () => {
       const pre39 = {
         summary: {

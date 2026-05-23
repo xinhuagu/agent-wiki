@@ -812,6 +812,29 @@ export function buildFieldLineage(models: CobolCodeModel[]): SerializedFieldLine
       if (cohort.key !== "[]" && cohort.pairs.length === 0) continue;
       for (const field of fields) {
         if (!field.picture && !field.usage) continue;
+        // FILLER is the COBOL placeholder name for un-named positional
+        // fields; multiple FILLER siblings under a single record are
+        // routine. Cross-copybook FILLER ↔ FILLER pairs carry no
+        // identity evidence (every record has its own unrelated
+        // FILLERs), so skip them at the candidate-sourcing layer
+        // rather than letting them clutter inferred-high output.
+        //
+        // Filter scope: this drop applies only to the name-keyed pool
+        // built below. The semantic tier at line ~976 builds its own
+        // candidate pool — FILLERs without USAGE drop there via the
+        // PIC+USAGE filter, and FILLERs WITH USAGE drop via the
+        // same-name skip at the matcher's leaf-name gate.
+        //
+        // Ordering: checked on the pre-projection field. A REPLACING
+        // clause that substitutes the literal word FILLER (`COPY X
+        // REPLACING FILLER BY MY-FIELD` — unusual but legal) would
+        // have its projected leaf survive, but we drop it here on the
+        // original name. Defensible: a leaf named FILLER in the source
+        // is structural padding regardless of what the consumer
+        // renames it to; treating the substituted name as a real
+        // identifier would launder placeholder evidence the way the
+        // Phase C precision gate already guards against.
+        if (field.fieldName.toUpperCase() === "FILLER") continue;
         // Precision gate: project the field only to detect whether this
         // cohort would rewrite its leaf name. The projection is discarded
         // after the gate; the candidate carries the unprojected field.

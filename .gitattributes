@@ -1,0 +1,15 @@
+# Lock line endings to LF for text files where the codebase or tests
+# do byte-exact comparisons. Without this, Windows clones with Git's
+# default core.autocrlf=true would rewrite committed `\n` to `\r\n` on
+# checkout and break tests like dogfood-ccvs that assert the rendered
+# output equals a committed baseline byte-for-byte.
+*.txt text eol=lf
+*.md text eol=lf
+*.ts text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.cbl text eol=lf
+*.cob text eol=lf
+*.cpy text eol=lf

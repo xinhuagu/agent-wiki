@@ -38,5 +38,6 @@ callBound:
     position: 0
     callerField: WS-CUST-ID
     calleeField: LK-CUST-ID
+    confidence: deterministic
 
 db2: []

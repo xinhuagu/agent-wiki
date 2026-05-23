@@ -1,0 +1,15 @@
+# inferred-high pairs: 4
+# inferred-ambiguous pairs: 0
+# inferred-semantic pairs: 0
+# deterministic entries: 0
+# (det via REPLACING: 0)
+
+## inferred-high
+KEY-2|cbs=K501A,K501B|leftQN=KEYS-GROUP.KEY-2|rightQN=KEYS-GROUP.KEY-2
+KEY-3|cbs=K501A,K501B|leftQN=KEYS-GROUP.KEY-3|rightQN=KEYS-GROUP.KEY-3
+KEY-4|cbs=K501A,K501B|leftQN=KEYS-GROUP.KEY-4|rightQN=KEYS-GROUP.KEY-4
+KEY-5|cbs=K501A,K501B|leftQN=KEYS-GROUP.KEY-5|rightQN=KEYS-GROUP.KEY-5
+
+## inferred-ambiguous
+
+## inferred-semantic

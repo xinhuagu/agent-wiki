@@ -8,6 +8,13 @@ coverage/
 .aceclaw/
 .lint-cache.json
 .agent-wiki.yaml
+# scripts/ is run via tsx; the .ts source ships, but stray build
+# artifacts from `tsc` runs (when the toolchain pulled it in pre-rootDir
+# tightening) should never be committed.
+scripts/*.js
+scripts/*.js.map
+scripts/*.d.ts
+scripts/*.d.ts.map
 # #26 phase 2 — project-local override for COBOL system-call whitelist etc.
 # Site-specific runtime program names go here, never committed.
 .agent-wiki.local.yaml

@@ -72,6 +72,13 @@ callBound:
     # CALL boundary involves nested children. Mirrors the inferred-family
     # rule: any qualified pin in the family switches the whole family to
     # qualified-path grading.
+    # Optional confidence-tier pin. Either ALL callBound entries pin
+    # `confidence`, or NONE do. When pinned, the canonical key includes
+    # the tier — a builder regression that emits the right pair under
+    # the wrong tier (e.g. a `deterministic` shape-match landing as
+    # `high`, losing pictureMatch evidence) lands as FN+FP. Values:
+    # `deterministic` | `high`.
+    confidence: deterministic
 
 db2:
   - table: CUSTOMER
@@ -186,6 +193,29 @@ in the intended direction before landing the change.
   truncation, etc.), the affected family lights up as FN with no hint
   that the upstream parse was the cause. Re-run the affected file
   through `code_parse` to inspect diagnostics.
+
+## Corpus-level baseline
+
+In addition to the per-fixture manifests, a baseline regression test
+(`src/cobol/__tests__/dogfood-ccvs.test.ts`) runs `buildFieldLineage`
+across a committed slice of the NIST CCVS COBOL85 test corpus
+(`src/cobol/__tests__/corpora/ccvs-replacing-subset/`) and asserts the
+full inferred-* emission set matches a committed baseline. This
+catches a class of regression the per-fixture tests can't: "the
+builder started emitting (or stopped emitting) something the
+manifests don't pin."
+
+When you intentionally change candidate-sourcing or matching logic,
+regenerate the baseline:
+
+```bash
+npx tsx scripts/dogfood-lineage.ts \
+  src/cobol/__tests__/corpora/ccvs-replacing-subset \
+  src/cobol/__tests__/corpora/ccvs-replacing-subset/baseline-inferred-high.txt
+```
+
+Review the diff before committing — every line change is a behavior
+change in the builder.
 
 ## Fixture inventory
 

@@ -1,0 +1,14 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. DB2-WRITE.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WS-CUST-ID         PIC X(10).
+       01  WS-CUST-NAME       PIC X(30).
+       PROCEDURE DIVISION.
+       A000-MAIN SECTION.
+       A100-START.
+           EXEC SQL
+             INSERT INTO CUSTOMERS (ID, NAME)
+             VALUES (:WS-CUST-ID, :WS-CUST-NAME)
+           END-EXEC.
+           STOP RUN.

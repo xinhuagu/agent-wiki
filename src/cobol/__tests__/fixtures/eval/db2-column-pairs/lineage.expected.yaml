@@ -1,0 +1,28 @@
+version: 1
+description: >
+  DB2 cross-program lineage fixture with column-level pairing. DB2-WRITE
+  performs INSERT INTO CUSTOMERS (ID, NAME) VALUES (:WS-CUST-ID, :WS-CUST-NAME);
+  DB2-READ performs SELECT ID, NAME INTO :WS-OUT-ID, :WS-OUT-NAME FROM
+  CUSTOMERS. The shared CUSTOMERS table plus matching column bindings on each
+  side produces a Phase B `:writer-hv → COLUMN → :reader-hv` flow per column.
+
+# This fixture has no copybook reuse, no CALL ... USING, and no inferred
+# matches — those families are declared `[]` to assert that the harness
+# isn't emitting anything spurious for them.
+deterministic: []
+inferredHigh: []
+inferredAmbiguous: []
+inferredSemantic: []
+callBound: []
+
+db2:
+  - table: CUSTOMERS
+    writer: DB2-WRITE
+    reader: DB2-READ
+    columnPairs:
+      - column: ID
+        writerHostVar: WS-CUST-ID
+        readerHostVar: WS-OUT-ID
+      - column: NAME
+        writerHostVar: WS-CUST-NAME
+        readerHostVar: WS-OUT-NAME

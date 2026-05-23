@@ -1,0 +1,42 @@
+version: 1
+description: >
+  Basic field-lineage eval fixture. Exercises deterministic shared-copybook reuse
+  (CUSTOMER-REC consumed by ORDERA and ORDERB), inferred-high cross-copybook
+  pairing (CUSTOMER-REC vs CLIENT-REC, name-matched fields), and CALL ... USING
+  positional pairing (CALLER → CALLEE on a single scalar). No REPLACING, no SQL.
+
+deterministic:
+  - fieldName: CUSTOMER-REC
+    copybooks: [CUSTOMER-REC]
+    programs: [ORDERA, ORDERB]
+    linkage: deterministic
+  - fieldName: CUSTOMER-ID
+    copybooks: [CUSTOMER-REC]
+    programs: [ORDERA, ORDERB]
+    linkage: deterministic
+  - fieldName: CUSTOMER-NAME
+    copybooks: [CUSTOMER-REC]
+    programs: [ORDERA, ORDERB]
+    linkage: deterministic
+  - fieldName: CUSTOMER-ZIP
+    copybooks: [CUSTOMER-REC]
+    programs: [ORDERA, ORDERB]
+    linkage: deterministic
+
+inferredHigh:
+  - fieldName: CUSTOMER-ID
+    copybooks: [CLIENT-REC, CUSTOMER-REC]
+  - fieldName: CUSTOMER-NAME
+    copybooks: [CLIENT-REC, CUSTOMER-REC]
+
+inferredAmbiguous: []
+inferredSemantic: []
+
+callBound:
+  - caller: CALLER
+    callee: CALLEE
+    position: 0
+    callerField: WS-CUST-ID
+    calleeField: LK-CUST-ID
+
+db2: []

@@ -390,6 +390,20 @@ describe("field-lineage eval harness — manifest validation", () => {
     );
     expect(() => evaluateFieldLineage(scratchDir)).toThrow(/either ALL entries must pin linkage, or NONE/);
   });
+
+  it("rejects invalid callBound confidence values", () => {
+    scratchDir = mkFixture(
+      `version: 1\ncallBound:\n  - caller: C\n    callee: E\n    position: 0\n    callerField: WS\n    calleeField: LK\n    confidence: garbage\n`,
+    );
+    expect(() => evaluateFieldLineage(scratchDir)).toThrow(/confidence must be one of/);
+  });
+
+  it("rejects mixed-pin callBound confidence (some entries pin, others don't)", () => {
+    scratchDir = mkFixture(
+      `version: 1\ncallBound:\n  - caller: C\n    callee: E\n    position: 0\n    callerField: WS\n    calleeField: LK\n    confidence: deterministic\n  - caller: C\n    callee: E\n    position: 1\n    callerField: WS2\n    calleeField: LK2\n`,
+    );
+    expect(() => evaluateFieldLineage(scratchDir)).toThrow(/either ALL entries must pin confidence, or NONE/);
+  });
 });
 
 describe("field-lineage eval harness — deterministic linkage-tier grading", () => {
@@ -452,6 +466,57 @@ describe("field-lineage eval harness — deterministic linkage-tier grading", ()
       expect(det.falseNegatives[0]).toContain("tier=deterministic-via-replacing");
       expect(det.falsePositives[0]).toContain("tier=deterministic");
       expect(det.falsePositives[0]).not.toContain("via-replacing");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("field-lineage eval harness — callBound confidence-tier grading", () => {
+  const basicFixture = resolve(process.cwd(), "src/cobol/__tests__/fixtures/eval/basic");
+
+  it("basic fixture's callBound family scores 1.0 with confidence=deterministic pinned", () => {
+    const report = evaluateFieldLineage(basicFixture);
+    const cb = report.families.callBound;
+    if (cb.skipped) throw new Error("callBound unexpectedly skipped");
+    expect(cb.precision).toBeCloseTo(1, 10);
+    expect(cb.recall).toBeCloseTo(1, 10);
+  });
+
+  it("rejects wrong-tier callBound manifest: a deterministic-shape CALL pinned as 'high' surfaces as FN+FP", () => {
+    // Clone the basic fixture's COBOL sources and rewrite ONLY the
+    // callBound entry to pin confidence=high. The actual builder emits
+    // deterministic (scalar PIC X(10) on both sides — shape-match),
+    // so every expected entry becomes FN and every actual becomes FP.
+    const dir = mkdtempSync(join(tmpdir(), "lineage-eval-cb-tier-"));
+    try {
+      const sources = [
+        "CALLEE.cbl",
+        "CALLER.cbl",
+        "CLIENT-REC.cpy",
+        "CLIENTA.cbl",
+        "CUSTOMER-REC.cpy",
+        "ORDERA.cbl",
+        "ORDERB.cbl",
+      ];
+      for (const f of sources) {
+        const src = readFileSync(join(basicFixture, f), "utf-8");
+        writeFileSync(join(dir, f), src, "utf-8");
+      }
+      // Same callBound entry as basic, but with confidence pinned to 'high' instead.
+      writeFileSync(
+        join(dir, "lineage.expected.yaml"),
+        `version: 1\ncallBound:\n  - caller: CALLER\n    callee: CALLEE\n    position: 0\n    callerField: WS-CUST-ID\n    calleeField: LK-CUST-ID\n    confidence: high\n`,
+        "utf-8",
+      );
+      const report = evaluateFieldLineage(dir);
+      const cb = report.families.callBound;
+      if (cb.skipped) throw new Error("callBound unexpectedly skipped");
+      expect(cb.truePositives).toBe(0);
+      expect(cb.falseNegatives.length).toBe(1);
+      expect(cb.falsePositives.length).toBe(1);
+      expect(cb.falseNegatives[0]).toContain("tier=high");
+      expect(cb.falsePositives[0]).toContain("tier=deterministic");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

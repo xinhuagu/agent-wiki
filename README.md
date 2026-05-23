@@ -95,7 +95,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **Coverage Report** | `raw_coverage` tells the agent which raw sources have not yet been compiled into any wiki page — drives active knowledge completion |
 | **Atlassian Import** | One-command Confluence pages and Jira issues with full hierarchy. Supports both Atlassian Cloud (`*.atlassian.net`) and self-hosted Server / Data Center, with auto-routed API endpoints and Bearer / Basic auth handling. |
 | **File Versioning** | Auto-version same-name files, query latest, list all versions |
-| **COBOL Code Analysis** | AST parser handling fixed-format (with mainframe alphanumeric sequence areas) and free-format. Extracts CALL/PERFORM/COPY structure, LINKAGE SECTION, EXEC SQL, EXEC CICS, and file access modes. Cross-file knowledge graph with depth-bounded impact queries. Three field-lineage families: shared-copybook reuse, `CALL ... USING` boundary flow, and cross-program data flow via shared DB2 tables. |
+| **Language Plugins** | Deterministic parsers + cross-file knowledge graphs for legacy code. **COBOL** shipped with field lineage in three families (shared-copybook reuse, `CALL ... USING` boundary, cross-program DB2 flow), DB2 column-level pairing, dynamic CALL resolution, and a precision / recall eval harness. **JCL** planned. See [Language Plugins](#language-plugins) below. |
 | **Skill Install** | One-command install as native skill for Claude Code and compatible clients |
 | **Git-Native** | Plain Markdown — diffable, blameable, revertable |
 | **3D Graph Viewer** | Built-in — realtime 3D graph of pages and `[[wikilinks]]`, edits push live over SSE. Run `agent-wiki web`. |
@@ -132,6 +132,24 @@ Three immutability layers, inspired by how compilers work:
 | **Native Skill** | Claude Code (native plugin) | `agent-wiki install claude-code` |
 | **CLI** | Any agent with shell access | `agent-wiki call <tool> '{json}'` |
 | **3D Graph Viewer** | Visual exploration of the whole wiki | `agent-wiki web -w ./wiki` |
+
+## Language Plugins
+
+agent-wiki extends to source-code analysis via language plugins —
+deterministic parsers + cross-file knowledge graphs, no LLM. Each
+plugin emits structured artifacts (`raw/parsed/<lang>/`) and writes
+wiki pages with full provenance back to the source files.
+
+| Language | Status | Capabilities |
+|----------|--------|--------------|
+| **COBOL** | Shipped | AST parser (fixed-format with mainframe alphanumeric sequence areas + free-format). Programs, copybooks, sections, `CALL` (incl. dynamic-call constant propagation), `COPY` / `REPLACING` (incl. via-replacing cohorts and REPLACING-aware inferred matching), `EXEC SQL` (DB2 column-level host-var pairing), `EXEC CICS`, file access modes. Field lineage in three families: shared-copybook reuse (deterministic + inferred), `CALL ... USING` boundary, cross-program DB2 flow. Depth-bounded impact queries via `code_query`. |
+| **JCL** | Planned | Job / step / dataset / proc extraction, batch-flow wiki pages, dataset-mediated cross-program lineage. See [PRD Phase 2](docs/legacy-code-knowledge-compiler-prd.md). |
+
+Tier-gate decisions (Phase C precision gates, dynamic-call resolver,
+DB2 column pairing) are evaluated against ground-truth fixtures via a
+built-in [precision / recall eval harness](docs/field-lineage-eval.md) —
+each PR runs against a committed NIST CCVS slice as a corpus-level
+regression anchor.
 
 ## Hybrid Search Setup
 

@@ -401,9 +401,32 @@ class Parser {
       }
 
       if (t.type === "VALUE") {
-        this.advance();
+        const valueTok = this.advance();
         this.match("IS");
-        if (!this.atEnd() && (this.peek().type === "LITERAL" || this.peek().type === "NUMERIC" || this.peek().type === "IDENTIFIER")) {
+        // Same lexer-shape concern as OCCURS below: a 1-2 digit integer
+        // whose value falls in {1-49, 66, 77, 88} lexes as LEVEL_NUMBER
+        // (the data-item level-number range). Mid-clause shapes like
+        // `VALUE 5 PIC 9.` need LEVEL_NUMBER to be accepted here too;
+        // otherwise the value is dropped AND parseDataItem terminates
+        // at the misclassified LEVEL_NUMBER, dropping the trailing PIC
+        // clause and spawning a phantom level-N FILLER at the parent.
+        //
+        // Restrict the LEVEL_NUMBER acceptance to tokens on the SAME
+        // LINE as VALUE itself: this catches mid-clause `VALUE 5 PIC 9.`
+        // (same line) while rejecting malformed `VALUE\n02 Y PIC X.`
+        // (next line, where 02 is genuinely the next data item's
+        // level). Without the line guard the new acceptance greedily
+        // consumes the following item's level number.
+        //
+        // The end-of-clause shape `VALUE 5.` lexes as NUMERIC instead
+        // because the lexer's numeric-literal scanner eats the period.
+        const next = this.atEnd() ? null : this.peek();
+        if (next && (
+          next.type === "LITERAL" ||
+          next.type === "NUMERIC" ||
+          next.type === "IDENTIFIER" ||
+          (next.type === "LEVEL_NUMBER" && next.line === valueTok.line)
+        )) {
           value = this.advance().value;
         }
         continue;
@@ -418,8 +441,37 @@ class Parser {
       }
 
       if (t.type === "OCCURS") {
-        this.advance();
-        if (!this.atEnd() && this.peek().type === "NUMERIC") {
+        const occursTok = this.advance();
+        // The count after OCCURS is a positive integer. The lexer
+        // classifies 1-2 digit integers whose value falls in
+        // {1-49, 66, 77, 88} as LEVEL_NUMBER (the data-item
+        // level-number range); other integers lex as NUMERIC. Accept
+        // both — without this fall-through, `02 X OCCURS 2 TIMES.`
+        // leaves `occurs` undefined AND `01 T2 OCCURS 5 TIMES PIC
+        // X(10).` terminates parseDataItem at the "5" LEVEL_NUMBER,
+        // dropping the PIC clause and spawning a phantom level-5
+        // FILLER item at the parent.
+        //
+        // Disambiguation: LEVEL_NUMBER as the OCCURS operand is
+        // accepted when EITHER it sits on the same line as OCCURS
+        // (covers the common `OCCURS 5 TIMES` shape) OR the very
+        // next token is TIMES (covers the unusual but legal
+        // multi-line shape `OCCURS\n   5 TIMES`). A malformed
+        // `OCCURS\n03 Y PIC X.` (OCCURS at line-end, no count, no
+        // TIMES) fails both checks, the LEVEL_NUMBER is left to the
+        // outer parseDataItems loop, and Y survives as a sibling
+        // rather than being orphaned. NUMERIC tokens are accepted
+        // unconditionally — they can't be misclassified.
+        const next = this.atEnd() ? null : this.peek();
+        const after = next ? this.tokens[this.pos + 1] : null;
+        const isCount = next && (
+          next.type === "NUMERIC" ||
+          (next.type === "LEVEL_NUMBER" && (
+            next.line === occursTok.line ||
+            (after !== undefined && after?.type === "TIMES")
+          ))
+        );
+        if (isCount) {
           occurs = parseInt(this.advance().value, 10);
         }
         this.match("TIMES");

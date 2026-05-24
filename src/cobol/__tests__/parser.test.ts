@@ -243,4 +243,148 @@ describe("COBOL parser", () => {
       expect(ast.programId).toBe("PLAIN-PROG");
     });
   });
+
+  describe("OCCURS clause (#53 — lexer-emitted LEVEL_NUMBER for 1-2 digit counts)", () => {
+    // The lexer emits LEVEL_NUMBER for any 1-2 digit number (because data
+    // item levels share that lexical shape). Pre-#53 the OCCURS handler
+    // only accepted NUMERIC, so the count was lost on 1-2 digit OCCURS
+    // clauses AND the next clause (PIC, USAGE, ...) terminated early on
+    // the misclassified LEVEL_NUMBER, spawning phantom items. Regression
+    // anchors below cover all three shapes the dogfood corpus exercises.
+    function dataItems(src: string) {
+      const ast = parse(src, "T.cbl");
+      const dataDiv = ast.divisions.find((d) => d.name === "DATA")!;
+      const ws = dataDiv.sections.find((s) => s.name.includes("WORKING-STORAGE"))!;
+      return ws.dataItems;
+    }
+    // Phantom-item probes walk root + descendants — buildDataHierarchy
+    // nests items with `level > parent.level` as children, so a phantom
+    // level-N FILLER would land under whichever data item the bug
+    // truncated, not at the root.
+    function allItems(roots: ReturnType<typeof dataItems>): typeof roots {
+      const out: typeof roots = [];
+      const walk = (items: typeof roots) => {
+        for (const i of items) {
+          out.push(i);
+          walk(i.children);
+        }
+      };
+      walk(roots);
+      return out;
+    }
+    function prog(body: string): string {
+      return `
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. T.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+${body}
+       PROCEDURE DIVISION.
+       A. STOP RUN.
+`;
+    }
+
+    it("captures OCCURS <single-digit-count> TIMES on a group item", () => {
+      const items = dataItems(prog(`       01  G.
+           02 X OCCURS 2 TIMES.
+               03 Y PIC X(5).`));
+      const g = items.find((i) => i.name === "G")!;
+      const x = g.children.find((c) => c.name === "X")!;
+      expect(x.occurs).toBe(2);
+      // Child unaffected — no phantom FILLER between X and Y.
+      expect(x.children.map((c) => c.name)).toEqual(["Y"]);
+    });
+
+    it("captures both OCCURS count and PIC on an inline-table item (1-digit count)", () => {
+      const items = dataItems(prog(`       01  T2 OCCURS 5 TIMES PIC X(10).`));
+      const t2 = items.find((i) => i.name === "T2")!;
+      expect(t2.occurs).toBe(5);
+      expect(t2.picture).toBe("X(10)");
+      // Pre-fix, parseDataItem terminated at "5" (LEVEL_NUMBER), spawning
+      // a phantom level-5 FILLER that buildDataHierarchy nested under T2
+      // (level > parent → child). Walk root + descendants to actually
+      // catch it.
+      expect(allItems(items).find((i) => i.level === 5 && i.name === "FILLER")).toBeUndefined();
+    });
+
+    it("captures OCCURS for 3-digit counts (NUMERIC token path)", () => {
+      // 3+ digit numbers lex as NUMERIC rather than LEVEL_NUMBER; this
+      // is the original-spec path that worked pre-#53.
+      const items = dataItems(prog(`       01  T3 OCCURS 100 TIMES PIC 9(4).`));
+      const t3 = items.find((i) => i.name === "T3")!;
+      expect(t3.occurs).toBe(100);
+      expect(t3.picture).toBe("9(4)");
+    });
+
+    it("phantom-FILLER probe: `OCCURS 5 TIMES PIC X(10)` does NOT spawn a phantom level-5 FILLER (separate it() so the probe isn't masked by the .toBe(occurs) failure)", () => {
+      // Lives in its own it() block because vitest's expect is hard-fail —
+      // a phantom-detection assertion positioned after .toBe(occurs) /
+      // .toBe(picture) never fires when the bug is back, since those
+      // throw first and abort the test. Splitting them out means the
+      // phantom walk is genuinely load-bearing.
+      const items = dataItems(prog(`       01  T2 OCCURS 5 TIMES PIC X(10).`));
+      expect(allItems(items).find((i) => i.level === 5 && i.name === "FILLER")).toBeUndefined();
+    });
+
+    it("phantom-FILLER probe: `VALUE 5 PIC 9` does NOT spawn a phantom level-5 FILLER", () => {
+      const items = dataItems(prog(`       01  WS-CHOICE VALUE 5 PIC 9.`));
+      expect(allItems(items).find((i) => i.level === 5 && i.name === "FILLER")).toBeUndefined();
+    });
+
+    it("malformed-input guard: `OCCURS\\n03 Y PIC X(5).` (missing count, OCCURS at line end) does NOT consume Y's level number", () => {
+      // Without the same-line guard on the LEVEL_NUMBER acceptance, the
+      // OCCURS handler would greedily consume "03" as occurs=3 and
+      // orphan the Y data item that should follow. With the guard, the
+      // LEVEL_NUMBER on the next line is preserved and Y parses
+      // cleanly as a sibling.
+      const items = dataItems(prog(`       01  G.
+           02 X OCCURS
+           03 Y PIC X(5).`));
+      const g = items.find((i) => i.name === "G")!;
+      const x = g.children.find((c) => c.name === "X")!;
+      expect(x.occurs).toBeUndefined();
+      // Y survives — depending on the data-hierarchy logic it lands as
+      // a child of G (level 3 > level 1 → nested) or under X. Either
+      // way it must appear somewhere in the tree.
+      expect(allItems(items).find((i) => i.name === "Y")).toBeDefined();
+    });
+
+    it("multi-line OCCURS clause: `OCCURS\\n   5 TIMES` (count on next line, but TIMES follows) is recognized", () => {
+      // Legal-but-unusual COBOL: count and TIMES on a line after OCCURS.
+      // The line-guard would reject `5` (different line), but the
+      // lookahead-to-TIMES branch accepts because TIMES proves the `5`
+      // is an OCCURS count, not the next data item's level number.
+      const items = dataItems(prog(`       01  T2 OCCURS
+           5 TIMES PIC X(10).`));
+      const t2 = items.find((i) => i.name === "T2")!;
+      expect(t2.occurs).toBe(5);
+      expect(t2.picture).toBe("X(10)");
+    });
+
+    it("malformed-input guard: `VALUE\\n02 Y PIC X.` (missing value, VALUE at line end) does NOT consume Y's level number", () => {
+      const items = dataItems(prog(`       01  X PIC 9 VALUE
+           02 Y PIC X.`));
+      const x = items.find((i) => i.name === "X")!;
+      expect(x.value).toBeUndefined();
+      expect(allItems(items).find((i) => i.name === "Y")).toBeDefined();
+    });
+
+    it("VALUE clause survives a small-integer literal in mid-clause position (same lexer-shape bug class)", () => {
+      // `VALUE 5 PIC 9.` — the "5" lexes as LEVEL_NUMBER (in the
+      // 1-49 range). Pre-#53, the VALUE handler only accepted
+      // LITERAL/NUMERIC/IDENTIFIER, so the value was dropped AND
+      // parseDataItem terminated at the LEVEL_NUMBER, dropping the
+      // trailing PIC AND spawning a phantom `5 FILLER PIC 9` at the
+      // parent level. After accepting LEVEL_NUMBER in the VALUE clause
+      // (parallel to the OCCURS fix), all three are captured cleanly.
+      const items = dataItems(prog(`       01  WS-CHOICE VALUE 5 PIC 9.`));
+      const choice = items.find((i) => i.name === "WS-CHOICE")!;
+      expect(choice.value).toBe("5");
+      expect(choice.picture).toBe("9");
+      // Same phantom-detection caveat as the OCCURS test — walk
+      // descendants since buildDataHierarchy would nest the phantom
+      // under WS-CHOICE.
+      expect(allItems(items).find((i) => i.level === 5 && i.name === "FILLER")).toBeUndefined();
+    });
+  });
 });

@@ -72,16 +72,6 @@ export interface SearchTrust {
 }
 
 /**
- * Phase 2b readiness — operationalises the "once the would-reject ratio
- * settles" decision point in docs/evidence-envelope.md by checking the
- * already-aggregated telemetry against fixed numeric thresholds.
- *
- * Thresholds are intentionally conservative: Phase 2b makes wiki_write
- * hard-fail on unsupported pages, so a false-positive ready signal would
- * block legitimate writes. See docs/evidence-envelope.md "Phase 2b flip
- * criteria" for the rationale.
- */
-/**
  * The number of weekly buckets the gates evaluate. Decoupled from the
  * `WEEKS_OF_TREND` constant that drives the cosmetic "Trend (last N
  * weeks)" sparkline so the gate's calibration doesn't silently change
@@ -95,6 +85,16 @@ const PHASE2B_MAX_WEEKLY_RATIO = 0.05;
 const PHASE2B_MAX_SEARCH_ABSTAIN_RATIO = 0.30;
 const PHASE2B_MIN_SEARCHES_FOR_GATE = 10;
 
+/**
+ * Phase 2b readiness — operationalises the "once the would-reject ratio
+ * settles" decision point in docs/evidence-envelope.md by checking the
+ * already-aggregated telemetry against fixed numeric thresholds.
+ *
+ * Thresholds are intentionally conservative: Phase 2b makes wiki_write
+ * hard-fail on unsupported pages, so a false-positive ready signal would
+ * block legitimate writes. See docs/evidence-envelope.md "Phase 2b flip
+ * criteria" for the rationale.
+ */
 export interface Phase2bReadiness {
   status: "ready" | "not-ready" | "insufficient-data";
   /** Already-enabled state from `wiki.config.evidence.rejectUnsupportedWrites`. */
@@ -216,7 +216,7 @@ function assessPhase2bReadiness(
   // week is over the ratio, both show up rather than only the first.
   if (!totalWritesGate.passing) {
     reasons.push(
-      `Total writes over 4 weeks (${totalWritesValue}) below threshold (${PHASE2B_MIN_TOTAL_WRITES}). ` +
+      `Total writes over ${PHASE2B_GATE_WEEKS} weeks (${totalWritesValue}) below threshold (${PHASE2B_MIN_TOTAL_WRITES}). ` +
         `Wait for more activity before flipping — the ratio is statistically thin.`,
     );
   }
@@ -648,7 +648,7 @@ export function renderEvidenceReport(report: EvidenceReport): string {
 
   const tw = r.gates.totalWrites;
   lines.push(
-    `- **Total writes (4-week window)**: ${tw.value} / ${tw.threshold} ${checkmark(tw.passing)}`,
+    `- **Total writes (${PHASE2B_GATE_WEEKS}-week window)**: ${tw.value} / ${tw.threshold} ${checkmark(tw.passing)}`,
   );
 
   const wr = r.gates.weeklyRatio;

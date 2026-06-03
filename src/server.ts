@@ -3116,6 +3116,11 @@ export async function handleTool(
       // op from this batch — the end-of-batch rebuild block below regenerates
       // the report once so the opt-in flag survives dedup.
       let needsEvidenceReport = false;
+      // Deferred entries from rebuild ops that asked for evidence_report:true.
+      // Held by reference so we can mutate them in place on regen failure —
+      // keeps the 1-op→1-result invariant and the established `{ tool, result }`
+      // shape rather than introducing a sibling entry on failure.
+      const rebuildEntriesAwaitingEvidence: Array<Record<string, unknown>> = [];
 
       const results: Array<Record<string, unknown>> = [];
       for (const op of ops) {
@@ -3129,8 +3134,15 @@ export async function handleTool(
         if (isRebuild) {
           needsRebuild = true;
           needsTimeline = true;
-          if (op.args?.evidence_report === true) needsEvidenceReport = true;
-          results.push({ tool: op.tool, result: { ok: true, deferred: "merged into end-of-batch rebuild" } });
+          const entry: Record<string, unknown> = {
+            tool: op.tool,
+            result: { ok: true, deferred: "merged into end-of-batch rebuild" },
+          };
+          results.push(entry);
+          if (op.args?.evidence_report === true) {
+            needsEvidenceReport = true;
+            rebuildEntriesAwaitingEvidence.push(entry);
+          }
           continue;
         }
         try {
@@ -3186,19 +3198,29 @@ export async function handleTool(
         const pageCache = wiki.buildPageCache();
         wiki.rebuildIndex(pageCache);
         if (needsTimeline) wiki.rebuildTimeline(pageCache);
+        // Mirror inline rebuild's evidence migration step. Without this,
+        // batch-generated evidence reports misclassify pre-migration legacy
+        // pages as `other` instead of `legacyUnsupported`. Migration is
+        // marker-file-gated and one-shot, so the call is a no-op after the
+        // first run on any given workspace.
+        try {
+          const pluginIds = listPlugins().map((p) => p.id);
+          migrateExistingPagesForEvidence(wiki, pluginIds);
+        } catch { /* never fails the rebuild */ }
       }
       if (needsEvidenceReport) {
-        // Surface failure as a follow-up result entry so the batch caller
-        // sees the partial-success state. Mirrors the inline rebuild path,
-        // which pushes the same string into `parts` (see
-        // regenerateEvidenceReport's docblock). On success the report
-        // file presence is the operator's signal — no extra entry needed.
         const evResult = regenerateEvidenceReport(wiki);
         if (!evResult.ok) {
-          results.push({
-            tool: "wiki_admin",
-            warning: `Evidence report regeneration failed: ${evResult.error}`,
-          });
+          // Surface failure in-place on the deferred entry so the caller
+          // gets one result per op, keeping `count: results.length` honest
+          // and the shape uniform with the rest of this handler.
+          for (const entry of rebuildEntriesAwaitingEvidence) {
+            const prior = entry.result as Record<string, unknown>;
+            entry.result = {
+              ...prior,
+              evidenceReport: { ok: false, error: evResult.error },
+            };
+          }
         }
       }
 

@@ -3046,13 +3046,21 @@ Extra content.` } },
     const wiki = freshWiki();
     const reportPath = join(wiki.config.wikiDir, "evidence-report.md");
     expect(existsSync(reportPath)).toBe(false);
-    await handleTool(wiki, "batch", {
+    const result = await handleTool(wiki, "batch", {
       operations: [
         { tool: "wiki_admin", args: { action: "rebuild", evidence_report: true } },
       ],
     });
     expect(existsSync(reportPath)).toBe(true);
     expect(readFileSync(reportPath, "utf-8")).toContain("## Phase 2b readiness");
+    // Invariant: 1 op → 1 result entry. The evidence-report regen lives
+    // inside the deferred rebuild's entry, never as a sibling that would
+    // inflate `count` and break op→result alignment for callers.
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(1);
+    expect(parsed.results).toHaveLength(1);
+    expect(parsed.results[0].tool).toBe("wiki_admin");
+    expect(parsed.results[0].result?.deferred).toMatch(/rebuild/);
   });
 
   it("batch leaves report untouched when evidence_report flag is absent on rebuild", async () => {
@@ -3064,5 +3072,22 @@ Extra content.` } },
       ],
     });
     expect(existsSync(reportPath)).toBe(false);
+  });
+
+  it("batch rebuild runs evidence migration so legacy pages classify equivalently to inline rebuild", async () => {
+    // Without batch-side migration, the report's Source coverage would
+    // bucket pre-migration legacy pages as `other` instead of
+    // `legacyUnsupported` — divergence from the inline rebuild path.
+    // Marker file presence under .agent-wiki/ is the canonical signal that
+    // migration ran.
+    const wiki = freshWiki();
+    const marker = join(wiki.config.workspace, ".agent-wiki", "evidence-migrated");
+    expect(existsSync(marker)).toBe(false);
+    await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_admin", args: { action: "rebuild", evidence_report: true } },
+      ],
+    });
+    expect(existsSync(marker)).toBe(true);
   });
 });

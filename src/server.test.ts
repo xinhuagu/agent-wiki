@@ -2332,6 +2332,35 @@ describe("consolidated tool: wiki_admin", () => {
     expect(parsed.writtenTo).toBeDefined();
     expect(existsSync(join(wiki.config.wikiDir, "evidence-report.md"))).toBe(true);
   });
+
+  it("action:rebuild with evidence_report:true also writes the evidence report", async () => {
+    const wiki = freshWiki();
+    const reportPath = join(wiki.config.wikiDir, "evidence-report.md");
+    expect(existsSync(reportPath)).toBe(false);
+    const result = await handleTool(wiki, "wiki_admin", {
+      action: "rebuild",
+      evidence_report: true,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.message).toMatch(/Evidence report written/);
+    expect(existsSync(reportPath)).toBe(true);
+    // The Phase 2b readiness section should appear in the persisted report.
+    const content = readFileSync(reportPath, "utf-8");
+    expect(content).toContain("## Phase 2b readiness");
+    // On success, no structured failure field is emitted — the field
+    // exists only when regen failed (parity with the batch path's
+    // deferred-entry mutation shape).
+    expect(parsed.evidenceReport).toBeUndefined();
+  });
+
+  it("action:rebuild without evidence_report leaves the report file untouched", async () => {
+    const wiki = freshWiki();
+    const reportPath = join(wiki.config.wikiDir, "evidence-report.md");
+    expect(existsSync(reportPath)).toBe(false);
+    await handleTool(wiki, "wiki_admin", { action: "rebuild" });
+    expect(existsSync(reportPath)).toBe(false);
+  });
 });
 
 describe("consolidated tool: code_query", () => {
@@ -3012,5 +3041,57 @@ Extra content.` } },
     // wiki_admin action:rebuild should be deferred
     const rebuildResult = parsed.results.find((r: any) => r.tool === "wiki_admin");
     expect(rebuildResult?.result?.deferred).toMatch(/rebuild/);
+  });
+
+  it("batch preserves evidence_report:true on deduped wiki_admin rebuild", async () => {
+    // Regression: dedup originally stripped the flag and the end-of-batch
+    // path only ran rebuildIndex+rebuildTimeline, so wiki/evidence-report.md
+    // never appeared even though the standalone call did write it.
+    const wiki = freshWiki();
+    const reportPath = join(wiki.config.wikiDir, "evidence-report.md");
+    expect(existsSync(reportPath)).toBe(false);
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_admin", args: { action: "rebuild", evidence_report: true } },
+      ],
+    });
+    expect(existsSync(reportPath)).toBe(true);
+    expect(readFileSync(reportPath, "utf-8")).toContain("## Phase 2b readiness");
+    // Invariant: 1 op → 1 result entry. The evidence-report regen lives
+    // inside the deferred rebuild's entry, never as a sibling that would
+    // inflate `count` and break op→result alignment for callers.
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(1);
+    expect(parsed.results).toHaveLength(1);
+    expect(parsed.results[0].tool).toBe("wiki_admin");
+    expect(parsed.results[0].result?.deferred).toMatch(/rebuild/);
+  });
+
+  it("batch leaves report untouched when evidence_report flag is absent on rebuild", async () => {
+    const wiki = freshWiki();
+    const reportPath = join(wiki.config.wikiDir, "evidence-report.md");
+    await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_admin", args: { action: "rebuild" } },
+      ],
+    });
+    expect(existsSync(reportPath)).toBe(false);
+  });
+
+  it("batch rebuild runs evidence migration so legacy pages classify equivalently to inline rebuild", async () => {
+    // Without batch-side migration, the report's Source coverage would
+    // bucket pre-migration legacy pages as `other` instead of
+    // `legacyUnsupported` — divergence from the inline rebuild path.
+    // Marker file presence under .agent-wiki/ is the canonical signal that
+    // migration ran.
+    const wiki = freshWiki();
+    const marker = join(wiki.config.workspace, ".agent-wiki", "evidence-migrated");
+    expect(existsSync(marker)).toBe(false);
+    await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_admin", args: { action: "rebuild", evidence_report: true } },
+      ],
+    });
+    expect(existsSync(marker)).toBe(true);
   });
 });

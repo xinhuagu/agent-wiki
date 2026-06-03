@@ -386,9 +386,9 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           "Wiki administration and maintenance. Select `action` to control behavior:\n" +
           "- `init`: Initialize a new knowledge base — creates wiki/, raw/, schemas/ directories and default templates.\n" +
           "- `config`: Show current workspace configuration: directories, lint settings, search settings, entity templates.\n" +
-          "- `rebuild`: Rebuild index.md, timeline.md, code knowledge graphs, and optionally the vector index (when search.hybrid is enabled).\n" +
+          "- `rebuild`: Rebuild index.md, timeline.md, code knowledge graphs, and optionally the vector index (when search.hybrid is enabled). Set evidence_report=true to also regenerate the evidence report and persist it to wiki/evidence-report.md as part of the rebuild.\n" +
           "- `lint`: Run comprehensive health checks: contradictions, orphan pages, broken links, raw file integrity (SHA-256), synthesis page integrity. Set apply_fixes=true to auto-repair fixable issues.\n" +
-          "- `evidence-report`: Aggregate evidence-first telemetry into a corpus-level Markdown report (source coverage, lineage diagnostics, 4-week write trend). Set write=true to also persist the report to wiki/evidence-report.md.",
+          "- `evidence-report`: Aggregate evidence-first telemetry into a corpus-level Markdown report (source coverage, lineage diagnostics, 4-week write trend, Phase 2b readiness gates). Set write=true to also persist the report to wiki/evidence-report.md.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -412,6 +412,10 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             write: {
               type: "boolean",
               description: "[evidence-report] If true, persist the report to wiki/evidence-report.md in addition to returning it. Default: false.",
+            },
+            evidence_report: {
+              type: "boolean",
+              description: "[rebuild] If true, also regenerate the evidence report and persist it to wiki/evidence-report.md as part of the rebuild. Useful for keeping the dashboard fresh without a separate evidence-report call. Default: false.",
             },
           },
           required: ["action"],
@@ -1799,6 +1803,92 @@ function readPagesContent(
   return pages;
 }
 
+/**
+ * Best-effort regeneration of `wiki/evidence-report.md`. Called from
+ * `runPostRebuildEvidence` below, which both the inline and batched
+ * rebuild paths invoke. The rebuild never fails on evidence
+ * bookkeeping, but the flag is operator-requested — both callers
+ * surface success or failure into their visible response so `ok:true`
+ * never implies the regen happened when it didn't.
+ */
+function regenerateEvidenceReport(
+  wiki: Wiki,
+): { ok: true; writtenTo: string } | { ok: false; error: string } {
+  try {
+    const er = runEvidenceReport(wiki, { write: true });
+    // `write: true` always sets `writtenTo`; the null-check is here only
+    // because the public signature keeps `writtenTo?: string` rather than
+    // paying for overloads to narrow it for a single caller.
+    if (!er.writtenTo) {
+      return { ok: false, error: "runEvidenceReport(write:true) returned no writtenTo path" };
+    }
+    return { ok: true, writtenTo: er.writtenTo };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Single source of truth for the post-rebuild evidence bookkeeping that
+ * both `wiki_admin action:rebuild` (inline) and the end-of-batch rebuild
+ * path execute: (1) one-shot migration of pre-existing pages, (2) weekly
+ * digest line into wiki/log.md, (3) optional opt-in evidence-report regen.
+ *
+ * Returns:
+ *   - `parts`: message fragments for the inline handler to append to its
+ *     ok-message. The batch handler does not surface these and may
+ *     discard them — current behavior is to omit migration / digest
+ *     messages from batch responses (they remain in log.md).
+ *   - `evidence`: the regen result when `regenerateReport` was true,
+ *     `null` otherwise. Both call sites consume this to surface failure
+ *     into their visible response shape.
+ */
+function runPostRebuildEvidence(
+  wiki: Wiki,
+  opts: { regenerateReport: boolean },
+): {
+  parts: string[];
+  evidence: { ok: true; writtenTo: string } | { ok: false; error: string } | null;
+} {
+  const parts: string[] = [];
+
+  let migration: ReturnType<typeof migrateExistingPagesForEvidence> | null = null;
+  try {
+    const pluginIds = listPlugins().map((p) => p.id);
+    migration = migrateExistingPagesForEvidence(wiki, pluginIds);
+  } catch { /* never fails the rebuild */ }
+  if (migration && !migration.alreadyMigrated && migration.totalPages > 0) {
+    parts.push(
+      `Evidence migration: ${migration.totalPages} pages — ` +
+        `${migration.grounded} grounded, ` +
+        `${migration.syntheses + migration.preExistingSynthesis} synthesis, ` +
+        `${migration.legacy} legacy-unsupported`,
+    );
+  }
+
+  try {
+    const week = summarizeLastWeek(wiki.config.workspace);
+    if (week.totalWrites > 0 || week.unsupportedTransitions > 0) {
+      const ratioStr =
+        week.wouldRejectRatio === null
+          ? ""
+          : ` — ${(week.wouldRejectRatio * 100).toFixed(1)}% blocked-or-would-block under Phase 2b`;
+      wiki.log(
+        "evidence",
+        "log.md",
+        `Last 7 days: ${week.unsupportedWrites} unsupported `
+          + `+ ${week.rejectedWrites} rejected `
+          + `/ ${week.totalWrites} wiki_write(s) `
+          + `(${week.unsupportedTransitions} new unsupported pages)`
+          + `${ratioStr}.`,
+      );
+    }
+  } catch { /* never fails the rebuild */ }
+
+  const evidence = opts.regenerateReport ? regenerateEvidenceReport(wiki) : null;
+  return { parts, evidence };
+}
+
 export async function handleTool(
   wiki: Wiki,
   name: string,
@@ -2415,18 +2505,6 @@ export async function handleTool(
         vectorStats = await wiki.rebuildVectorIndex().catch(() => undefined);
       }
 
-      // Evidence-first phase 2a: one-shot migration of pre-existing pages
-      // (gated by marker file under .agent-wiki/) so existing compiler
-      // artifacts and user pages don't all flag as "unsupported" the day
-      // phase 2a ships. Also emit a one-line weekly count of unsupported
-      // writes into wiki/log.md so the maintainer has a running signal
-      // ahead of the phase 4 dashboard.
-      let migration: ReturnType<typeof migrateExistingPagesForEvidence> | null = null;
-      try {
-        const pluginIds = listPlugins().map((p) => p.id);
-        migration = migrateExistingPagesForEvidence(wiki, pluginIds);
-      } catch { /* ignore — evidence bookkeeping never fails a rebuild */ }
-
       const parts: string[] = ["Index and timeline rebuilt"];
       if (graphStats) {
         parts.push(`Knowledge graph: ${graphStats.nodes} nodes, ${graphStats.edges} edges`);
@@ -2434,35 +2512,33 @@ export async function handleTool(
       if (vectorStats) {
         parts.push(`Vector index: ${vectorStats.pagesProcessed} pages embedded${vectorStats.errors > 0 ? `, ${vectorStats.errors} errors` : ""}`);
       }
-      if (migration && !migration.alreadyMigrated && migration.totalPages > 0) {
-        parts.push(
-          `Evidence migration: ${migration.totalPages} pages — ` +
-          `${migration.grounded} grounded, ` +
-          `${migration.syntheses + migration.preExistingSynthesis} synthesis, ` +
-          `${migration.legacy} legacy-unsupported`
-        );
+
+      // Single source of truth for post-rebuild evidence bookkeeping;
+      // batch's end-of-batch path invokes the same helper for parity.
+      const regenerateReport = (args.evidence_report as boolean) ?? false;
+      const bookkeeping = runPostRebuildEvidence(wiki, { regenerateReport });
+      parts.push(...bookkeeping.parts);
+      if (bookkeeping.evidence) {
+        parts.push(bookkeeping.evidence.ok
+          ? `Evidence report written to ${bookkeeping.evidence.writtenTo}`
+          : `Evidence report regeneration failed: ${bookkeeping.evidence.error}`);
       }
 
-      try {
-        const week = summarizeLastWeek(wiki.config.workspace);
-        if (week.totalWrites > 0 || week.unsupportedTransitions > 0) {
-          const ratioStr =
-            week.wouldRejectRatio === null
-              ? ""
-              : ` — ${(week.wouldRejectRatio * 100).toFixed(1)}% blocked-or-would-block under Phase 2b`;
-          wiki.log(
-            "evidence",
-            "log.md",
-            `Last 7 days: ${week.unsupportedWrites} unsupported `
-              + `+ ${week.rejectedWrites} rejected `
-              + `/ ${week.totalWrites} wiki_write(s) `
-              + `(${week.unsupportedTransitions} new unsupported pages)`
-              + `${ratioStr}.`,
-          );
-        }
-      } catch { /* ignore */ }
-
-      return JSON.stringify({ ok: true, message: parts.join(". ") + "." });
+      // On regen failure, surface a structured field alongside ok:true so
+      // programmatic callers can detect partial-success without sniffing
+      // the message string. Matches the batch handler's deferred-entry
+      // shape (`evidenceReport: { ok: false, error }`).
+      const response: Record<string, unknown> = {
+        ok: true,
+        message: parts.join(". ") + ".",
+      };
+      if (bookkeeping.evidence && !bookkeeping.evidence.ok) {
+        response.evidenceReport = {
+          ok: false,
+          error: bookkeeping.evidence.error,
+        };
+      }
+      return JSON.stringify(response);
     }
 
     // wiki_classify removed — wiki_write auto-classifies
@@ -3075,6 +3151,15 @@ export async function handleTool(
       let needsRebuild = false;
       let needsTimeline = false;
       let needsGraphRebuild = false;
+      // Carries through any `wiki_admin action:rebuild evidence_report:true`
+      // op from this batch — the end-of-batch rebuild block below regenerates
+      // the report once so the opt-in flag survives dedup.
+      let needsEvidenceReport = false;
+      // Deferred entries from rebuild ops that asked for evidence_report:true.
+      // Held by reference so we can mutate them in place on regen failure —
+      // keeps the 1-op→1-result invariant and the established `{ tool, result }`
+      // shape rather than introducing a sibling entry on failure.
+      const rebuildEntriesAwaitingEvidence: Array<Record<string, unknown>> = [];
 
       const results: Array<Record<string, unknown>> = [];
       for (const op of ops) {
@@ -3088,7 +3173,19 @@ export async function handleTool(
         if (isRebuild) {
           needsRebuild = true;
           needsTimeline = true;
-          results.push({ tool: op.tool, result: { ok: true, deferred: "merged into end-of-batch rebuild" } });
+          const entry: Record<string, unknown> = {
+            tool: op.tool,
+            result: { ok: true, deferred: "merged into end-of-batch rebuild" },
+          };
+          results.push(entry);
+          // Match the in-handler `(args.X as boolean) ?? false` convention
+          // (e.g. wiki_lint's apply_fixes) so the same input shape produces
+          // the same behavior across every wiki_admin entry point.
+          const opEvidenceReport = (op.args?.evidence_report as boolean) ?? false;
+          if (opEvidenceReport) {
+            needsEvidenceReport = true;
+            rebuildEntriesAwaitingEvidence.push(entry);
+          }
           continue;
         }
         try {
@@ -3143,7 +3240,29 @@ export async function handleTool(
       if (needsRebuild) {
         const pageCache = wiki.buildPageCache();
         wiki.rebuildIndex(pageCache);
+        // Yield to the event loop so the MCP transport can answer client
+        // pings between the two rebuilds. Mirrors the inline rebuild path
+        // (relevant on slow filesystems like OneDrive-synced workspaces).
+        await new Promise((r) => setImmediate(r));
         if (needsTimeline) wiki.rebuildTimeline(pageCache);
+        // Single source of truth for migration + weekly log + optional
+        // regen — same helper the inline rebuild path uses, so the two
+        // produce equivalent side effects (log.md, .agent-wiki/ marker).
+        const bookkeeping = runPostRebuildEvidence(wiki, {
+          regenerateReport: needsEvidenceReport,
+        });
+        if (bookkeeping.evidence && !bookkeeping.evidence.ok) {
+          // Surface failure in-place on the deferred entry so the caller
+          // gets one result per op, keeping `count: results.length` honest
+          // and the shape uniform with the rest of this handler.
+          for (const entry of rebuildEntriesAwaitingEvidence) {
+            const prior = entry.result as Record<string, unknown>;
+            entry.result = {
+              ...prior,
+              evidenceReport: { ok: false, error: bookkeeping.evidence.error },
+            };
+          }
+        }
       }
 
       return JSON.stringify({ results, count: results.length }, null, 2);

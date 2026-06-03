@@ -71,6 +71,87 @@ export interface SearchTrust {
   ratioHistogram: { lt15: number; lt20: number; lt30: number; ge30: number };
 }
 
+/**
+ * The number of weekly buckets the gates evaluate. Decoupled from the
+ * `WEEKS_OF_TREND` constant that drives the cosmetic "Trend (last N
+ * weeks)" sparkline so the gate's calibration doesn't silently change
+ * if the display window is widened. The min-writes threshold below is
+ * calibrated to exactly this many weeks; any change here should be
+ * paired with a re-calibration of `PHASE2B_MIN_TOTAL_WRITES`.
+ *
+ * Invariant (enforced inline in `assessPhase2bReadiness` by the
+ * `trend.length < PHASE2B_GATE_WEEKS` guard before the `slice(-N)`):
+ * must be ≤ `WEEKS_OF_TREND`, otherwise the slice silently returns
+ * fewer buckets than intended and the threshold would become
+ * incorrectly easier to pass.
+ */
+const PHASE2B_GATE_WEEKS = 4;
+const PHASE2B_MIN_TOTAL_WRITES = 50;
+const PHASE2B_MAX_WEEKLY_RATIO = 0.05;
+const PHASE2B_MAX_SEARCH_ABSTAIN_RATIO = 0.30;
+const PHASE2B_MIN_SEARCHES_FOR_GATE = 10;
+
+/**
+ * Canonical GitHub URL of the flip-criteria section, surfaced in the
+ * rendered report's "ready" tip. Lifted to module scope so a repo
+ * rename or fork only requires updating one literal. The test at
+ * `evidence-report.test.ts` pins this constant indirectly via the
+ * rendered output.
+ *
+ * Why absolute (not `../docs/...`): when `wiki/evidence-report.md`
+ * is rendered under a user-supplied wiki/ dir, the wiki dir's
+ * position relative to docs/ in `node_modules/@agent-wiki/mcp/` is
+ * not stable — there is no guaranteed sibling path the operator
+ * could click. (The npm package does ship `docs/` per package.json
+ * `files`, but at an unrelated location.)
+ */
+const FLIP_CRITERIA_URL =
+  "https://github.com/xinhuagu/agent-wiki/blob/main/docs/evidence-envelope.md#phase-2b-flip-criteria";
+
+/**
+ * Phase 2b readiness — operationalises the "once the would-reject ratio
+ * settles" decision point in docs/evidence-envelope.md by checking the
+ * already-aggregated telemetry against fixed numeric thresholds.
+ *
+ * Thresholds are intentionally conservative: Phase 2b makes wiki_write
+ * hard-fail on unsupported pages, so a false-positive ready signal would
+ * block legitimate writes. See docs/evidence-envelope.md "Phase 2b flip
+ * criteria" for the rationale.
+ */
+export interface Phase2bReadiness {
+  status: "ready" | "not-ready" | "insufficient-data";
+  /** Already-enabled state from `wiki.config.evidence.rejectUnsupportedWrites`. */
+  currentlyEnabled: boolean;
+  /**
+   * Per-gate verdicts. `totalWrites` and `weeklyRatio` always evaluate;
+   * `searchAbstain` may report `applicable: false` when the 30-day search
+   * volume is too low for the gate to be meaningful.
+   */
+  gates: {
+    totalWrites: {
+      value: number;
+      threshold: number;
+      passing: boolean;
+    };
+    weeklyRatio: {
+      threshold: number;
+      perWeek: Array<{
+        weekStart: string;
+        totalWrites: number;
+        unsupportedOrRejected: number;
+        ratio: number | null;       // null when totalWrites === 0
+        passing: boolean;            // true when ratio is null (no signal) or < threshold
+      }>;
+      passing: boolean;             // every week with data passes
+    };
+    searchAbstain:
+      | { applicable: true; value: number; threshold: number; passing: boolean }
+      | { applicable: false; reason: string };
+  };
+  /** Plain-English summary of what is blocking readiness, if anything. */
+  reasons: string[];
+}
+
 export interface EvidenceReport {
   generatedAt: string;
   source: SourceCoverage;
@@ -81,18 +162,131 @@ export interface EvidenceReport {
     fieldLineage?: FieldLineageDiagnosticsSection;
   };
   trend: TrendBucket[];
+  phase2bReadiness: Phase2bReadiness;
 }
 
 export function buildEvidenceReport(
   wiki: Wiki,
   now: Date = new Date(),
 ): EvidenceReport {
+  const searchTrust = aggregateSearchTrust(wiki, now);
+  const trend = aggregateTrend(wiki, now);
   return {
     generatedAt: now.toISOString(),
     source: aggregateSourceCoverage(wiki),
-    searchTrust: aggregateSearchTrust(wiki, now),
+    searchTrust,
     lineage: aggregateCobolLineage(wiki),
-    trend: aggregateTrend(wiki, now),
+    trend,
+    phase2bReadiness: assessPhase2bReadiness(wiki, trend, searchTrust),
+  };
+}
+
+function assessPhase2bReadiness(
+  wiki: Wiki,
+  trend: TrendBucket[],
+  searchTrust: SearchTrust,
+): Phase2bReadiness {
+  const currentlyEnabled = wiki.config.evidence.rejectUnsupportedWrites;
+  const reasons: string[] = [];
+
+  // Inline guard so a future bump of PHASE2B_GATE_WEEKS past WEEKS_OF_TREND
+  // fails loud instead of silently making the gate easier to pass.
+  if (trend.length < PHASE2B_GATE_WEEKS) {
+    throw new Error(
+      `Trend window (${trend.length}) shorter than PHASE2B_GATE_WEEKS (${PHASE2B_GATE_WEEKS}); widen WEEKS_OF_TREND.`,
+    );
+  }
+  const gateBuckets = trend.slice(-PHASE2B_GATE_WEEKS);
+
+  const totalWritesValue = gateBuckets.reduce((acc, b) => acc + b.totalWrites, 0);
+  const totalWritesGate = {
+    value: totalWritesValue,
+    threshold: PHASE2B_MIN_TOTAL_WRITES,
+    passing: totalWritesValue >= PHASE2B_MIN_TOTAL_WRITES,
+  };
+
+  const perWeek = gateBuckets.map((b) => {
+    const ratio = b.totalWrites === 0 ? null : b.unsupportedOrRejected / b.totalWrites;
+    // A week with no writes carries no signal — it neither confirms nor refutes
+    // readiness, so it passes by default. The totalWrites gate catches the
+    // case where all four weeks are empty.
+    const passing = ratio === null || ratio < PHASE2B_MAX_WEEKLY_RATIO;
+    return {
+      weekStart: b.weekStart,
+      totalWrites: b.totalWrites,
+      unsupportedOrRejected: b.unsupportedOrRejected,
+      ratio,
+      passing,
+    };
+  });
+  const weeklyRatioGate = {
+    threshold: PHASE2B_MAX_WEEKLY_RATIO,
+    perWeek,
+    passing: perWeek.every((w) => w.passing),
+  };
+
+  const searchAbstainGate: Phase2bReadiness["gates"]["searchAbstain"] =
+    searchTrust.totalSearches >= PHASE2B_MIN_SEARCHES_FOR_GATE &&
+    searchTrust.abstainRatio !== null
+      ? {
+          applicable: true,
+          value: searchTrust.abstainRatio,
+          threshold: PHASE2B_MAX_SEARCH_ABSTAIN_RATIO,
+          passing: searchTrust.abstainRatio <= PHASE2B_MAX_SEARCH_ABSTAIN_RATIO,
+        }
+      : {
+          applicable: false,
+          reason: `fewer than ${PHASE2B_MIN_SEARCHES_FOR_GATE} searches in the last 30 days — not enough signal to gate on`,
+        };
+
+  // Collect reasons for every failing gate, regardless of status. This keeps
+  // the operator-visible "why" complete: if total writes are too thin AND a
+  // week is over the ratio, both show up rather than only the first.
+  if (!totalWritesGate.passing) {
+    reasons.push(
+      `Total writes over ${PHASE2B_GATE_WEEKS} weeks (${totalWritesValue}) below threshold (${PHASE2B_MIN_TOTAL_WRITES}). ` +
+        `Wait for more activity before flipping — the ratio is statistically thin.`,
+    );
+  }
+  // Invariant: `passing = ratio === null || ratio < threshold`, so `!passing`
+  // mathematically implies `ratio !== null`. The bang below documents the
+  // invariant at the use site; a discriminated union on passing would be
+  // more elaborate than this small block warrants.
+  const failingWeeks = perWeek.filter((w) => !w.passing);
+  if (failingWeeks.length > 0) {
+    const list = failingWeeks
+      .map((w) => `${w.weekStart} (${(w.ratio! * 100).toFixed(1)}%)`)
+      .join(", ");
+    reasons.push(
+      `${failingWeeks.length} week(s) above ${(PHASE2B_MAX_WEEKLY_RATIO * 100).toFixed(0)}% wouldRejectRatio: ${list}.`,
+    );
+  }
+  if (searchAbstainGate.applicable && !searchAbstainGate.passing) {
+    reasons.push(
+      `Search abstain ratio (${(searchAbstainGate.value * 100).toFixed(1)}%) above ` +
+        `${(PHASE2B_MAX_SEARCH_ABSTAIN_RATIO * 100).toFixed(0)}% — many queries are returning weak matches; ` +
+        `Phase 2b would also tighten the supply side, compounding the problem.`,
+    );
+  }
+
+  // Status: insufficient-data takes precedence (we can't make a real call yet
+  // — a single bad week against 5 writes is noise, not signal). Otherwise,
+  // every applicable gate must pass.
+  let status: Phase2bReadiness["status"];
+  if (!totalWritesGate.passing) {
+    status = "insufficient-data";
+  } else {
+    const allGatesPass =
+      weeklyRatioGate.passing &&
+      (!searchAbstainGate.applicable || searchAbstainGate.passing);
+    status = allGatesPass ? "ready" : "not-ready";
+  }
+
+  return {
+    status,
+    currentlyEnabled,
+    gates: { totalWrites: totalWritesGate, weeklyRatio: weeklyRatioGate, searchAbstain: searchAbstainGate },
+    reasons,
   };
 }
 
@@ -460,12 +654,83 @@ export function renderEvidenceReport(report: EvidenceReport): string {
   }
   lines.push("");
 
+  // ── Section 5: Phase 2b readiness ──────────────────────────────────
+  const r = report.phase2bReadiness;
+  lines.push(`## Phase 2b readiness`);
+  lines.push("");
+  const statusLabel =
+    r.status === "ready" ? "READY — gates pass; safe to consider flipping"
+    : r.status === "not-ready" ? "NOT READY — see reasons below"
+    : "INSUFFICIENT DATA — too few writes to judge yet";
+  lines.push(`- Status: **${statusLabel}**`);
+  // `currentlyEnabled` resolves from env var OR YAML config; don't attribute
+  // to one specific knob since the operator may have flipped either.
+  lines.push(`- Currently enabled: ${r.currentlyEnabled ? "yes" : "no"}`);
+  lines.push("");
+
+  lines.push(`### Gates`);
+  lines.push("");
+  const checkmark = (p: boolean) => (p ? "✓" : "✗");
+
+  const tw = r.gates.totalWrites;
+  lines.push(
+    `- **Total writes (${PHASE2B_GATE_WEEKS}-week window)**: ${tw.value} / ${tw.threshold} ${checkmark(tw.passing)}`,
+  );
+
+  const wr = r.gates.weeklyRatio;
+  lines.push(
+    `- **Weekly wouldRejectRatio < ${(wr.threshold * 100).toFixed(0)}%**: ${checkmark(wr.passing)}`,
+  );
+  lines.push("");
+  lines.push(`  | Week start | Writes | Unsupp/Rej | Ratio | Pass |`);
+  lines.push(`  |------------|--------|------------|-------|------|`);
+  for (const w of wr.perWeek) {
+    const ratioStr = w.ratio === null ? "—" : `${(w.ratio * 100).toFixed(1)}%`;
+    lines.push(
+      `  | ${w.weekStart} | ${w.totalWrites} | ${w.unsupportedOrRejected} | ${ratioStr} | ${checkmark(w.passing)} |`,
+    );
+  }
+  lines.push("");
+
+  const sa = r.gates.searchAbstain;
+  if (sa.applicable) {
+    lines.push(
+      `- **Search abstain ratio (30d) ≤ ${(sa.threshold * 100).toFixed(0)}%**: ` +
+        `${(sa.value * 100).toFixed(1)}% ${checkmark(sa.passing)}`,
+    );
+  } else {
+    lines.push(`- **Search abstain ratio (30d)**: skipped — ${sa.reason}`);
+  }
+  lines.push("");
+
+  if (r.reasons.length > 0) {
+    lines.push(`### Reasons`);
+    lines.push("");
+    for (const reason of r.reasons) {
+      lines.push(`- ${reason}`);
+    }
+    lines.push("");
+  }
+
+  if (r.status === "ready" && !r.currentlyEnabled) {
+    lines.push(
+      `> All gates pass. To flip Phase 2b on, set ` +
+        `\`AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED=true\` (env var) or ` +
+        `\`evidence.reject_unsupported_writes: true\` in \`.agent-wiki.yaml\`. ` +
+        `See [Phase 2b flip criteria](${FLIP_CRITERIA_URL}) ` +
+        `for the rationale.`,
+    );
+    lines.push("");
+  }
+
   return lines.join("\n");
 }
 
 /**
  * Generate the report and optionally persist it. Returns the rendered
- * markdown so the MCP caller can also surface it inline.
+ * markdown so the MCP caller can also surface it inline. `writtenTo` is
+ * set when `write: true`; callers that need it as a non-optional string
+ * should null-check at the use site.
  */
 export function runEvidenceReport(
   wiki: Wiki,

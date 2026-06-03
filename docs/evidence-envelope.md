@@ -1,6 +1,6 @@
 # Evidence Envelope
 
-**Status: Phases 1–4 delivered. Phase 2b (hard reject) ships disabled and is operator-toggleable via `AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED` once the would-reject ratio settles. Section "Phase 0 — design" below is preserved as the original contract; downstream sections describe what shipped.**
+**Status: Phases 1–4 delivered. Phase 2b (hard reject) ships disabled and is operator-toggleable via `AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED` once the [Phase 2b flip criteria](#phase-2b-flip-criteria) (concrete numeric gates: 4 weeks under 5% wouldRejectRatio + ≥ 50 writes + search abstain ≤ 30%) are met. The `Phase 2b readiness` section in `wiki/evidence-report.md` is the live verdict. Section "Phase 0 — design" below is preserved as the original contract; downstream sections describe what shipped.**
 
 agent-wiki has accumulated many evidence-like features (raw provenance, frontmatter `sources`, COBOL lineage confidence tiers, graph edge evidence, lint, `raw_coverage`), but each tool exposes them differently. Agents using one tool's output have no reliable way to ask "is this match strong enough to act on?" The envelope is a unified contract every retrieval / query tool will adopt across the evidence-first program (#78).
 
@@ -149,6 +149,26 @@ The headline ratio is `(unsupportedWrites + rejectedWrites) / totalWrites` — *
 The ratio is omitted when the counter file is empty (early deployments would otherwise read as 0%).
 
 Without this hook in Phase 2a, Phase 2b is guesswork. Including it now means the data is collected from day one.
+
+## Phase 2b flip criteria
+
+Phase 2b ships disabled. The decision to flip `AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED=true` (or set `evidence.reject_unsupported_writes: true` in `.agent-wiki.yaml`) is gated on telemetry rather than vibe. The evidence report exposes a **Phase 2b readiness** section that evaluates the gates below against the rolling windows already populated by Phases 1–4. Status is one of `ready` / `not-ready` / `insufficient-data`.
+
+| Gate | Threshold | Window | Why this number |
+|------|-----------|--------|-----------------|
+| Total writes | ≥ 50 | last 4 weeks | Below 50 the ratio is too thin — one or two unsupported writes can flip a 0% week into 50%. Caught as `insufficient-data` rather than `not-ready`. |
+| Weekly `wouldRejectRatio` | < 5% per week | each of the last 4 weeks (weeks with 0 writes carry no signal and pass by default) | Per-week (not pooled) so a single bad week blocks the flip. Captures whether the unsupported rate is **sustained** low rather than averaged-low across a spike. |
+| Search abstain ratio | ≤ 30% | last 30 days, requires ≥ 10 searches | Phase 2b tightens the **supply** side of grounding (rejects unsupported writes). If search is already abstaining heavily, the corpus has retrieval problems too; flipping 2b in that state compounds the squeeze. Skipped when there isn't enough search activity to be meaningful. |
+
+The thresholds are conservative — false-positive `ready` would block legitimate writes, which is worse than waiting another week.
+
+**Workflow**:
+
+1. Operators run `wiki_admin --action evidence-report --write=true` (or pass `evidence_report=true` to `wiki_admin --action rebuild` to fold report regeneration into the rebuild) periodically — daily for active corpora, weekly otherwise.
+2. The rendered `wiki/evidence-report.md` shows the Phase 2b readiness verdict and per-gate pass/fail at the bottom. When `status: ready` and `currentlyEnabled: no`, the report includes the explicit `AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED=true` knob to flip.
+3. After flipping, the same gates keep monitoring — `currentlyEnabled: yes` plus continued passing gates is the steady state. If a regression pushes a gate back over its threshold while 2b is on, the report still shows the regression and operators decide whether to flip back to warn mode.
+
+These numbers can be revised once production data accumulates, but a revision is itself a deliberate change documented in this file rather than a silent constant change.
 
 ## Corpus-level evidence report (Phase 4)
 

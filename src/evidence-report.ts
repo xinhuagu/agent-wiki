@@ -78,12 +78,33 @@ export interface SearchTrust {
  * if the display window is widened. The min-writes threshold below is
  * calibrated to exactly this many weeks; any change here should be
  * paired with a re-calibration of `PHASE2B_MIN_TOTAL_WRITES`.
+ *
+ * Invariant (enforced by `pickGateBuckets`): must be ≤ WEEKS_OF_TREND,
+ * otherwise the gate's `slice(-N)` silently returns fewer buckets than
+ * intended and the threshold would become incorrectly easier to pass.
  */
 const PHASE2B_GATE_WEEKS = 4;
 const PHASE2B_MIN_TOTAL_WRITES = 50;
 const PHASE2B_MAX_WEEKLY_RATIO = 0.05;
 const PHASE2B_MAX_SEARCH_ABSTAIN_RATIO = 0.30;
 const PHASE2B_MIN_SEARCHES_FOR_GATE = 10;
+
+/**
+ * Canonical GitHub URL of the flip-criteria section, surfaced in the
+ * rendered report's "ready" tip. Lifted to module scope so a repo
+ * rename or fork only requires updating one literal. The test at
+ * `evidence-report.test.ts` pins this constant indirectly via the
+ * rendered output.
+ *
+ * Why absolute (not `../docs/...`): when `wiki/evidence-report.md`
+ * is rendered under a user-supplied wiki/ dir, the wiki dir's
+ * position relative to docs/ in `node_modules/@agent-wiki/mcp/` is
+ * not stable — there is no guaranteed sibling path the operator
+ * could click. (The npm package does ship `docs/` per package.json
+ * `files`, but at an unrelated location.)
+ */
+const FLIP_CRITERIA_URL =
+  "https://github.com/xinhuagu/agent-wiki/blob/main/docs/evidence-envelope.md#phase-2b-flip-criteria";
 
 /**
  * Phase 2b readiness — operationalises the "once the would-reject ratio
@@ -158,6 +179,26 @@ export function buildEvidenceReport(
   };
 }
 
+/**
+ * Take the most recent PHASE2B_GATE_WEEKS buckets, asserting the trend
+ * is wide enough to satisfy the gate. If `PHASE2B_GATE_WEEKS` is ever
+ * raised above `WEEKS_OF_TREND`, `slice(-N)` would silently return
+ * fewer buckets than the gate expects — failing loud here surfaces the
+ * calibration mismatch rather than letting the min-writes gate become
+ * incorrectly easier.
+ */
+function pickGateBuckets(trend: TrendBucket[]): TrendBucket[] {
+  if (PHASE2B_GATE_WEEKS > trend.length) {
+    throw new Error(
+      `PHASE2B_GATE_WEEKS (${PHASE2B_GATE_WEEKS}) exceeds the available ` +
+        `trend window (${trend.length}). aggregateTrend must return at ` +
+        `least PHASE2B_GATE_WEEKS buckets; widen WEEKS_OF_TREND or lower ` +
+        `the gate.`,
+    );
+  }
+  return trend.slice(-PHASE2B_GATE_WEEKS);
+}
+
 function assessPhase2bReadiness(
   wiki: Wiki,
   trend: TrendBucket[],
@@ -166,9 +207,7 @@ function assessPhase2bReadiness(
   const currentlyEnabled = wiki.config.evidence.rejectUnsupportedWrites;
   const reasons: string[] = [];
 
-  // Take the most recent PHASE2B_GATE_WEEKS buckets explicitly so the gate
-  // logic is independent of `aggregateTrend`'s display window.
-  const gateBuckets = trend.slice(-PHASE2B_GATE_WEEKS);
+  const gateBuckets = pickGateBuckets(trend);
 
   const totalWritesValue = gateBuckets.reduce((acc, b) => acc + b.totalWrites, 0);
   const totalWritesGate = {
@@ -220,16 +259,14 @@ function assessPhase2bReadiness(
         `Wait for more activity before flipping — the ratio is statistically thin.`,
     );
   }
-  // Typed predicate: weeks that fail the gate provably have a non-null
-  // ratio (a null ratio means totalWrites === 0, which passes by default).
-  // The narrowing removes the need for `w.ratio ?? 0` defensiveness below.
-  type FailingWeek = (typeof perWeek)[number] & { ratio: number };
-  const failingWeeks: FailingWeek[] = perWeek.filter(
-    (w): w is FailingWeek => !w.passing && w.ratio !== null,
-  );
+  // Invariant: `passing = ratio === null || ratio < threshold`, so `!passing`
+  // mathematically implies `ratio !== null`. The bang below documents the
+  // invariant at the use site; a discriminated union on passing would be
+  // more elaborate than this small block warrants.
+  const failingWeeks = perWeek.filter((w) => !w.passing);
   if (failingWeeks.length > 0) {
     const list = failingWeeks
-      .map((w) => `${w.weekStart} (${(w.ratio * 100).toFixed(1)}%)`)
+      .map((w) => `${w.weekStart} (${(w.ratio! * 100).toFixed(1)}%)`)
       .join(", ");
     reasons.push(
       `${failingWeeks.length} week(s) above ${(PHASE2B_MAX_WEEKLY_RATIO * 100).toFixed(0)}% wouldRejectRatio: ${list}.`,
@@ -687,16 +724,11 @@ export function renderEvidenceReport(report: EvidenceReport): string {
   }
 
   if (r.status === "ready" && !r.currentlyEnabled) {
-    // Absolute URL: this report is written under a user-supplied wiki/
-    // directory, and the rendered string also goes back to MCP clients
-    // inline; either way a `../docs/...` relative path dead-links because
-    // `docs/` doesn't ship with the npm package. Keep the link layer-
-    // agnostic by pointing at the canonical GitHub source.
     lines.push(
       `> All gates pass. To flip Phase 2b on, set ` +
         `\`AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED=true\` (env var) or ` +
         `\`evidence.reject_unsupported_writes: true\` in \`.agent-wiki.yaml\`. ` +
-        `See [Phase 2b flip criteria](https://github.com/xinhuagu/agent-wiki/blob/main/docs/evidence-envelope.md#phase-2b-flip-criteria) ` +
+        `See [Phase 2b flip criteria](${FLIP_CRITERIA_URL}) ` +
         `for the rationale.`,
     );
     lines.push("");
@@ -708,7 +740,19 @@ export function renderEvidenceReport(report: EvidenceReport): string {
 /**
  * Generate the report and optionally persist it. Returns the rendered
  * markdown so the MCP caller can also surface it inline.
+ *
+ * Overloads narrow `writtenTo` to `string` when `write: true` so callers
+ * (e.g. `regenerateEvidenceReport` in server.ts) can use the path without
+ * an unreachable fallback.
  */
+export function runEvidenceReport(
+  wiki: Wiki,
+  opts: { write: true; now?: Date },
+): { report: EvidenceReport; markdown: string; writtenTo: string };
+export function runEvidenceReport(
+  wiki: Wiki,
+  opts?: { write?: false; now?: Date },
+): { report: EvidenceReport; markdown: string; writtenTo?: undefined };
 export function runEvidenceReport(
   wiki: Wiki,
   opts: { write?: boolean; now?: Date } = {},

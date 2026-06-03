@@ -2348,6 +2348,10 @@ describe("consolidated tool: wiki_admin", () => {
     // The Phase 2b readiness section should appear in the persisted report.
     const content = readFileSync(reportPath, "utf-8");
     expect(content).toContain("## Phase 2b readiness");
+    // On success, no structured failure field is emitted — the field
+    // exists only when regen failed (parity with the batch path's
+    // deferred-entry mutation shape).
+    expect(parsed.evidenceReport).toBeUndefined();
   });
 
   it("action:rebuild without evidence_report leaves the report file untouched", async () => {

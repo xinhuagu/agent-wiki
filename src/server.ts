@@ -386,9 +386,9 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           "Wiki administration and maintenance. Select `action` to control behavior:\n" +
           "- `init`: Initialize a new knowledge base — creates wiki/, raw/, schemas/ directories and default templates.\n" +
           "- `config`: Show current workspace configuration: directories, lint settings, search settings, entity templates.\n" +
-          "- `rebuild`: Rebuild index.md, timeline.md, code knowledge graphs, and optionally the vector index (when search.hybrid is enabled).\n" +
+          "- `rebuild`: Rebuild index.md, timeline.md, code knowledge graphs, and optionally the vector index (when search.hybrid is enabled). Set evidence_report=true to also regenerate the evidence report and persist it to wiki/evidence-report.md as part of the rebuild.\n" +
           "- `lint`: Run comprehensive health checks: contradictions, orphan pages, broken links, raw file integrity (SHA-256), synthesis page integrity. Set apply_fixes=true to auto-repair fixable issues.\n" +
-          "- `evidence-report`: Aggregate evidence-first telemetry into a corpus-level Markdown report (source coverage, lineage diagnostics, 4-week write trend). Set write=true to also persist the report to wiki/evidence-report.md.",
+          "- `evidence-report`: Aggregate evidence-first telemetry into a corpus-level Markdown report (source coverage, lineage diagnostics, 4-week write trend, Phase 2b readiness gates). Set write=true to also persist the report to wiki/evidence-report.md.",
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -412,6 +412,10 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             write: {
               type: "boolean",
               description: "[evidence-report] If true, persist the report to wiki/evidence-report.md in addition to returning it. Default: false.",
+            },
+            evidence_report: {
+              type: "boolean",
+              description: "[rebuild] If true, also regenerate the evidence report and persist it to wiki/evidence-report.md as part of the rebuild. Useful for keeping the dashboard fresh without a separate evidence-report call. Default: false.",
             },
           },
           required: ["action"],
@@ -2461,6 +2465,20 @@ export async function handleTool(
           );
         }
       } catch { /* ignore */ }
+
+      // Opt-in: regenerate the evidence report alongside the rebuild so the
+      // dashboard stays fresh without a separate wiki_admin evidence-report
+      // call. Best-effort — never fails the rebuild.
+      let evidenceReportWritten: string | undefined;
+      if ((args.evidence_report as boolean) === true) {
+        try {
+          const er = runEvidenceReport(wiki, { write: true });
+          evidenceReportWritten = er.writtenTo;
+        } catch { /* ignore — evidence bookkeeping never fails a rebuild */ }
+      }
+      if (evidenceReportWritten) {
+        parts.push(`Evidence report written to ${evidenceReportWritten}`);
+      }
 
       return JSON.stringify({ ok: true, message: parts.join(". ") + "." });
     }

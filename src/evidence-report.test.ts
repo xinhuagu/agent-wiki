@@ -422,3 +422,169 @@ describe("runEvidenceReport — write flag", () => {
     );
   });
 });
+
+describe("buildEvidenceReport — Phase 2b readiness", () => {
+  const NOW = new Date("2026-05-08T00:00:00.000Z");
+
+  function fillWeek(workspace: string, weekStartISO: string, grounded: number, unsupported: number) {
+    const start = new Date(weekStartISO).getTime();
+    for (let i = 0; i < grounded; i++) {
+      appendWriteEvent(workspace, "grounded", new Date(start + 1000 * (i + 1)).toISOString());
+    }
+    for (let i = 0; i < unsupported; i++) {
+      appendWriteEvent(workspace, "unsupported", new Date(start + 1000 * (grounded + i + 1)).toISOString());
+    }
+  }
+
+  it("returns insufficient-data when total writes < 50", () => {
+    const wiki = freshWiki();
+    fillWeek(wiki.config.workspace, "2026-05-01", 5, 0);
+    const r = buildEvidenceReport(wiki, NOW).phase2bReadiness;
+    expect(r.status).toBe("insufficient-data");
+    expect(r.gates.totalWrites.passing).toBe(false);
+    expect(r.gates.totalWrites.value).toBe(5);
+    expect(r.gates.totalWrites.threshold).toBe(50);
+    expect(r.reasons.join(" ")).toMatch(/below threshold/);
+  });
+
+  it("returns ready when total writes ≥ 50 and all weekly ratios < 5%", () => {
+    const wiki = freshWiki();
+    // 4 × 31 grounded + 4 × 1 unsupported = 128 writes; per-week ratio 1/32 = 3.1% < 5%
+    fillWeek(wiki.config.workspace, "2026-04-10", 31, 1);
+    fillWeek(wiki.config.workspace, "2026-04-17", 31, 1);
+    fillWeek(wiki.config.workspace, "2026-04-24", 31, 1);
+    fillWeek(wiki.config.workspace, "2026-05-01", 31, 1);
+    const r = buildEvidenceReport(wiki, NOW).phase2bReadiness;
+    expect(r.status).toBe("ready");
+    expect(r.gates.totalWrites.passing).toBe(true);
+    expect(r.gates.weeklyRatio.passing).toBe(true);
+    expect(r.gates.weeklyRatio.perWeek.every((w) => w.passing)).toBe(true);
+    expect(r.reasons).toEqual([]);
+  });
+
+  it("returns not-ready when a single week exceeds the 5% threshold", () => {
+    const wiki = freshWiki();
+    fillWeek(wiki.config.workspace, "2026-04-10", 20, 0);
+    fillWeek(wiki.config.workspace, "2026-04-17", 20, 0);
+    fillWeek(wiki.config.workspace, "2026-04-24", 20, 0);
+    fillWeek(wiki.config.workspace, "2026-05-01", 20, 5); // 5/25 = 20%
+    const r = buildEvidenceReport(wiki, NOW).phase2bReadiness;
+    expect(r.status).toBe("not-ready");
+    expect(r.gates.totalWrites.passing).toBe(true);
+    expect(r.gates.weeklyRatio.passing).toBe(false);
+    const failing = r.gates.weeklyRatio.perWeek.filter((w) => !w.passing);
+    expect(failing).toHaveLength(1);
+    expect(failing[0]!.weekStart).toBe("2026-05-01");
+    expect(r.reasons.join(" ")).toMatch(/above 5%/);
+  });
+
+  it("passes weeks with 0 writes (no signal) — they don't block the gate", () => {
+    const wiki = freshWiki();
+    // Only the most recent week has activity; older weeks are empty.
+    fillWeek(wiki.config.workspace, "2026-05-01", 60, 1);
+    const r = buildEvidenceReport(wiki, NOW).phase2bReadiness;
+    expect(r.status).toBe("ready");
+    expect(r.gates.weeklyRatio.passing).toBe(true);
+    const empty = r.gates.weeklyRatio.perWeek.filter((w) => w.totalWrites === 0);
+    expect(empty.every((w) => w.passing)).toBe(true);
+    expect(empty.every((w) => w.ratio === null)).toBe(true);
+  });
+
+  it("skips the search abstain gate when fewer than 10 searches in window", () => {
+    const wiki = freshWiki();
+    fillWeek(wiki.config.workspace, "2026-04-10", 15, 0);
+    fillWeek(wiki.config.workspace, "2026-04-17", 15, 0);
+    fillWeek(wiki.config.workspace, "2026-04-24", 15, 0);
+    fillWeek(wiki.config.workspace, "2026-05-01", 15, 0);
+    // 5 searches, half abstaining — would be 50% if applied, but gate skips.
+    for (let i = 0; i < 5; i++) {
+      appendSearchEvent(wiki.config.workspace, {
+        timestamp: new Date(2026, 4, 1 + i).toISOString(),
+        abstainReason: i < 3 ? "below-floor" : null,
+        top1Score: 2.0, top1Top2Ratio: 1.5, confidence: "weak",
+      });
+    }
+    const r = buildEvidenceReport(wiki, NOW).phase2bReadiness;
+    expect(r.gates.searchAbstain.applicable).toBe(false);
+    expect(r.status).toBe("ready"); // skipped gate doesn't block readiness
+  });
+
+  it("returns not-ready when search abstain ratio > 30% (with enough searches)", () => {
+    const wiki = freshWiki();
+    fillWeek(wiki.config.workspace, "2026-04-10", 15, 0);
+    fillWeek(wiki.config.workspace, "2026-04-17", 15, 0);
+    fillWeek(wiki.config.workspace, "2026-04-24", 15, 0);
+    fillWeek(wiki.config.workspace, "2026-05-01", 15, 0);
+    // 20 searches, 12 abstaining = 60% > 30%
+    for (let i = 0; i < 20; i++) {
+      appendSearchEvent(wiki.config.workspace, {
+        timestamp: new Date(2026, 4, 1 + (i % 7)).toISOString(),
+        abstainReason: i < 12 ? "below-floor" : null,
+        top1Score: 2.0, top1Top2Ratio: 1.5, confidence: "weak",
+      });
+    }
+    const r = buildEvidenceReport(wiki, NOW).phase2bReadiness;
+    expect(r.status).toBe("not-ready");
+    expect(r.gates.searchAbstain.applicable).toBe(true);
+    if (r.gates.searchAbstain.applicable) {
+      expect(r.gates.searchAbstain.passing).toBe(false);
+      expect(r.gates.searchAbstain.value).toBeCloseTo(0.6);
+    }
+    expect(r.reasons.join(" ")).toMatch(/Search abstain ratio/);
+  });
+
+  it("currentlyEnabled mirrors wiki.config.evidence.rejectUnsupportedWrites", () => {
+    const wiki = freshWiki();
+    // Default config: Phase 2b off.
+    expect(buildEvidenceReport(wiki, NOW).phase2bReadiness.currentlyEnabled).toBe(false);
+    // Flip the config directly — this is what the env var resolves to at startup.
+    wiki.config.evidence.rejectUnsupportedWrites = true;
+    expect(buildEvidenceReport(wiki, NOW).phase2bReadiness.currentlyEnabled).toBe(true);
+  });
+});
+
+describe("renderEvidenceReport — Phase 2b readiness section", () => {
+  const NOW = new Date("2026-05-08T00:00:00.000Z");
+
+  it("emits the section header and current-state line in every report", () => {
+    const wiki = freshWiki();
+    const md = renderEvidenceReport(buildEvidenceReport(wiki, NOW));
+    expect(md).toContain("## Phase 2b readiness");
+    expect(md).toContain("Currently enabled: no");
+    expect(md).toMatch(/INSUFFICIENT DATA/);
+  });
+
+  it("renders per-week gate rows with pass/fail markers", () => {
+    const wiki = freshWiki();
+    for (let i = 0; i < 60; i++) {
+      appendWriteEvent(wiki.config.workspace, "grounded", "2026-05-02T00:00:00.000Z");
+    }
+    const md = renderEvidenceReport(buildEvidenceReport(wiki, NOW));
+    expect(md).toMatch(/READY/);
+    // Per-week table is the inset 2-space-indented table; check the most
+    // recent week row appears with its ratio shown.
+    expect(md).toMatch(/2026-05-01 \| 60 \| 0 \| 0\.0% \| ✓/);
+  });
+
+  it("includes the flip-instruction tip only when ready and not yet enabled", () => {
+    const wiki = freshWiki();
+    for (let i = 0; i < 60; i++) {
+      appendWriteEvent(wiki.config.workspace, "grounded", "2026-05-02T00:00:00.000Z");
+    }
+    const md = renderEvidenceReport(buildEvidenceReport(wiki, NOW));
+    expect(md).toContain("AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED=true");
+  });
+
+  it("omits the flip tip when Phase 2b is already enabled", () => {
+    const wiki = freshWiki();
+    wiki.config.evidence.rejectUnsupportedWrites = true;
+    for (let i = 0; i < 60; i++) {
+      appendWriteEvent(wiki.config.workspace, "grounded", "2026-05-02T00:00:00.000Z");
+    }
+    const md = renderEvidenceReport(buildEvidenceReport(wiki, NOW));
+    expect(md).toContain("Currently enabled: yes");
+    // The flip tip is a "> blockquote ... To flip Phase 2b on, set ..." — the
+    // section header always shows, but the tip should be absent.
+    expect(md).not.toMatch(/To flip Phase 2b on, set/);
+  });
+});

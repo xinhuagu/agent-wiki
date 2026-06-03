@@ -2332,6 +2332,31 @@ describe("consolidated tool: wiki_admin", () => {
     expect(parsed.writtenTo).toBeDefined();
     expect(existsSync(join(wiki.config.wikiDir, "evidence-report.md"))).toBe(true);
   });
+
+  it("action:rebuild with evidence_report:true also writes the evidence report", async () => {
+    const wiki = freshWiki();
+    const reportPath = join(wiki.config.wikiDir, "evidence-report.md");
+    expect(existsSync(reportPath)).toBe(false);
+    const result = await handleTool(wiki, "wiki_admin", {
+      action: "rebuild",
+      evidence_report: true,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.message).toMatch(/Evidence report written/);
+    expect(existsSync(reportPath)).toBe(true);
+    // The Phase 2b readiness section should appear in the persisted report.
+    const content = readFileSync(reportPath, "utf-8");
+    expect(content).toContain("## Phase 2b readiness");
+  });
+
+  it("action:rebuild without evidence_report leaves the report file untouched", async () => {
+    const wiki = freshWiki();
+    const reportPath = join(wiki.config.wikiDir, "evidence-report.md");
+    expect(existsSync(reportPath)).toBe(false);
+    await handleTool(wiki, "wiki_admin", { action: "rebuild" });
+    expect(existsSync(reportPath)).toBe(false);
+  });
 });
 
 describe("consolidated tool: code_query", () => {

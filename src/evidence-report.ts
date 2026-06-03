@@ -79,9 +79,11 @@ export interface SearchTrust {
  * calibrated to exactly this many weeks; any change here should be
  * paired with a re-calibration of `PHASE2B_MIN_TOTAL_WRITES`.
  *
- * Invariant (enforced by `pickGateBuckets`): must be ≤ WEEKS_OF_TREND,
- * otherwise the gate's `slice(-N)` silently returns fewer buckets than
- * intended and the threshold would become incorrectly easier to pass.
+ * Invariant (enforced inline in `assessPhase2bReadiness` by the
+ * `trend.length < PHASE2B_GATE_WEEKS` guard before the `slice(-N)`):
+ * must be ≤ `WEEKS_OF_TREND`, otherwise the slice silently returns
+ * fewer buckets than intended and the threshold would become
+ * incorrectly easier to pass.
  */
 const PHASE2B_GATE_WEEKS = 4;
 const PHASE2B_MIN_TOTAL_WRITES = 50;

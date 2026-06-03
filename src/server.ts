@@ -1803,6 +1803,25 @@ function readPagesContent(
   return pages;
 }
 
+/**
+ * Best-effort regeneration of `wiki/evidence-report.md`, used by the
+ * `wiki_admin action:rebuild evidence_report:true` flag on both the
+ * inline and batched code paths. The rebuild itself never fails on
+ * evidence bookkeeping, but the flag is operator-requested — both
+ * callers surface success or failure into their visible response so
+ * `ok:true` never implies the regen happened when it didn't.
+ */
+function regenerateEvidenceReport(
+  wiki: Wiki,
+): { ok: true; writtenTo: string } | { ok: false; error: string } {
+  try {
+    const er = runEvidenceReport(wiki, { write: true });
+    return { ok: true, writtenTo: er.writtenTo ?? "wiki/evidence-report.md" };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export async function handleTool(
   wiki: Wiki,
   name: string,
@@ -2316,7 +2335,10 @@ export async function handleTool(
     }
 
     case "wiki_evidence_report": {
-      const write = (args.write as boolean) ?? false;
+      // Strict boolean match — mirrors the batch-handler coercion at the
+      // wiki_admin rebuild evidence_report:true sniff so the two flags
+      // agree on what "true" means for direct (non-MCP) callers too.
+      const write = args.write === true;
       const result = runEvidenceReport(wiki, { write });
       return JSON.stringify({
         report: result.report,
@@ -2468,19 +2490,13 @@ export async function handleTool(
 
       // Opt-in: regenerate the evidence report alongside the rebuild so the
       // dashboard stays fresh without a separate wiki_admin evidence-report
-      // call. The rebuild itself never fails on evidence bookkeeping, but
-      // since this flag is operator-requested (vs. silent telemetry), we
-      // surface the failure in `parts` instead of swallowing it — otherwise
-      // ok:true would imply the regen happened when it didn't.
-      const wantEvidenceReport = (args.evidence_report as boolean) ?? false;
-      if (wantEvidenceReport) {
-        try {
-          const er = runEvidenceReport(wiki, { write: true });
-          parts.push(`Evidence report written to ${er.writtenTo}`);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          parts.push(`Evidence report regeneration failed: ${msg}`);
-        }
+      // call. See regenerateEvidenceReport's docblock for the operator-
+      // surface-failure contract; the batch path mirrors this exact shape.
+      if (args.evidence_report === true) {
+        const evResult = regenerateEvidenceReport(wiki);
+        parts.push(evResult.ok
+          ? `Evidence report written to ${evResult.writtenTo}`
+          : `Evidence report regeneration failed: ${evResult.error}`);
       }
 
       return JSON.stringify({ ok: true, message: parts.join(". ") + "." });
@@ -3172,9 +3188,18 @@ export async function handleTool(
         if (needsTimeline) wiki.rebuildTimeline(pageCache);
       }
       if (needsEvidenceReport) {
-        try {
-          runEvidenceReport(wiki, { write: true });
-        } catch { /* best-effort, mirrors the inline rebuild path's tolerance */ }
+        // Surface failure as a follow-up result entry so the batch caller
+        // sees the partial-success state. Mirrors the inline rebuild path,
+        // which pushes the same string into `parts` (see
+        // regenerateEvidenceReport's docblock). On success the report
+        // file presence is the operator's signal — no extra entry needed.
+        const evResult = regenerateEvidenceReport(wiki);
+        if (!evResult.ok) {
+          results.push({
+            tool: "wiki_admin",
+            warning: `Evidence report regeneration failed: ${evResult.error}`,
+          });
+        }
       }
 
       return JSON.stringify({ results, count: results.length }, null, 2);

@@ -81,6 +81,15 @@ export interface SearchTrust {
  * block legitimate writes. See docs/evidence-envelope.md "Phase 2b flip
  * criteria" for the rationale.
  */
+/**
+ * The number of weekly buckets the gates evaluate. Decoupled from the
+ * `WEEKS_OF_TREND` constant that drives the cosmetic "Trend (last N
+ * weeks)" sparkline so the gate's calibration doesn't silently change
+ * if the display window is widened. The min-writes threshold below is
+ * calibrated to exactly this many weeks; any change here should be
+ * paired with a re-calibration of `PHASE2B_MIN_TOTAL_WRITES`.
+ */
+const PHASE2B_GATE_WEEKS = 4;
 const PHASE2B_MIN_TOTAL_WRITES = 50;
 const PHASE2B_MAX_WEEKLY_RATIO = 0.05;
 const PHASE2B_MAX_SEARCH_ABSTAIN_RATIO = 0.30;
@@ -157,14 +166,18 @@ function assessPhase2bReadiness(
   const currentlyEnabled = wiki.config.evidence.rejectUnsupportedWrites;
   const reasons: string[] = [];
 
-  const totalWritesValue = trend.reduce((acc, b) => acc + b.totalWrites, 0);
+  // Take the most recent PHASE2B_GATE_WEEKS buckets explicitly so the gate
+  // logic is independent of `aggregateTrend`'s display window.
+  const gateBuckets = trend.slice(-PHASE2B_GATE_WEEKS);
+
+  const totalWritesValue = gateBuckets.reduce((acc, b) => acc + b.totalWrites, 0);
   const totalWritesGate = {
     value: totalWritesValue,
     threshold: PHASE2B_MIN_TOTAL_WRITES,
     passing: totalWritesValue >= PHASE2B_MIN_TOTAL_WRITES,
   };
 
-  const perWeek = trend.map((b) => {
+  const perWeek = gateBuckets.map((b) => {
     const ratio = b.totalWrites === 0 ? null : b.unsupportedOrRejected / b.totalWrites;
     // A week with no writes carries no signal — it neither confirms nor refutes
     // readiness, so it passes by default. The totalWrites gate catches the
@@ -207,10 +220,16 @@ function assessPhase2bReadiness(
         `Wait for more activity before flipping — the ratio is statistically thin.`,
     );
   }
-  const failingWeeks = perWeek.filter((w) => !w.passing);
+  // Typed predicate: weeks that fail the gate provably have a non-null
+  // ratio (a null ratio means totalWrites === 0, which passes by default).
+  // The narrowing removes the need for `w.ratio ?? 0` defensiveness below.
+  type FailingWeek = (typeof perWeek)[number] & { ratio: number };
+  const failingWeeks: FailingWeek[] = perWeek.filter(
+    (w): w is FailingWeek => !w.passing && w.ratio !== null,
+  );
   if (failingWeeks.length > 0) {
     const list = failingWeeks
-      .map((w) => `${w.weekStart} (${((w.ratio ?? 0) * 100).toFixed(1)}%)`)
+      .map((w) => `${w.weekStart} (${(w.ratio * 100).toFixed(1)}%)`)
       .join(", ");
     reasons.push(
       `${failingWeeks.length} week(s) above ${(PHASE2B_MAX_WEEKLY_RATIO * 100).toFixed(0)}% wouldRejectRatio: ${list}.`,
@@ -668,11 +687,16 @@ export function renderEvidenceReport(report: EvidenceReport): string {
   }
 
   if (r.status === "ready" && !r.currentlyEnabled) {
+    // Absolute URL: this report is written under a user-supplied wiki/
+    // directory, and the rendered string also goes back to MCP clients
+    // inline; either way a `../docs/...` relative path dead-links because
+    // `docs/` doesn't ship with the npm package. Keep the link layer-
+    // agnostic by pointing at the canonical GitHub source.
     lines.push(
       `> All gates pass. To flip Phase 2b on, set ` +
         `\`AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED=true\` (env var) or ` +
         `\`evidence.reject_unsupported_writes: true\` in \`.agent-wiki.yaml\`. ` +
-        `See [Phase 2b flip criteria](../docs/evidence-envelope.md#phase-2b-flip-criteria) ` +
+        `See [Phase 2b flip criteria](https://github.com/xinhuagu/agent-wiki/blob/main/docs/evidence-envelope.md#phase-2b-flip-criteria) ` +
         `for the rationale.`,
     );
     lines.push("");

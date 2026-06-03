@@ -579,6 +579,11 @@ describe("renderEvidenceReport — Phase 2b readiness section", () => {
     // on a recognised setting rather than a silently-ignored typo.
     expect(md).toContain("evidence.reject_unsupported_writes: true");
     expect(md).not.toContain("evidence.rejectUnsupportedWrites");
+    // The flip-criteria link must be an absolute URL — `../docs/...` would
+    // dead-link when wiki/evidence-report.md ships under a user-supplied
+    // wiki/ dir (docs/ is not in the npm package).
+    expect(md).toContain("https://github.com/xinhuagu/agent-wiki/blob/main/docs/evidence-envelope.md");
+    expect(md).not.toMatch(/\(\.\.\/docs\//);
   });
 
   it("omits the flip tip when Phase 2b is already enabled", () => {

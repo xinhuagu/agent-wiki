@@ -1815,9 +1815,13 @@ function regenerateEvidenceReport(
   wiki: Wiki,
 ): { ok: true; writtenTo: string } | { ok: false; error: string } {
   try {
-    // The `write: true` overload narrows `writtenTo` to `string`, so no
-    // unreachable fallback is needed here.
     const er = runEvidenceReport(wiki, { write: true });
+    // `write: true` always sets `writtenTo`; the null-check is here only
+    // because the public signature keeps `writtenTo?: string` rather than
+    // paying for overloads to narrow it for a single caller.
+    if (!er.writtenTo) {
+      return { ok: false, error: "runEvidenceReport(write:true) returned no writtenTo path" };
+    }
     return { ok: true, writtenTo: er.writtenTo };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -2399,11 +2403,7 @@ export async function handleTool(
 
     case "wiki_evidence_report": {
       const write = (args.write as boolean) ?? false;
-      // Split the branch so the call resolves to one of the narrowed
-      // overloads (write:true narrows writtenTo to string).
-      const result = write
-        ? runEvidenceReport(wiki, { write: true })
-        : runEvidenceReport(wiki, { write: false });
+      const result = runEvidenceReport(wiki, { write });
       return JSON.stringify({
         report: result.report,
         markdown: result.markdown,
@@ -3240,6 +3240,10 @@ export async function handleTool(
       if (needsRebuild) {
         const pageCache = wiki.buildPageCache();
         wiki.rebuildIndex(pageCache);
+        // Yield to the event loop so the MCP transport can answer client
+        // pings between the two rebuilds. Mirrors the inline rebuild path
+        // (relevant on slow filesystems like OneDrive-synced workspaces).
+        await new Promise((r) => setImmediate(r));
         if (needsTimeline) wiki.rebuildTimeline(pageCache);
         // Single source of truth for migration + weekly log + optional
         // regen — same helper the inline rebuild path uses, so the two

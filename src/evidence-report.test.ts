@@ -15,15 +15,27 @@ import {
 } from "./evidence-report.js";
 
 let testRoot: string;
+let savedRejectEnv: string | undefined;
 function freshWiki(): Wiki {
   return Wiki.init(testRoot);
 }
 
 beforeEach(() => {
   testRoot = mkdtempSync(join(tmpdir(), "evidence-report-"));
+  // Isolate from any developer/CI shell that has set the env var (this
+  // PR explicitly documents it as an operator knob). Otherwise tests
+  // asserting `currentlyEnabled: false` or render output without the
+  // "Currently enabled: yes" line fail spuriously.
+  savedRejectEnv = process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+  delete process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
 });
 afterEach(() => {
   rmSync(testRoot, { recursive: true, force: true });
+  if (savedRejectEnv === undefined) {
+    delete process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED;
+  } else {
+    process.env.AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED = savedRejectEnv;
+  }
 });
 
 describe("buildEvidenceReport — source coverage", () => {

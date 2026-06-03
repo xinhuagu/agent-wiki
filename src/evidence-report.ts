@@ -179,26 +179,6 @@ export function buildEvidenceReport(
   };
 }
 
-/**
- * Take the most recent PHASE2B_GATE_WEEKS buckets, asserting the trend
- * is wide enough to satisfy the gate. If `PHASE2B_GATE_WEEKS` is ever
- * raised above `WEEKS_OF_TREND`, `slice(-N)` would silently return
- * fewer buckets than the gate expects — failing loud here surfaces the
- * calibration mismatch rather than letting the min-writes gate become
- * incorrectly easier.
- */
-function pickGateBuckets(trend: TrendBucket[]): TrendBucket[] {
-  if (PHASE2B_GATE_WEEKS > trend.length) {
-    throw new Error(
-      `PHASE2B_GATE_WEEKS (${PHASE2B_GATE_WEEKS}) exceeds the available ` +
-        `trend window (${trend.length}). aggregateTrend must return at ` +
-        `least PHASE2B_GATE_WEEKS buckets; widen WEEKS_OF_TREND or lower ` +
-        `the gate.`,
-    );
-  }
-  return trend.slice(-PHASE2B_GATE_WEEKS);
-}
-
 function assessPhase2bReadiness(
   wiki: Wiki,
   trend: TrendBucket[],
@@ -207,7 +187,14 @@ function assessPhase2bReadiness(
   const currentlyEnabled = wiki.config.evidence.rejectUnsupportedWrites;
   const reasons: string[] = [];
 
-  const gateBuckets = pickGateBuckets(trend);
+  // Inline guard so a future bump of PHASE2B_GATE_WEEKS past WEEKS_OF_TREND
+  // fails loud instead of silently making the gate easier to pass.
+  if (trend.length < PHASE2B_GATE_WEEKS) {
+    throw new Error(
+      `Trend window (${trend.length}) shorter than PHASE2B_GATE_WEEKS (${PHASE2B_GATE_WEEKS}); widen WEEKS_OF_TREND.`,
+    );
+  }
+  const gateBuckets = trend.slice(-PHASE2B_GATE_WEEKS);
 
   const totalWritesValue = gateBuckets.reduce((acc, b) => acc + b.totalWrites, 0);
   const totalWritesGate = {
@@ -739,20 +726,10 @@ export function renderEvidenceReport(report: EvidenceReport): string {
 
 /**
  * Generate the report and optionally persist it. Returns the rendered
- * markdown so the MCP caller can also surface it inline.
- *
- * Overloads narrow `writtenTo` to `string` when `write: true` so callers
- * (e.g. `regenerateEvidenceReport` in server.ts) can use the path without
- * an unreachable fallback.
+ * markdown so the MCP caller can also surface it inline. `writtenTo` is
+ * set when `write: true`; callers that need it as a non-optional string
+ * should null-check at the use site.
  */
-export function runEvidenceReport(
-  wiki: Wiki,
-  opts: { write: true; now?: Date },
-): { report: EvidenceReport; markdown: string; writtenTo: string };
-export function runEvidenceReport(
-  wiki: Wiki,
-  opts?: { write?: false; now?: Date },
-): { report: EvidenceReport; markdown: string; writtenTo?: undefined };
 export function runEvidenceReport(
   wiki: Wiki,
   opts: { write?: boolean; now?: Date } = {},

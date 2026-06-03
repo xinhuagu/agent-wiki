@@ -81,25 +81,27 @@ export interface SearchTrust {
  * block legitimate writes. See docs/evidence-envelope.md "Phase 2b flip
  * criteria" for the rationale.
  */
-export const PHASE2B_MIN_TOTAL_WRITES = 50;
-export const PHASE2B_MAX_WEEKLY_RATIO = 0.05;
-export const PHASE2B_MAX_SEARCH_ABSTAIN_RATIO = 0.30;
-export const PHASE2B_MIN_SEARCHES_FOR_GATE = 10;
+const PHASE2B_MIN_TOTAL_WRITES = 50;
+const PHASE2B_MAX_WEEKLY_RATIO = 0.05;
+const PHASE2B_MAX_SEARCH_ABSTAIN_RATIO = 0.30;
+const PHASE2B_MIN_SEARCHES_FOR_GATE = 10;
 
 export interface Phase2bReadiness {
   status: "ready" | "not-ready" | "insufficient-data";
   /** Already-enabled state from `wiki.config.evidence.rejectUnsupportedWrites`. */
   currentlyEnabled: boolean;
-  /** Per-gate verdicts. A gate with `applicable: false` is skipped from the status decision. */
+  /**
+   * Per-gate verdicts. `totalWrites` and `weeklyRatio` always evaluate;
+   * `searchAbstain` may report `applicable: false` when the 30-day search
+   * volume is too low for the gate to be meaningful.
+   */
   gates: {
     totalWrites: {
-      applicable: true;
       value: number;
       threshold: number;
       passing: boolean;
     };
     weeklyRatio: {
-      applicable: true;
       threshold: number;
       perWeek: Array<{
         weekStart: string;
@@ -157,7 +159,6 @@ function assessPhase2bReadiness(
 
   const totalWritesValue = trend.reduce((acc, b) => acc + b.totalWrites, 0);
   const totalWritesGate = {
-    applicable: true as const,
     value: totalWritesValue,
     threshold: PHASE2B_MIN_TOTAL_WRITES,
     passing: totalWritesValue >= PHASE2B_MIN_TOTAL_WRITES,
@@ -178,7 +179,6 @@ function assessPhase2bReadiness(
     };
   });
   const weeklyRatioGate = {
-    applicable: true as const,
     threshold: PHASE2B_MAX_WEEKLY_RATIO,
     perWeek,
     passing: perWeek.every((w) => w.passing),
@@ -618,7 +618,9 @@ export function renderEvidenceReport(report: EvidenceReport): string {
     : r.status === "not-ready" ? "NOT READY — see reasons below"
     : "INSUFFICIENT DATA — too few writes to judge yet";
   lines.push(`- Status: **${statusLabel}**`);
-  lines.push(`- Currently enabled: ${r.currentlyEnabled ? "yes (\`AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED=true\`)" : "no"}`);
+  // `currentlyEnabled` resolves from env var OR YAML config; don't attribute
+  // to one specific knob since the operator may have flipped either.
+  lines.push(`- Currently enabled: ${r.currentlyEnabled ? "yes" : "no"}`);
   lines.push("");
 
   lines.push(`### Gates`);
@@ -669,7 +671,7 @@ export function renderEvidenceReport(report: EvidenceReport): string {
     lines.push(
       `> All gates pass. To flip Phase 2b on, set ` +
         `\`AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED=true\` (env var) or ` +
-        `\`evidence.rejectUnsupportedWrites: true\` in \`.agent-wiki.yaml\`. ` +
+        `\`evidence.reject_unsupported_writes: true\` in \`.agent-wiki.yaml\`. ` +
         `See [Phase 2b flip criteria](../docs/evidence-envelope.md#phase-2b-flip-criteria) ` +
         `for the rationale.`,
     );

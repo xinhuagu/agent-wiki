@@ -152,7 +152,7 @@ Without this hook in Phase 2a, Phase 2b is guesswork. Including it now means the
 
 ## Phase 2b flip criteria
 
-Phase 2b ships disabled. The decision to flip `AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED=true` (or set `evidence.rejectUnsupportedWrites: true` in `.agent-wiki.yaml`) is gated on telemetry rather than vibe. The evidence report exposes a **Phase 2b readiness** section that evaluates the gates below against the rolling windows already populated by Phases 1–4. Status is one of `ready` / `not-ready` / `insufficient-data`.
+Phase 2b ships disabled. The decision to flip `AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED=true` (or set `evidence.reject_unsupported_writes: true` in `.agent-wiki.yaml`) is gated on telemetry rather than vibe. The evidence report exposes a **Phase 2b readiness** section that evaluates the gates below against the rolling windows already populated by Phases 1–4. Status is one of `ready` / `not-ready` / `insufficient-data`.
 
 | Gate | Threshold | Window | Why this number |
 |------|-----------|--------|-----------------|

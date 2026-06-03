@@ -2468,16 +2468,19 @@ export async function handleTool(
 
       // Opt-in: regenerate the evidence report alongside the rebuild so the
       // dashboard stays fresh without a separate wiki_admin evidence-report
-      // call. Best-effort — never fails the rebuild.
-      let evidenceReportWritten: string | undefined;
-      if ((args.evidence_report as boolean) === true) {
+      // call. The rebuild itself never fails on evidence bookkeeping, but
+      // since this flag is operator-requested (vs. silent telemetry), we
+      // surface the failure in `parts` instead of swallowing it — otherwise
+      // ok:true would imply the regen happened when it didn't.
+      const wantEvidenceReport = (args.evidence_report as boolean) ?? false;
+      if (wantEvidenceReport) {
         try {
           const er = runEvidenceReport(wiki, { write: true });
-          evidenceReportWritten = er.writtenTo;
-        } catch { /* ignore — evidence bookkeeping never fails a rebuild */ }
-      }
-      if (evidenceReportWritten) {
-        parts.push(`Evidence report written to ${evidenceReportWritten}`);
+          parts.push(`Evidence report written to ${er.writtenTo}`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          parts.push(`Evidence report regeneration failed: ${msg}`);
+        }
       }
 
       return JSON.stringify({ ok: true, message: parts.join(". ") + "." });
@@ -3093,6 +3096,10 @@ export async function handleTool(
       let needsRebuild = false;
       let needsTimeline = false;
       let needsGraphRebuild = false;
+      // Carries through any `wiki_admin action:rebuild evidence_report:true`
+      // op from this batch — the end-of-batch rebuild block below regenerates
+      // the report once so the opt-in flag survives dedup.
+      let needsEvidenceReport = false;
 
       const results: Array<Record<string, unknown>> = [];
       for (const op of ops) {
@@ -3106,6 +3113,7 @@ export async function handleTool(
         if (isRebuild) {
           needsRebuild = true;
           needsTimeline = true;
+          if (op.args?.evidence_report === true) needsEvidenceReport = true;
           results.push({ tool: op.tool, result: { ok: true, deferred: "merged into end-of-batch rebuild" } });
           continue;
         }
@@ -3162,6 +3170,11 @@ export async function handleTool(
         const pageCache = wiki.buildPageCache();
         wiki.rebuildIndex(pageCache);
         if (needsTimeline) wiki.rebuildTimeline(pageCache);
+      }
+      if (needsEvidenceReport) {
+        try {
+          runEvidenceReport(wiki, { write: true });
+        } catch { /* best-effort, mirrors the inline rebuild path's tolerance */ }
       }
 
       return JSON.stringify({ results, count: results.length }, null, 2);

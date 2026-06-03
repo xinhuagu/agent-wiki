@@ -3038,4 +3038,31 @@ Extra content.` } },
     const rebuildResult = parsed.results.find((r: any) => r.tool === "wiki_admin");
     expect(rebuildResult?.result?.deferred).toMatch(/rebuild/);
   });
+
+  it("batch preserves evidence_report:true on deduped wiki_admin rebuild", async () => {
+    // Regression: dedup originally stripped the flag and the end-of-batch
+    // path only ran rebuildIndex+rebuildTimeline, so wiki/evidence-report.md
+    // never appeared even though the standalone call did write it.
+    const wiki = freshWiki();
+    const reportPath = join(wiki.config.wikiDir, "evidence-report.md");
+    expect(existsSync(reportPath)).toBe(false);
+    await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_admin", args: { action: "rebuild", evidence_report: true } },
+      ],
+    });
+    expect(existsSync(reportPath)).toBe(true);
+    expect(readFileSync(reportPath, "utf-8")).toContain("## Phase 2b readiness");
+  });
+
+  it("batch leaves report untouched when evidence_report flag is absent on rebuild", async () => {
+    const wiki = freshWiki();
+    const reportPath = join(wiki.config.wikiDir, "evidence-report.md");
+    await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_admin", args: { action: "rebuild" } },
+      ],
+    });
+    expect(existsSync(reportPath)).toBe(false);
+  });
 });

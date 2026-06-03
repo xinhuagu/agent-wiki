@@ -561,9 +561,10 @@ describe("renderEvidenceReport — Phase 2b readiness section", () => {
     }
     const md = renderEvidenceReport(buildEvidenceReport(wiki, NOW));
     expect(md).toMatch(/READY/);
-    // Per-week table is the inset 2-space-indented table; check the most
-    // recent week row appears with its ratio shown.
-    expect(md).toMatch(/2026-05-01 \| 60 \| 0 \| 0\.0% \| ✓/);
+    // Per-week table is inset under the gate bullet; the 2-space indent is
+    // load-bearing for Markdown nested-table rendering, so anchor the full
+    // line shape (leading indent + trailing pipe).
+    expect(md).toMatch(/^ {2}\| 2026-05-01 \| 60 \| 0 \| 0\.0% \| ✓ \|$/m);
   });
 
   it("includes the flip-instruction tip only when ready and not yet enabled", () => {
@@ -573,6 +574,11 @@ describe("renderEvidenceReport — Phase 2b readiness section", () => {
     }
     const md = renderEvidenceReport(buildEvidenceReport(wiki, NOW));
     expect(md).toContain("AGENT_WIKI_EVIDENCE_REJECT_UNSUPPORTED=true");
+    // YAML loader uses snake_case (src/wiki.ts: evidenceData.reject_unsupported_writes).
+    // The flip tip must show that exact key so operators copy-pasting it land
+    // on a recognised setting rather than a silently-ignored typo.
+    expect(md).toContain("evidence.reject_unsupported_writes: true");
+    expect(md).not.toContain("evidence.rejectUnsupportedWrites");
   });
 
   it("omits the flip tip when Phase 2b is already enabled", () => {

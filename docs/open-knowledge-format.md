@@ -4,6 +4,9 @@ This document defines the Open Knowledge Format direction for `agent-wiki`.
 
 The name intentionally borrows from the Open Knowledge Foundation's open knowledge principles, not from a Google product. Google Data Commons and recent LLM-Wiki research are important adjacent references, but `agent-wiki` should define its own Git-native package format for agent-maintained knowledge.
 
+For the current-state audit, feasibility assessment, and phased implementation
+plan, see [`okf-adoption-plan.md`](okf-adoption-plan.md).
+
 ## Position
 
 `agent-wiki` should become:

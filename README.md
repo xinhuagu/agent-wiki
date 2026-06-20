@@ -6,6 +6,8 @@ Instead of retrieving raw fragments every query (RAG), your agent compiles, refi
 
 Works with Claude Code, Cursor, Windsurf, and any MCP client. Also installable as a native skill for Claude Code. No LLM built in — your agent IS the intelligence.
 
+agent-wiki is also evolving into the reference implementation of **Open Knowledge Format (OKF)**: a Git-native package format for agent-maintained knowledge with immutable source evidence, mutable compiled pages, schemas, indexes, evidence metadata, and machine-checkable governance.
+
 [![npm](https://img.shields.io/npm/v/@agent-wiki/mcp?label=%40agent-wiki%2Fmcp)](https://www.npmjs.com/package/@agent-wiki/mcp)
 [![CI](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml/badge.svg)](https://github.com/xinhuagu/agent-wiki/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
@@ -98,6 +100,7 @@ That's it. Your agent now has a persistent, structured knowledge base.
 | **Language Plugins** | Deterministic parsers + cross-file knowledge graphs for legacy code. **COBOL** shipped with field lineage in three families (shared-copybook reuse, `CALL ... USING` boundary, cross-program DB2 flow), DB2 column-level pairing, dynamic CALL resolution, and a precision / recall eval harness. **JCL** planned. See [Language Plugins](#language-plugins) below. |
 | **Skill Install** | One-command install as native skill for Claude Code and compatible clients |
 | **Git-Native** | Plain Markdown — diffable, blameable, revertable |
+| **Open Knowledge Format (OKF)** | Directional package contract: `agent-wiki.yaml` manifest, immutable `raw/`, mutable `wiki/`, schemas, rebuildable indexes, evidence artifacts, and conformance checks. See [OKF Adoption Plan](docs/okf-adoption-plan.md). |
 | **3D Graph Viewer** | Built-in — realtime 3D graph of pages and `[[wikilinks]]`, edits push live over SSE. Run `agent-wiki web`. |
 
 ## Architecture
@@ -113,6 +116,25 @@ Three immutability layers, inspired by how compilers work:
 <p align="center">
   <img src="architecture.svg" alt="agent-wiki architecture" width="700" />
 </p>
+
+### Open Knowledge Format (OKF)
+
+The same layers are being formalized as OKF: a portable knowledge package that another agent or tool can inspect without a hosted service.
+
+```text
+agent-wiki-package/
+  agent-wiki.yaml   # portable package manifest
+  raw/              # immutable source evidence
+  wiki/             # mutable compiled knowledge
+  schemas/          # page/entity contracts
+  indexes/          # rebuildable search/graph artifacts
+  evidence/         # provenance, confidence, coverage, page classes
+  logs/             # optional operational telemetry
+```
+
+Important distinction: `.agent-wiki.yaml` remains runtime/operator config; `agent-wiki.yaml` is the proposed portable OKF manifest. The first OKF milestone is a manifest schema plus `wiki_admin action: "format-check"` so the format is executable, not only documented.
+
+See [Open Knowledge Format](docs/open-knowledge-format.md) for the thesis and [OKF Adoption Plan](docs/okf-adoption-plan.md) for the implementation plan and feasibility assessment.
 
 ## Design Principles
 
@@ -180,6 +202,7 @@ See [Search configuration](docs/tools.md#hybrid-bm25vector-search) for weight tu
 - [Configuration, CLI & Security](docs/configuration.md)
 - [Request Optimization — Batch Digest, Pagination, Context Limits](docs/request-optimization.md)
 - [Open Knowledge Format — Git-native knowledge packages for agents](docs/open-knowledge-format.md)
+- [OKF Adoption Plan — feasibility, current-state audit, and implementation plan](docs/okf-adoption-plan.md)
 
 ## Acknowledgment
 

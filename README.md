@@ -179,6 +179,7 @@ See [Search configuration](docs/tools.md#hybrid-bm25vector-search) for weight tu
 - [MCP Tools (15 public tools) & Entity Types](docs/tools.md)
 - [Configuration, CLI & Security](docs/configuration.md)
 - [Request Optimization — Batch Digest, Pagination, Context Limits](docs/request-optimization.md)
+- [Open Knowledge Format — Git-native knowledge packages for agents](docs/open-knowledge-format.md)
 
 ## Acknowledgment
 

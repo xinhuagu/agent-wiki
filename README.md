@@ -132,7 +132,7 @@ agent-wiki-package/
   logs/             # optional operational telemetry
 ```
 
-Important distinction: `.agent-wiki.yaml` remains runtime/operator config; `agent-wiki.yaml` is the proposed portable OKF manifest. The first OKF milestone is a manifest schema plus `wiki_admin action: "format-check"` so the format is executable, not only documented.
+Important distinction: `.agent-wiki.yaml` remains runtime/operator config; `agent-wiki.yaml` is the portable OKF manifest. The first OKF milestone is implemented as `schemas/agent-wiki-okf.schema.json` plus `wiki_admin action: "format-check"` so the format is executable, not only documented.
 
 See [Open Knowledge Format](docs/open-knowledge-format.md) for the thesis and [OKF Adoption Plan](docs/okf-adoption-plan.md) for the implementation plan and feasibility assessment.
 

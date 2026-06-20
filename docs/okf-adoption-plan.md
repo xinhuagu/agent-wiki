@@ -398,13 +398,15 @@ Acceptance criteria:
 
 ### Phase 1 - Manifest And Schema
 
+Status: implemented for OKF v0.1.
+
 Goal: make an OKF package detectable and machine-checkable without changing
 runtime behavior.
 
 Deliverables:
 
-- Add `schemas/agent-wiki-okf.schema.json`.
-- Add `agent-wiki.yaml` manifest support.
+- Add `schemas/agent-wiki-okf.schema.json`. Done.
+- Add `agent-wiki.yaml` manifest support. Done.
 - Add a manifest loader that validates:
   - `format`
   - `format_version`
@@ -413,13 +415,14 @@ Deliverables:
   - `license`
   - `owner`
   - source/wiki/evidence policies
-- Add `wiki_admin action: "format-check"`.
+- Add `wiki_admin action: "format-check"`. Done.
 
 Acceptance criteria:
 
-- A valid OKF fixture passes `format-check`.
-- Invalid manifest fields fail with actionable errors.
-- Existing users without `agent-wiki.yaml` continue to work.
+- A valid OKF fixture passes `format-check`. Covered by tests.
+- Invalid manifest fields fail with actionable errors. Covered by tests.
+- Existing users without `agent-wiki.yaml` continue to work. `format-check`
+  returns `ok: false` with issues instead of blocking normal wiki operations.
 - `wiki_admin action: "lint"` remains backward compatible.
 
 ### Phase 2 - Package Inventory And Conformance Report
@@ -521,26 +524,27 @@ Suggested README positioning:
 
 ## Recommended Next Engineering Issue
 
-Start with Phase 1.
+Start with Phase 2.
 
 Issue title:
 
-> Add OKF v0.1 manifest schema and format-check action
+> Add OKF package inventory and conformance report
 
 Scope:
 
-- create `schemas/agent-wiki-okf.schema.json`
-- add manifest loader
-- add `wiki_admin action: "format-check"`
-- add one valid fixture and three invalid fixtures
-- document the command in `docs/tools.md`
+- generate `evidence/okf-report.json` or `okf-report.md`
+- include raw count/hash status, wiki page classes, schema list, generated index
+  inventory, and evidence report presence
+- extend `wiki_admin action: "rebuild"` with optional OKF metadata refresh
+- add tests for grounded, synthesis, unsupported, stale, and missing-source cases
+- document the report fields in `docs/tools.md`
 
 Why this first:
 
-- It is small enough to ship quickly.
-- It makes OKF executable rather than only conceptual.
-- It does not disrupt current users.
-- It creates the anchor needed for export/import later.
+- Phase 1 already makes OKF detectable.
+- Phase 2 makes OKF auditable as a package, not only valid as a manifest.
+- It creates the evidence artifact export/import will later move across machines.
+- It keeps generated caches optional while making package health measurable.
 
 ## References
 

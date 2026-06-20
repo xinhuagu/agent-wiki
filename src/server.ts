@@ -22,6 +22,7 @@ import { appendSearchEvent, rotateSearchLog } from "./evidence-search-log.js";
 import { runEvidenceReport } from "./evidence-report.js";
 import { migrateExistingPagesForEvidence } from "./evidence-migration.js";
 import { absentDeterministic, strongDeterministic, type EvidenceEnvelope } from "./evidence.js";
+import { runOkfFormatCheck } from "./okf.js";
 import { join, resolve, basename, extname } from "node:path";
 import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob, safePath } from "./wiki.js";
 import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
@@ -386,6 +387,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           "Wiki administration and maintenance. Select `action` to control behavior:\n" +
           "- `init`: Initialize a new knowledge base — creates wiki/, raw/, schemas/ directories and default templates.\n" +
           "- `config`: Show current workspace configuration: directories, lint settings, search settings, entity templates.\n" +
+          "- `format-check`: Validate the portable OKF package manifest (`agent-wiki.yaml`) and required package directories against OKF v0.1.\n" +
           "- `rebuild`: Rebuild index.md, timeline.md, code knowledge graphs, and optionally the vector index (when search.hybrid is enabled). Set evidence_report=true to also regenerate the evidence report and persist it to wiki/evidence-report.md as part of the rebuild.\n" +
           "- `lint`: Run comprehensive health checks: contradictions, orphan pages, broken links, raw file integrity (SHA-256), synthesis page integrity. Set apply_fixes=true to auto-repair fixable issues.\n" +
           "- `evidence-report`: Aggregate evidence-first telemetry into a corpus-level Markdown report (source coverage, lineage diagnostics, 4-week write trend, Phase 2b readiness gates). Set write=true to also persist the report to wiki/evidence-report.md.",
@@ -394,7 +396,7 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           properties: {
             action: {
               type: "string",
-              enum: ["init", "config", "rebuild", "lint", "evidence-report"],
+              enum: ["init", "config", "format-check", "rebuild", "lint", "evidence-report"],
               description: "Administration action to perform",
             },
             path: {
@@ -2447,6 +2449,10 @@ export async function handleTool(
       }, null, 2);
     }
 
+    case "wiki_format_check": {
+      return JSON.stringify(runOkfFormatCheck(wiki.config), null, 2);
+    }
+
     // wiki_schemas removed — merged into wiki_config
 
     case "wiki_rebuild": {
@@ -3286,10 +3292,11 @@ export async function handleTool(
       switch (action) {
         case "init": return handleTool(wiki, "wiki_init", args, opts);
         case "config": return handleTool(wiki, "wiki_config", args, opts);
+        case "format-check": return handleTool(wiki, "wiki_format_check", args, opts);
         case "rebuild": return handleTool(wiki, "wiki_rebuild", args, opts);
         case "lint": return handleTool(wiki, "wiki_lint", args, opts);
         case "evidence-report": return handleTool(wiki, "wiki_evidence_report", args, opts);
-        default: throw new Error(`Unknown wiki_admin action: "${action}". Expected: init | config | rebuild | lint | evidence-report`);
+        default: throw new Error(`Unknown wiki_admin action: "${action}". Expected: init | config | format-check | rebuild | lint | evidence-report`);
       }
     }
 

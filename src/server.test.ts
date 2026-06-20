@@ -2272,6 +2272,118 @@ describe("consolidated tool: wiki_admin", () => {
     expect(parsed).toHaveProperty("search");
   });
 
+  it("action:format-check reports a missing OKF manifest", async () => {
+    const wiki = freshWiki();
+    const result = await handleTool(wiki, "wiki_admin", { action: "format-check" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.format).toBe("agent-wiki-okf");
+    expect(parsed.expectedFormatVersion).toBe("0.1");
+    expect(parsed.checked.manifest).toBe(false);
+    expect(parsed.issues.some((issue: any) => issue.message.includes("Missing agent-wiki.yaml"))).toBe(true);
+  });
+
+  it("action:format-check accepts a valid OKF v0.1 manifest", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(TEST_ROOT, "agent-wiki.yaml"), `format: agent-wiki-okf
+format_version: 0.1
+name: payroll-modernization-knowledge
+version: 0.1.0
+license: internal-proprietary
+owner: platform-team
+created_at: 2026-06-20
+generator:
+  name: agent-wiki
+  version: 0.22.4
+source_policy:
+  raw_immutable: true
+  require_sha256: true
+wiki_policy:
+  require_sources_for_grounded_pages: true
+  allow_synthesis_pages: true
+evidence_policy:
+  allow_unsupported_pages: warn
+  require_abstain_signal: true
+`);
+    const result = await handleTool(wiki, "wiki_admin", { action: "format-check" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.manifest.name).toBe("payroll-modernization-knowledge");
+    expect(parsed.manifest.format_version).toBe("0.1");
+    expect(parsed.checked.rawDir).toBe(true);
+    expect(parsed.checked.wikiDir).toBe(true);
+    expect(parsed.checked.schemasDir).toBe(true);
+  });
+
+  it("action:format-check rejects unknown manifest fields", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(TEST_ROOT, "agent-wiki.yaml"), `format: agent-wiki-okf
+format_version: 0.1
+name: typo-check
+version: 0.1.0
+license: MIT
+onwer: typo-team
+owner: platform-team
+created_at: 2026-06-20
+source_policy:
+  raw_immutable: true
+  require_sha256: true
+wiki_policy:
+  require_sources_for_grounded_pages: true
+  allow_synthesis_pages: true
+evidence_policy:
+  allow_unsupported_pages: warn
+  require_abstain_signal: true
+`);
+    const result = await handleTool(wiki, "wiki_admin", { action: "format-check" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "agent-wiki.yaml.onwer",
+          message: expect.stringContaining("Unknown manifest field"),
+        }),
+      ]),
+    );
+  });
+
+  it("action:format-check rejects incompatible source policy", async () => {
+    const wiki = freshWiki();
+    writeFileSync(join(TEST_ROOT, "agent-wiki.yaml"), `format: agent-wiki-okf
+format_version: 0.1
+name: policy-check
+version: 0.1.0
+license: MIT
+owner: platform-team
+created_at: 2026-06-20
+source_policy:
+  raw_immutable: false
+  require_sha256: false
+wiki_policy:
+  require_sources_for_grounded_pages: true
+  allow_synthesis_pages: true
+evidence_policy:
+  allow_unsupported_pages: warn
+  require_abstain_signal: true
+`);
+    const result = await handleTool(wiki, "wiki_admin", { action: "format-check" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "agent-wiki.yaml:source_policy.raw_immutable",
+          message: expect.stringContaining("must be true"),
+        }),
+        expect.objectContaining({
+          path: "agent-wiki.yaml:source_policy.require_sha256",
+          message: expect.stringContaining("must be true"),
+        }),
+      ]),
+    );
+  });
+
   it("action:rebuild runs without error", async () => {
     const wiki = freshWiki();
     const result = await handleTool(wiki, "wiki_admin", { action: "rebuild" });

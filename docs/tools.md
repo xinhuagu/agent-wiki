@@ -21,7 +21,7 @@ agent-wiki exposes 15 public tools through the Model Context Protocol.
 | `wiki_delete` | Delete a page (guards system pages). Triggers index rebuild — stale indexes and empty dirs are cleaned up. |
 | `wiki_list` | List pages, filter by entity type or tag |
 | `wiki_search` | Full-text search with BM25 scoring, synonym expansion, fuzzy matching, and CJK support. Use `type` or `tags` to filter without a separate `wiki_list` call. Optional hybrid BM25+vector mode: enable `search.hybrid: true` in `.agent-wiki.yaml`, then run `wiki_admin` with `action: "rebuild"` to embed all pages. Returns `knowledge_gap` when no results found — includes suggested page slug, title, type, and tags for `wiki_write`. |
-| `wiki_admin` | Unified wiki maintenance tool. Select `action`: `init`, `config`, `rebuild`, `lint`, or `evidence-report`. `rebuild` regenerates indexes/timeline and search vectors; `lint` runs health checks and optional auto-fixes; `evidence-report` aggregates evidence-first telemetry into a corpus-level Markdown summary (see [Evidence-first surface](#evidence-first-surface) below). |
+| `wiki_admin` | Unified wiki maintenance tool. Select `action`: `init`, `config`, `format-check`, `rebuild`, `lint`, or `evidence-report`. `format-check` validates the portable OKF package manifest (`agent-wiki.yaml`) and required package directories; `rebuild` regenerates indexes/timeline and search vectors; `lint` runs health checks and optional auto-fixes; `evidence-report` aggregates evidence-first telemetry into a corpus-level Markdown summary (see [Evidence-first surface](#evidence-first-surface) below). |
 
 ## Code Analysis — Language Plugins
 
@@ -88,6 +88,26 @@ These tools were consolidated into other tools and are no longer part of the def
 | `wiki_init` / `wiki_config` / `wiki_rebuild` / `wiki_lint` | `wiki_admin` with `action` |
 | `code_trace_variable` / `code_impact` | `code_query` with `query_type` |
 | `knowledge_ingest_batch` / `knowledge_digest_write` | `knowledge_ingest` with `mode` |
+
+## Open Knowledge Format Checks
+
+`wiki_admin` with `action: "format-check"` validates the portable OKF package
+contract. It checks `agent-wiki.yaml` at the package root, validates the
+manifest against OKF v0.1 rules, and confirms that required package directories
+are present.
+
+```bash
+agent-wiki call wiki_admin '{"action":"format-check"}'
+```
+
+The response is a structured report with `ok`, `issues`, `manifestPath`,
+`packageRoot`, and `checked` fields. Missing or invalid manifests return
+`ok: false` with actionable issues; existing non-OKF workspaces still run
+normally.
+
+`agent-wiki.yaml` is the portable package manifest. `.agent-wiki.yaml` remains
+runtime/operator config for workspace paths, security settings, search tuning,
+and local plugin options.
 
 ## Directory Structure & Auto-Generated Indexes
 

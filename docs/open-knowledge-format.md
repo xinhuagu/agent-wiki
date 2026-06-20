@@ -101,9 +101,14 @@ source_policy:
 wiki_policy:
   require_sources_for_grounded_pages: true
   allow_synthesis_pages: true
+evidence_policy:
+  allow_unsupported_pages: warn
+  require_abstain_signal: true
 ```
 
-The manifest is the package contract. It should eventually be validated by `wiki_admin lint`.
+The manifest is the package contract. OKF v0.1 manifests are validated by
+`wiki_admin action: "format-check"` against
+`schemas/agent-wiki-okf.schema.json` and deterministic validation rules.
 
 ### `raw/`
 
@@ -243,8 +248,8 @@ A repository is OKF-aligned when:
 
 Near-term:
 
-1. Define `agent-wiki.yaml` schema.
-2. Add `wiki_admin action: "format-check"` or extend `wiki_admin lint`.
+1. Define `agent-wiki.yaml` schema. Done for OKF v0.1.
+2. Add `wiki_admin action: "format-check"`. Done for OKF v0.1.
 3. Emit package metadata during `wiki_admin rebuild`.
 4. Add export/import tests for raw, wiki, schemas, indexes, and evidence.
 

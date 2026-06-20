@@ -108,7 +108,10 @@ evidence_policy:
 
 The manifest is the package contract. OKF v0.1 manifests are validated by
 `wiki_admin action: "format-check"` against
-`schemas/agent-wiki-okf.schema.json` and deterministic validation rules.
+`schemas/agent-wiki-okf.schema.json` and deterministic validation rules. The
+same check now includes a package inventory and conformance findings; use
+`wiki_admin action: "rebuild"` with `okf_report: true` to persist that report at
+`evidence/okf-report.json`.
 
 ### `raw/`
 
@@ -250,7 +253,8 @@ Near-term:
 
 1. Define `agent-wiki.yaml` schema. Done for OKF v0.1.
 2. Add `wiki_admin action: "format-check"`. Done for OKF v0.1.
-3. Emit package metadata during `wiki_admin rebuild`.
+3. Emit package metadata during `wiki_admin rebuild`. Done as
+   `evidence/okf-report.json` with `okf_report: true`.
 4. Add export/import tests for raw, wiki, schemas, indexes, and evidence.
 
 Later:

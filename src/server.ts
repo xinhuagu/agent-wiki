@@ -22,7 +22,7 @@ import { appendSearchEvent, rotateSearchLog } from "./evidence-search-log.js";
 import { runEvidenceReport } from "./evidence-report.js";
 import { migrateExistingPagesForEvidence } from "./evidence-migration.js";
 import { absentDeterministic, strongDeterministic, type EvidenceEnvelope } from "./evidence.js";
-import { runOkfFormatCheck } from "./okf.js";
+import { buildOkfPackageReport, runOkfPackageReport } from "./okf.js";
 import { join, resolve, basename, extname } from "node:path";
 import { Wiki, splitSections, buildToc, findSectionByHeading, matchSimpleGlob, safePath } from "./wiki.js";
 import { extractDocument, chunkSegments, guessMime, type ExtractionSegment } from "./extraction.js";
@@ -387,8 +387,8 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
           "Wiki administration and maintenance. Select `action` to control behavior:\n" +
           "- `init`: Initialize a new knowledge base — creates wiki/, raw/, schemas/ directories and default templates.\n" +
           "- `config`: Show current workspace configuration: directories, lint settings, search settings, entity templates.\n" +
-          "- `format-check`: Validate the portable OKF package manifest (`agent-wiki.yaml`) and required package directories against OKF v0.1.\n" +
-          "- `rebuild`: Rebuild index.md, timeline.md, code knowledge graphs, and optionally the vector index (when search.hybrid is enabled). Set evidence_report=true to also regenerate the evidence report and persist it to wiki/evidence-report.md as part of the rebuild.\n" +
+          "- `format-check`: Validate the portable OKF package manifest (`agent-wiki.yaml`), package inventory, and conformance findings against OKF v0.1.\n" +
+          "- `rebuild`: Rebuild index.md, timeline.md, code knowledge graphs, and optionally the vector index (when search.hybrid is enabled). Set evidence_report=true to also regenerate the evidence report and persist it to wiki/evidence-report.md as part of the rebuild. Set okf_report=true to persist evidence/okf-report.json.\n" +
           "- `lint`: Run comprehensive health checks: contradictions, orphan pages, broken links, raw file integrity (SHA-256), synthesis page integrity. Set apply_fixes=true to auto-repair fixable issues.\n" +
           "- `evidence-report`: Aggregate evidence-first telemetry into a corpus-level Markdown report (source coverage, lineage diagnostics, 4-week write trend, Phase 2b readiness gates). Set write=true to also persist the report to wiki/evidence-report.md.",
         inputSchema: {
@@ -418,6 +418,10 @@ export function createServer(wikiPath?: string, workspace?: string): Server {
             evidence_report: {
               type: "boolean",
               description: "[rebuild] If true, also regenerate the evidence report and persist it to wiki/evidence-report.md as part of the rebuild. Useful for keeping the dashboard fresh without a separate evidence-report call. Default: false.",
+            },
+            okf_report: {
+              type: "boolean",
+              description: "[rebuild] If true, regenerate the OKF package inventory/conformance report and persist it to evidence/okf-report.json. Default: false.",
             },
           },
           required: ["action"],
@@ -1830,11 +1834,26 @@ function regenerateEvidenceReport(
   }
 }
 
+function regenerateOkfReport(
+  wiki: Wiki,
+): { ok: true; writtenTo: string } | { ok: false; error: string } {
+  try {
+    const result = runOkfPackageReport(wiki, { write: true });
+    if (!result.writtenTo) {
+      return { ok: false, error: "runOkfPackageReport(write:true) returned no writtenTo path" };
+    }
+    return { ok: true, writtenTo: result.writtenTo };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /**
- * Single source of truth for the post-rebuild evidence bookkeeping that
+ * Single source of truth for the post-rebuild evidence / OKF bookkeeping that
  * both `wiki_admin action:rebuild` (inline) and the end-of-batch rebuild
  * path execute: (1) one-shot migration of pre-existing pages, (2) weekly
- * digest line into wiki/log.md, (3) optional opt-in evidence-report regen.
+ * digest line into wiki/log.md, (3) optional opt-in evidence-report regen,
+ * (4) optional OKF package report regen.
  *
  * Returns:
  *   - `parts`: message fragments for the inline handler to append to its
@@ -1844,13 +1863,16 @@ function regenerateEvidenceReport(
  *   - `evidence`: the regen result when `regenerateReport` was true,
  *     `null` otherwise. Both call sites consume this to surface failure
  *     into their visible response shape.
+ *   - `okf`: the regen result when `regenerateOkfReport` was true,
+ *     `null` otherwise.
  */
 function runPostRebuildEvidence(
   wiki: Wiki,
-  opts: { regenerateReport: boolean },
+  opts: { regenerateReport: boolean; regenerateOkfReport: boolean },
 ): {
   parts: string[];
   evidence: { ok: true; writtenTo: string } | { ok: false; error: string } | null;
+  okf: { ok: true; writtenTo: string } | { ok: false; error: string } | null;
 } {
   const parts: string[] = [];
 
@@ -1888,7 +1910,8 @@ function runPostRebuildEvidence(
   } catch { /* never fails the rebuild */ }
 
   const evidence = opts.regenerateReport ? regenerateEvidenceReport(wiki) : null;
-  return { parts, evidence };
+  const okf = opts.regenerateOkfReport ? regenerateOkfReport(wiki) : null;
+  return { parts, evidence, okf };
 }
 
 export async function handleTool(
@@ -2450,7 +2473,7 @@ export async function handleTool(
     }
 
     case "wiki_format_check": {
-      return JSON.stringify(runOkfFormatCheck(wiki.config), null, 2);
+      return JSON.stringify(buildOkfPackageReport(wiki), null, 2);
     }
 
     // wiki_schemas removed — merged into wiki_config
@@ -2522,12 +2545,18 @@ export async function handleTool(
       // Single source of truth for post-rebuild evidence bookkeeping;
       // batch's end-of-batch path invokes the same helper for parity.
       const regenerateReport = (args.evidence_report as boolean) ?? false;
-      const bookkeeping = runPostRebuildEvidence(wiki, { regenerateReport });
+      const regenerateOkf = (args.okf_report as boolean) ?? false;
+      const bookkeeping = runPostRebuildEvidence(wiki, { regenerateReport, regenerateOkfReport: regenerateOkf });
       parts.push(...bookkeeping.parts);
       if (bookkeeping.evidence) {
         parts.push(bookkeeping.evidence.ok
           ? `Evidence report written to ${bookkeeping.evidence.writtenTo}`
           : `Evidence report regeneration failed: ${bookkeeping.evidence.error}`);
+      }
+      if (bookkeeping.okf) {
+        parts.push(bookkeeping.okf.ok
+          ? `OKF report written to ${bookkeeping.okf.writtenTo}`
+          : `OKF report regeneration failed: ${bookkeeping.okf.error}`);
       }
 
       // On regen failure, surface a structured field alongside ok:true so
@@ -2542,6 +2571,12 @@ export async function handleTool(
         response.evidenceReport = {
           ok: false,
           error: bookkeeping.evidence.error,
+        };
+      }
+      if (bookkeeping.okf && !bookkeeping.okf.ok) {
+        response.okfReport = {
+          ok: false,
+          error: bookkeeping.okf.error,
         };
       }
       return JSON.stringify(response);
@@ -3161,11 +3196,13 @@ export async function handleTool(
       // op from this batch — the end-of-batch rebuild block below regenerates
       // the report once so the opt-in flag survives dedup.
       let needsEvidenceReport = false;
+      let needsOkfReport = false;
       // Deferred entries from rebuild ops that asked for evidence_report:true.
       // Held by reference so we can mutate them in place on regen failure —
       // keeps the 1-op→1-result invariant and the established `{ tool, result }`
       // shape rather than introducing a sibling entry on failure.
       const rebuildEntriesAwaitingEvidence: Array<Record<string, unknown>> = [];
+      const rebuildEntriesAwaitingOkf: Array<Record<string, unknown>> = [];
 
       const results: Array<Record<string, unknown>> = [];
       for (const op of ops) {
@@ -3191,6 +3228,11 @@ export async function handleTool(
           if (opEvidenceReport) {
             needsEvidenceReport = true;
             rebuildEntriesAwaitingEvidence.push(entry);
+          }
+          const opOkfReport = (op.args?.okf_report as boolean) ?? false;
+          if (opOkfReport) {
+            needsOkfReport = true;
+            rebuildEntriesAwaitingOkf.push(entry);
           }
           continue;
         }
@@ -3256,6 +3298,7 @@ export async function handleTool(
         // produce equivalent side effects (log.md, .agent-wiki/ marker).
         const bookkeeping = runPostRebuildEvidence(wiki, {
           regenerateReport: needsEvidenceReport,
+          regenerateOkfReport: needsOkfReport,
         });
         if (bookkeeping.evidence && !bookkeeping.evidence.ok) {
           // Surface failure in-place on the deferred entry so the caller
@@ -3266,6 +3309,15 @@ export async function handleTool(
             entry.result = {
               ...prior,
               evidenceReport: { ok: false, error: bookkeeping.evidence.error },
+            };
+          }
+        }
+        if (bookkeeping.okf && !bookkeeping.okf.ok) {
+          for (const entry of rebuildEntriesAwaitingOkf) {
+            const prior = entry.result as Record<string, unknown>;
+            entry.result = {
+              ...prior,
+              okfReport: { ok: false, error: bookkeeping.okf.error },
             };
           }
         }

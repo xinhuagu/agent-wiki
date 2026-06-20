@@ -427,25 +427,31 @@ Acceptance criteria:
 
 ### Phase 2 - Package Inventory And Conformance Report
 
+Status: implemented as the first structured package report.
+
 Goal: turn current evidence and coverage surfaces into a package-level report.
 
 Deliverables:
 
 - Generate a package inventory:
-  - raw file count and hash status
-  - wiki page count by class
-  - schema list
-  - generated index/cache list
-  - evidence report presence
-- Add `okf-report.md` or structured `evidence/okf-report.json`.
-- Extend `wiki_admin action: "rebuild"` to optionally refresh OKF metadata.
+  - raw file count and hash status. Done.
+  - wiki page count by class. Done.
+  - schema list. Done.
+  - generated index/cache list. Done.
+  - evidence report presence. Done.
+- Add `okf-report.md` or structured `evidence/okf-report.json`. Done as
+  `evidence/okf-report.json`.
+- Extend `wiki_admin action: "rebuild"` to optionally refresh OKF metadata. Done
+  with `okf_report: true`.
 
 Acceptance criteria:
 
-- Report can answer: "Is this knowledge package OKF v0.1 conformant?"
-- Missing raw metadata, broken sources, unsupported pages, and malformed
-  frontmatter are surfaced as explicit findings.
-- Generated caches do not become required for conformance.
+- Report can answer: "Is this knowledge package OKF v0.1 conformant?" Done via
+  `conformance.status`, `errorCount`, `warningCount`, and `infoCount`.
+- Missing raw metadata, uncovered sources, unsupported pages, stale pages, and
+  unclassified frontmatter are surfaced as explicit findings.
+- Generated caches do not become required for conformance. Done; vector index is
+  reported as optional cache presence.
 
 ### Phase 3 - Evidence Export
 
@@ -524,27 +530,27 @@ Suggested README positioning:
 
 ## Recommended Next Engineering Issue
 
-Start with Phase 2.
+Start with Phase 3.
 
 Issue title:
 
-> Add OKF package inventory and conformance report
+> Export portable OKF evidence artifacts
 
 Scope:
 
-- generate `evidence/okf-report.json` or `okf-report.md`
-- include raw count/hash status, wiki page classes, schema list, generated index
-  inventory, and evidence report presence
-- extend `wiki_admin action: "rebuild"` with optional OKF metadata refresh
-- add tests for grounded, synthesis, unsupported, stale, and missing-source cases
-- document the report fields in `docs/tools.md`
+- generate `evidence/source-coverage.json`
+- generate `evidence/page-classes.json`
+- add a first `evidence/claim-provenance.json` pass from page frontmatter
+- keep `.agent-wiki/*.jsonl` as local operational telemetry by default
+- add an explicit export option if raw telemetry logs should be included
 
 Why this first:
 
-- Phase 1 already makes OKF detectable.
-- Phase 2 makes OKF auditable as a package, not only valid as a manifest.
-- It creates the evidence artifact export/import will later move across machines.
-- It keeps generated caches optional while making package health measurable.
+- Phase 2 now creates a package-level OKF report.
+- Phase 3 splits that summary into portable evidence artifacts that other agents
+  can consume without parsing local telemetry logs.
+- These artifacts are the natural bridge to Phase 4 export/import.
+- It keeps privacy boundaries clear before package distribution is added.
 
 ## References
 

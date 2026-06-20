@@ -25,6 +25,29 @@ function cleanUp() {
   }
 }
 
+function writeValidOkfManifest(root = TEST_ROOT) {
+  writeFileSync(join(root, "agent-wiki.yaml"), `format: agent-wiki-okf
+format_version: 0.1
+name: payroll-modernization-knowledge
+version: 0.1.0
+license: internal-proprietary
+owner: platform-team
+created_at: 2026-06-20
+generator:
+  name: agent-wiki
+  version: 0.22.4
+source_policy:
+  raw_immutable: true
+  require_sha256: true
+wiki_policy:
+  require_sources_for_grounded_pages: true
+  allow_synthesis_pages: true
+evidence_policy:
+  allow_unsupported_pages: warn
+  require_abstain_signal: true
+`);
+}
+
 // We test the Wiki methods that the server handlers call,
 // since createServer() requires MCP transport setup.
 // This verifies the data layer that backs every tool.
@@ -2285,26 +2308,7 @@ describe("consolidated tool: wiki_admin", () => {
 
   it("action:format-check accepts a valid OKF v0.1 manifest", async () => {
     const wiki = freshWiki();
-    writeFileSync(join(TEST_ROOT, "agent-wiki.yaml"), `format: agent-wiki-okf
-format_version: 0.1
-name: payroll-modernization-knowledge
-version: 0.1.0
-license: internal-proprietary
-owner: platform-team
-created_at: 2026-06-20
-generator:
-  name: agent-wiki
-  version: 0.22.4
-source_policy:
-  raw_immutable: true
-  require_sha256: true
-wiki_policy:
-  require_sources_for_grounded_pages: true
-  allow_synthesis_pages: true
-evidence_policy:
-  allow_unsupported_pages: warn
-  require_abstain_signal: true
-`);
+    writeValidOkfManifest();
     const result = await handleTool(wiki, "wiki_admin", { action: "format-check" });
     const parsed = JSON.parse(result as string);
     expect(parsed.ok).toBe(true);
@@ -2313,6 +2317,36 @@ evidence_policy:
     expect(parsed.checked.rawDir).toBe(true);
     expect(parsed.checked.wikiDir).toBe(true);
     expect(parsed.checked.schemasDir).toBe(true);
+    expect(parsed.inventory.raw.total).toBe(0);
+    expect(parsed.inventory.wiki.classes.system).toBeGreaterThanOrEqual(3);
+    expect(parsed.conformance.status).toBe("pass");
+  });
+
+  it("action:format-check reports OKF package inventory and conformance warnings", async () => {
+    const wiki = freshWiki();
+    writeValidOkfManifest();
+    wiki.rawAdd("uncompiled.txt", { content: "source not yet compiled" });
+    wiki.write("unsupported-note.md", "---\ntitle: Unsupported Note\n---\nNo source yet.");
+
+    const result = await handleTool(wiki, "wiki_admin", { action: "format-check" });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.inventory.raw.total).toBe(1);
+    expect(parsed.inventory.raw.coverage.uncoveredRaw).toBe(1);
+    expect(parsed.inventory.wiki.classes.unsupported).toBe(1);
+    expect(parsed.conformance.warningCount).toBeGreaterThanOrEqual(2);
+    expect(parsed.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "raw/",
+          message: expect.stringContaining("not referenced"),
+        }),
+        expect.objectContaining({
+          path: "wiki/",
+          message: expect.stringContaining("marked unsupported"),
+        }),
+      ]),
+    );
   });
 
   it("action:format-check rejects unknown manifest fields", async () => {
@@ -2464,6 +2498,28 @@ evidence_policy:
     // exists only when regen failed (parity with the batch path's
     // deferred-entry mutation shape).
     expect(parsed.evidenceReport).toBeUndefined();
+  });
+
+  it("action:rebuild with okf_report:true writes the OKF package report", async () => {
+    const wiki = freshWiki();
+    writeValidOkfManifest();
+    const reportPath = join(wiki.config.workspace, "evidence", "okf-report.json");
+    expect(existsSync(reportPath)).toBe(false);
+    const result = await handleTool(wiki, "wiki_admin", {
+      action: "rebuild",
+      okf_report: true,
+    });
+    const parsed = JSON.parse(result as string);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.message).toMatch(/OKF report written/);
+    expect(parsed.okfReport).toBeUndefined();
+    expect(existsSync(reportPath)).toBe(true);
+    const report = JSON.parse(readFileSync(reportPath, "utf-8"));
+    expect(report.manifest.name).toBe("payroll-modernization-knowledge");
+    expect(report.inventory).toHaveProperty("raw");
+    expect(report.inventory).toHaveProperty("wiki");
+    expect(report.inventory.evidence.okfReport).toBe(true);
+    expect(report.conformance.status).toBe("pass");
   });
 
   it("action:rebuild without evidence_report leaves the report file untouched", async () => {
@@ -3172,6 +3228,28 @@ Extra content.` } },
     // Invariant: 1 op → 1 result entry. The evidence-report regen lives
     // inside the deferred rebuild's entry, never as a sibling that would
     // inflate `count` and break op→result alignment for callers.
+    const parsed = JSON.parse(result as string);
+    expect(parsed.count).toBe(1);
+    expect(parsed.results).toHaveLength(1);
+    expect(parsed.results[0].tool).toBe("wiki_admin");
+    expect(parsed.results[0].result?.deferred).toMatch(/rebuild/);
+  });
+
+  it("batch preserves okf_report:true on deduped wiki_admin rebuild", async () => {
+    const wiki = freshWiki();
+    writeValidOkfManifest();
+    const reportPath = join(wiki.config.workspace, "evidence", "okf-report.json");
+    expect(existsSync(reportPath)).toBe(false);
+    const result = await handleTool(wiki, "batch", {
+      operations: [
+        { tool: "wiki_admin", args: { action: "rebuild", okf_report: true } },
+      ],
+    });
+    expect(existsSync(reportPath)).toBe(true);
+    const report = JSON.parse(readFileSync(reportPath, "utf-8"));
+    expect(report.manifest.name).toBe("payroll-modernization-knowledge");
+    expect(report.inventory).toHaveProperty("raw");
+    expect(report.inventory.evidence.okfReport).toBe(true);
     const parsed = JSON.parse(result as string);
     expect(parsed.count).toBe(1);
     expect(parsed.results).toHaveLength(1);
